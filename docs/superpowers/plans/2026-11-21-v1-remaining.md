@@ -28,7 +28,7 @@
 - Auth rate limits: 5/min per email, 30/min per IP (`CF-Connecting-IP`, else peer); 429 with `Retry-After`.
 - Code start, forgot password and sign-up always answer 202 the same way (no account discovery).
 - Error body `{ "error": { "code", "message" } }` with the codes in spec 4.1.
-- Event envelope `{ id, source, type, tenant, occurred_at, data }`; `type` = `<entity>.<verb>.v<N>`; `data` ids only. Publish only inside the transaction that made the change.
+- Event envelope `{ id, source, type, tenant, occurred_at, data, kid, signature }`, signed with Ed25519 per source and verified before use; `type` = `<entity>.<verb>.v<N>`; `data` ids only. Publish only inside the transaction that made the change.
 - No model or provider name in code; models via the AI gateway (`MANDATE_AI_GATEWAY_URL`, model ids from env).
 - `thiserror`, no `unwrap`/`expect` outside tests and `main`, fmt, clippy `-D warnings`, `cargo deny`; Biome for TypeScript.
 
@@ -37,7 +37,7 @@
 1. **A session cookie or pending id from one tenant used against another** must be refused (lane B test `session_is_bound_to_its_tenant`).
 2. **Two people deciding the same approval at once** (web and stale tab): exactly one wins, the other gets 409 (lane C test `concurrent_decisions_one_wins`).
 3. **An approver removed from the team after approving** cannot have that approval spent (lane A test `approval_dies_with_approver_membership`).
-4. **A duplicated or replayed event** changes nothing the second time (lane F test `replayed_event_is_skipped`).
+4. **A duplicated, replayed or forged event** changes nothing (lane F tests `replayed_event_is_skipped`, `bad_signature_is_quarantined`).
 5. **A browser reconnecting mid-conversation** gets no duplicated or lost messages (lane D test `reconnect_resumes_after_last_event_id`).
 
 ---
@@ -73,7 +73,8 @@
 
 **Produces (other lanes code against these from day one):**
 - `pub struct Envelope { pub id: Uuid, pub source: Source, pub r#type: EventType, pub tenant: TenantId, pub occurred_at: OffsetDateTime, pub data: serde_json::Value }`
-- `pub enum Event { ApprovalRequested{approval: Uuid, agent: AgentId}, ApprovalDecided{approval: Uuid, decision: Decision, by: MemberId}, ConversationStarted{conversation: Uuid}, ConversationFinished{conversation: Uuid}, MemberRemoved{member: MemberId}, GrantCreated{grant: Uuid}, GrantRevoked{grant: Uuid} }` with `fn event_type(&self) -> &'static str` returning the `…v1` names from spec 6a.
+- `pub enum Event { ApprovalRequested{approval: Uuid, agent: AgentId}, ApprovalDecided{approval: Uuid, decision: Decision, by: MemberId}, ConversationStarted{conversation: Uuid}, ConversationFinished{conversation: Uuid}, GrantCreated{grant: Uuid}, GrantRevoked{grant: Uuid}, MemberCreated{member: MemberId, actor: Actor}, MemberUpdated{member: MemberId, actor: Actor}, MemberRemoved{member: MemberId, actor: Actor}, OrganizationCreated{actor: Actor} }` where `Actor` is `Member(MemberId) | Directory | System`.
+- Lifecycle variants (`Member*`, `OrganizationCreated`) are also written to `lifecycle_log` by `publish`, in the same transaction. with `fn event_type(&self) -> &'static str` returning the `…v1` names from spec 6a.
 - `pub async fn publish(tx: &mut Tx, event: Event) -> Result<(), StoreError>` (writes the outbox row in the caller's transaction).
 - `pub trait Handler { async fn handle(&self, tx: &mut Tx, env: &Envelope) -> Result<(), HandlerError>; }` and `pub fn consumer(name: &'static str, handler: impl Handler)` run by the binary.
 
@@ -83,10 +84,15 @@
 - [ ] Implement the types; generate `schema/events/v1.json` with `schemars` (add the dependency), and the test compares it to the checked-in file.
 - [ ] Run → PASS. Commit `events: versioned envelope and core event types`.
 
+### Task F1b: Signed envelopes
+
+- [ ] Failing unit tests: `envelope_signature_round_trips`, `tampered_envelope_fails`, `wrong_source_key_fails`, `unsigned_or_older_than_24h_is_rejected`.
+- [ ] Implement Ed25519 signing over canonical JSON (sorted keys, no whitespace) with `kid` and `signature` fields; keys from `MANDATE_EVENT_SIGNING_KEY` (PEM path) and a public-key map per source for verification. Run → PASS. Commit `events: sign and verify every envelope`.
+
 ### Task F2: Outbox and publish
 
-- [ ] Migration `0020_outbox.sql`: `outbox (tenant_id, id uuid, type, data jsonb, created_at, sent_at null)`, RLS forced.
-- [ ] Failing live test `publish_writes_in_the_callers_transaction` (rollback leaves no row) → implement `publish` → PASS. Commit.
+- [ ] Migration `0020_outbox.sql`: `outbox (tenant_id, id uuid, type, data jsonb, created_at, sent_at null)` and `lifecycle_log (tenant_id, event_id, type, member, actor, at)`, both RLS forced; app role: outbox INSERT/SELECT/UPDATE, lifecycle_log INSERT/SELECT only.
+- [ ] Failing live tests `publish_writes_in_the_callers_transaction` (rollback leaves no row) and `lifecycle_events_land_in_lifecycle_log` and `app_role_cannot_edit_lifecycle_log` → implement `publish` → PASS. Commit.
 
 ### Task F3: Publisher with two sinks
 
@@ -96,8 +102,8 @@
 ### Task F4: Consumer kit
 
 - [ ] Migration `0021_events_inbox.sql`: `events_inbox (consumer, event_id, at)`, global bookkeeping (comment why).
-- [ ] `consume.rs`: SQS FIFO long-poll (`MANDATE_QUEUE_<NAME>` env), decode, `events_inbox` dedupe in the handler's transaction, delete the message on success, leave it for redrive on failure, quarantine undecodable messages to a dead letter log. In-process consumers share the same dedupe.
-- [ ] Tests: `replayed_event_is_skipped`, `undecodable_message_is_quarantined`, `handler_failure_retries`. Commit.
+- [ ] `consume.rs`: verify the signature first (Task F1b), then SQS FIFO long-poll (`MANDATE_QUEUE_<NAME>` env), decode, `events_inbox` dedupe in the handler's transaction, delete the message on success, leave it for redrive on failure, quarantine undecodable messages to a dead letter log. In-process consumers share the same dedupe.
+- [ ] Tests: `replayed_event_is_skipped`, `undecodable_message_is_quarantined`, `bad_signature_is_quarantined`, `handler_failure_retries`. Commit.
 
 ### Task F5: Live bus test
 
@@ -131,7 +137,7 @@
 ### Task B4: Sign-up with a new organization; verify email
 
 - [ ] Failing tests: `sign_up_answers_next_verify_email`, `verify_email_creates_org_and_admin_member` (fake: organization created with `org_name`, membership role admin, tenant row, personal operator via the directory/upsert path), `resend_is_202`.
-- [ ] Implement. Commit.
+- [ ] Also: sign-up publishes `organization.created.v1` and `member.created.v1` (actor = the new member); a first sign-in that upserts a member publishes `member.created.v1` (actor = System). Tests: `sign_up_records_org_and_member_created`, `first_sign_in_records_member_created`. Commit.
 
 ### Task B5: Two-step
 
@@ -161,6 +167,10 @@
 
 - [ ] Migration `0010_names.sql`: `members.name`, `teams.name`, `agents.name`, `approvals.denied_at`, `approvals.denied_by`, `approvals.conversation`.
 - [ ] Failing tests: `directory_sync_stores_names`, `every_member_gets_a_personal_operator`, `removed_member_operator_is_disabled`. Implement in `identity.rs`. Commit.
+
+### Task C1b: Lifecycle events from directory sync
+
+- [ ] Failing tests: `directory_add_emits_member_created`, `directory_change_emits_member_updated`, `directory_removal_emits_member_removed_with_directory_actor`. Implement by calling `events::publish` in each sync transaction (stub until lane F merges). Commit.
 
 ### Task C2: decide_approval
 

@@ -237,8 +237,21 @@ and event types again and again without changing what already works.
   a dead-letter queue. A small consumer kit in `core/src/events/consume.rs` decodes the envelope,
   skips duplicates through an `events_inbox` table in the handler's transaction, and quarantines
   events it cannot decode. Adding a consumer is: one handler, one subscription rule, one queue.
+- **Signed events (owner's decision):** every envelope is signed with Ed25519 over its canonical
+  JSON (sorted keys, no whitespace), with one signing key per source (`mandate.core` now; each app
+  source gets its own key later). The signature and key id travel with the envelope
+  (`signature`, `kid`). Consumers verify before anything else and quarantine an event that fails
+  verification, is unsigned, comes from a source the key does not belong to, or is older than 24
+  hours. The signing key lives in Secrets Manager; the public keys ship with the consumers.
 - **First events:** `approval.requested.v1`, `approval.decided.v1`, `conversation.started.v1`,
-  `conversation.finished.v1`, `member.removed.v1`, `grant.created.v1`, `grant.revoked.v1`.
+  `conversation.finished.v1`, `grant.created.v1`, `grant.revoked.v1`, and the people lifecycle below.
+- **People lifecycle, for compliance (owner's decision, start small):** `member.created.v1`,
+  `member.updated.v1`, `member.removed.v1`, `organization.created.v1`. They are emitted wherever
+  the change happens (sign-up, first sign-in, directory sync, removal) and also written to an
+  append-only `lifecycle_log` table (tenant, event id, type, member id, actor, at; ids only, no
+  names or emails), so there is a durable record of who joined and left and when. The app role may
+  only insert and read it. Erasing a person's data on request (right to be forgotten) and retention
+  rules come in a later plan; this one makes sure every create and delete is recorded.
 - **First consumer:** the agent lane's resume step consumes `approval.decided.v1` from its queue
   (instead of polling the outbox in-process).
 - **Local and tests:** the same publisher and consumer kit run against an in-process sink when no
@@ -294,7 +307,8 @@ beyond section 6; OpenTofu module structure.
 2. Self-serve sign-up creates a new organization with the person as its admin.
 3. Team bots are on hold until eve is used to its full capacity.
 4. Events: the core's own events go on the EventBridge enhanced custom bus first; app events come
-   later and the bus is built so new sources and types can be added over and over.
+   later and the bus is built so new sources and types can be added over and over. Events are
+   signed, and people being created and removed is recorded for compliance from the start.
 5. The first end-to-end agent path is the web app; Slack and other channels come later through eve.
 
 ## 11. Lead's calls the owner can overrule
