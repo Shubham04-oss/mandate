@@ -1,6 +1,11 @@
 //! Agents a member may use: their personal operator and their teams' bots.
 use crate::api::org::person;
+use crate::api::stubs::{ApiError, Session};
 use crate::mcp::AppState;
+use crate::store::StoreError;
+use axum::Json;
+use axum::extract::State;
+use axum::routing::get;
 use serde_json::{Value, json};
 use sqlx::Row;
 use sqlx::postgres::PgRow;
@@ -14,7 +19,30 @@ pub(crate) const AGENT_JOINS: &str = "left join members om on om.tenant_id = g.t
      left join teams ot on ot.tenant_id = g.tenant_id and ot.id = g.owner_team";
 
 pub fn routes() -> axum::Router<Arc<AppState>> {
-    axum::Router::new()
+    axum::Router::new().route("/v1/agents", get(list))
+}
+
+/// `GET /v1/agents`: the agents the caller may use, disabled ones marked so.
+async fn list(State(s): State<Arc<AppState>>, session: Session) -> Result<Json<Value>, ApiError> {
+    let mut tx = s.store.begin(&session.tenant).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "select {AGENT_COLS} from agents g {AGENT_JOINS} \
+         where g.tenant_id = current_setting('mandate.tenant', true) \
+         and (g.owner_member = $1 or exists (select 1 from team_members tm \
+           where tm.tenant_id = g.tenant_id and tm.team_id = g.owner_team and tm.member_id = $1)) \
+         order by g.kind, g.id"
+    )))
+    .bind(session.member.as_str())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(StoreError::from)?;
+    tx.commit().await.map_err(StoreError::from)?;
+    let items = rows
+        .iter()
+        .map(|r| agent_view(r, ""))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)?;
+    Ok(Json(json!({ "items": items })))
 }
 
 /// `Agent`; `id` stands in when the agent row is gone, shown as disabled.
