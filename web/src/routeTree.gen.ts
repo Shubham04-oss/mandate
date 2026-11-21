@@ -9,152 +9,50 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as AppRouteImport } from './routes/_app'
-import { Route as AppIndexRouteImport } from './routes/_app/index'
-import { Route as AppActivityRouteImport } from './routes/_app/activity'
-import { Route as AppAgentsRouteImport } from './routes/_app/agents'
-import { Route as AppSettingsRouteImport } from './routes/_app/settings'
-import { Route as AppTeamsRouteImport } from './routes/_app/teams'
+import { Route as IndexRouteImport } from './routes/index'
 
-const AppRoute = AppRouteImport.update({
-  id: '/_app',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AppIndexRoute = AppIndexRouteImport.update({
+const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => AppRoute,
-} as any)
-const AppActivityRoute = AppActivityRouteImport.update({
-  id: '/activity',
-  path: '/activity',
-  getParentRoute: () => AppRoute,
-} as any)
-const AppAgentsRoute = AppAgentsRouteImport.update({
-  id: '/agents',
-  path: '/agents',
-  getParentRoute: () => AppRoute,
-} as any)
-const AppSettingsRoute = AppSettingsRouteImport.update({
-  id: '/settings',
-  path: '/settings',
-  getParentRoute: () => AppRoute,
-} as any)
-const AppTeamsRoute = AppTeamsRouteImport.update({
-  id: '/teams',
-  path: '/teams',
-  getParentRoute: () => AppRoute,
+  getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof AppIndexRoute
-  '/activity': typeof AppActivityRoute
-  '/agents': typeof AppAgentsRoute
-  '/settings': typeof AppSettingsRoute
-  '/teams': typeof AppTeamsRoute
+  '/': typeof IndexRoute
 }
 export interface FileRoutesByTo {
-  '/activity': typeof AppActivityRoute
-  '/agents': typeof AppAgentsRoute
-  '/settings': typeof AppSettingsRoute
-  '/teams': typeof AppTeamsRoute
-  '/': typeof AppIndexRoute
+  '/': typeof IndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/_app': typeof AppRouteWithChildren
-  '/_app/activity': typeof AppActivityRoute
-  '/_app/agents': typeof AppAgentsRoute
-  '/_app/settings': typeof AppSettingsRoute
-  '/_app/teams': typeof AppTeamsRoute
-  '/_app/': typeof AppIndexRoute
+  '/': typeof IndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/activity' | '/agents' | '/settings' | '/teams'
+  fullPaths: '/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/activity' | '/agents' | '/settings' | '/teams' | '/'
-  id:
-    | '__root__'
-    | '/_app'
-    | '/_app/activity'
-    | '/_app/agents'
-    | '/_app/settings'
-    | '/_app/teams'
-    | '/_app/'
+  to: '/'
+  id: '__root__' | '/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  AppRoute: typeof AppRouteWithChildren
+  IndexRoute: typeof IndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/_app': {
-      id: '/_app'
-      path: ''
-      fullPath: '/'
-      preLoaderRoute: typeof AppRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/_app/': {
-      id: '/_app/'
+    '/': {
+      id: '/'
       path: '/'
       fullPath: '/'
-      preLoaderRoute: typeof AppIndexRouteImport
-      parentRoute: typeof AppRoute
-    }
-    '/_app/activity': {
-      id: '/_app/activity'
-      path: '/activity'
-      fullPath: '/activity'
-      preLoaderRoute: typeof AppActivityRouteImport
-      parentRoute: typeof AppRoute
-    }
-    '/_app/agents': {
-      id: '/_app/agents'
-      path: '/agents'
-      fullPath: '/agents'
-      preLoaderRoute: typeof AppAgentsRouteImport
-      parentRoute: typeof AppRoute
-    }
-    '/_app/settings': {
-      id: '/_app/settings'
-      path: '/settings'
-      fullPath: '/settings'
-      preLoaderRoute: typeof AppSettingsRouteImport
-      parentRoute: typeof AppRoute
-    }
-    '/_app/teams': {
-      id: '/_app/teams'
-      path: '/teams'
-      fullPath: '/teams'
-      preLoaderRoute: typeof AppTeamsRouteImport
-      parentRoute: typeof AppRoute
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
     }
   }
 }
 
-interface AppRouteChildren {
-  AppActivityRoute: typeof AppActivityRoute
-  AppAgentsRoute: typeof AppAgentsRoute
-  AppSettingsRoute: typeof AppSettingsRoute
-  AppTeamsRoute: typeof AppTeamsRoute
-  AppIndexRoute: typeof AppIndexRoute
-}
-
-const AppRouteChildren: AppRouteChildren = {
-  AppActivityRoute: AppActivityRoute,
-  AppAgentsRoute: AppAgentsRoute,
-  AppSettingsRoute: AppSettingsRoute,
-  AppTeamsRoute: AppTeamsRoute,
-  AppIndexRoute: AppIndexRoute,
-}
-
-const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
-
 const rootRouteChildren: RootRouteChildren = {
-  AppRoute: AppRouteWithChildren,
+  IndexRoute: IndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
