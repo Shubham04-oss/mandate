@@ -7,6 +7,11 @@ use aws_sigv4::http_request::{
 };
 use aws_sigv4::sign::v4;
 use chromiumoxide::Browser;
+use chromiumoxide::cdp::browser_protocol::fetch::{
+    self, ContinueRequestParams, EventRequestPaused, FailRequestParams, RequestPattern,
+    RequestStage,
+};
+use chromiumoxide::cdp::browser_protocol::network::{ErrorReason, ResourceType};
 use chromiumoxide::cdp::browser_protocol::page::EventLoadEventFired;
 use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use futures::StreamExt;
@@ -92,6 +97,7 @@ impl AgentCoreBrowser {
         &self,
         url: &Url,
         fields: Option<&BTreeMap<String, String>>,
+        hosts: &[String],
     ) -> Result<Page, ToolError> {
         let started = self
             .client
@@ -101,9 +107,10 @@ impl AgentCoreBrowser {
             .send()
             .await
             .map_err(backend)?;
-        let result = tokio::time::timeout(OVERALL_TIMEOUT, self.drive(&started, url, fields))
-            .await
-            .unwrap_or_else(|_| Err(backend("browser call timed out")));
+        let result =
+            tokio::time::timeout(OVERALL_TIMEOUT, self.drive(&started, url, fields, hosts))
+                .await
+                .unwrap_or_else(|_| Err(backend("browser call timed out")));
         // Always stop: a leaked session bills until its timeout.
         let stop = self
             .client
@@ -126,6 +133,7 @@ impl AgentCoreBrowser {
         started: &aws_sdk_bedrockagentcore::operation::start_browser_session::StartBrowserSessionOutput,
         url: &Url,
         fields: Option<&BTreeMap<String, String>>,
+        hosts: &[String],
     ) -> Result<Page, ToolError> {
         let streams = started
             .streams()
@@ -148,8 +156,9 @@ impl AgentCoreBrowser {
                 .new_page(CreateTargetParams::new("about:blank"))
                 .await
                 .map_err(backend)?;
+            block_other_hosts(&page, hosts).await?;
             page.goto(url.as_str()).await.map_err(backend)?;
-            let landed = final_url(&page).await?;
+            let landed = final_url(&page, hosts).await?;
             if let Some(fields) = fields {
                 // The approval covers the approved origin, not wherever a redirect led.
                 if landed.origin() != url.origin() {
@@ -177,7 +186,7 @@ impl AgentCoreBrowser {
                 }
                 // ponytail: a form that submits without navigating times out here and we read the page as is.
                 let _ = tokio::time::timeout(NAV_TIMEOUT, loaded.next()).await;
-                final_url(&page).await?;
+                final_url(&page, hosts).await?;
             }
             let title: String = page
                 .evaluate("document.title")
@@ -191,6 +200,8 @@ impl AgentCoreBrowser {
                 .map_err(backend)?
                 .into_value()
                 .map_err(backend)?;
+            // Page script can navigate between the check above and the reads.
+            final_url(&page, hosts).await?;
             Ok(Page {
                 title,
                 text,
@@ -204,12 +215,56 @@ impl AgentCoreBrowser {
     }
 }
 
-/// The page's current URL, refused unless it passes the same checks as a requested URL.
-async fn final_url(page: &chromiumoxide::Page) -> Result<Url, ToolError> {
+fn allowed(url: &Url, hosts: &[String]) -> bool {
+    check_url(url).is_ok() && url.host_str().is_some_and(|h| hosts.iter().any(|a| a == h))
+}
+
+/// Fails every document request (top level, redirect hop or frame) to a host outside `hosts`
+/// before it is sent: a redirected GET already carries its data in the URL.
+async fn block_other_hosts(page: &chromiumoxide::Page, hosts: &[String]) -> Result<(), ToolError> {
+    let mut paused = page
+        .event_listener::<EventRequestPaused>()
+        .await
+        .map_err(backend)?;
+    page.execute(fetch::EnableParams {
+        patterns: Some(vec![RequestPattern {
+            url_pattern: None,
+            resource_type: Some(ResourceType::Document),
+            request_stage: Some(RequestStage::Request),
+        }]),
+        handle_auth_requests: None,
+    })
+    .await
+    .map_err(backend)?;
+    let page = page.clone();
+    let hosts = hosts.to_vec();
+    // Ends when the CDP handler is dropped; a request left paused times out the call (fail closed).
+    tokio::spawn(async move {
+        while let Some(ev) = paused.next().await {
+            let id = ev.request_id.clone();
+            let sent = if Url::parse(&ev.request.url).is_ok_and(|u| allowed(&u, &hosts)) {
+                page.execute(ContinueRequestParams::new(id)).await.map(drop)
+            } else {
+                page.execute(FailRequestParams::new(id, ErrorReason::BlockedByClient))
+                    .await
+                    .map(drop)
+            };
+            if sent.is_err() {
+                break;
+            }
+        }
+    });
+    Ok(())
+}
+
+/// The page's current URL, refused unless it passes the request checks and is on an allowed host.
+async fn final_url(page: &chromiumoxide::Page, hosts: &[String]) -> Result<Url, ToolError> {
     let disallowed = || backend("redirected to a disallowed url");
     let raw = page.url().await.map_err(backend)?.ok_or_else(disallowed)?;
     let url = Url::parse(&raw).map_err(|_| disallowed())?;
-    check_url(&url).map_err(|_| disallowed())?;
+    if !allowed(&url, hosts) {
+        return Err(disallowed());
+    }
     Ok(url)
 }
 
@@ -234,15 +289,16 @@ const SUBMIT_JS: &str = r#"(fields) => {
 
 #[async_trait]
 impl BrowserBackend for AgentCoreBrowser {
-    async fn read_page(&self, url: &Url) -> Result<Page, ToolError> {
-        self.run(url, None).await
+    async fn read_page(&self, url: &Url, hosts: &[String]) -> Result<Page, ToolError> {
+        self.run(url, None, hosts).await
     }
 
     async fn fill_and_submit(
         &self,
         url: &Url,
         fields: &BTreeMap<String, String>,
+        hosts: &[String],
     ) -> Result<Page, ToolError> {
-        self.run(url, Some(fields)).await
+        self.run(url, Some(fields), hosts).await
     }
 }

@@ -18,12 +18,14 @@ pub struct Page {
 }
 
 #[async_trait]
+/// `hosts` is every host the call may navigate to, redirects included; anything else is refused.
 pub trait BrowserBackend: Send + Sync {
-    async fn read_page(&self, url: &Url) -> Result<Page, ToolError>;
+    async fn read_page(&self, url: &Url, hosts: &[String]) -> Result<Page, ToolError>;
     async fn fill_and_submit(
         &self,
         url: &Url,
         fields: &BTreeMap<String, String>,
+        hosts: &[String],
     ) -> Result<Page, ToolError>;
 }
 
@@ -78,6 +80,11 @@ fn parse_url(args: &Value) -> Result<Url, ToolError> {
     Ok(url)
 }
 
+/// The one host of an already checked URL.
+fn own_host(url: &Url) -> Vec<String> {
+    url.host_str().map(str::to_owned).into_iter().collect()
+}
+
 fn to_json(mut page: Page) -> Value {
     if let Some((i, _)) = page.text.char_indices().nth(MAX_TEXT_CHARS) {
         page.text.truncate(i);
@@ -99,6 +106,13 @@ impl ReadPage {
             backend,
             read_hosts,
         }
+    }
+}
+
+impl ReadPage {
+    fn is_read(&self, url: &Url) -> bool {
+        url.host_str()
+            .is_some_and(|h| self.read_hosts.iter().any(|a| a == h))
     }
 }
 
@@ -128,12 +142,7 @@ impl Tool for ReadPage {
     }
     fn effect(&self, args: &Value) -> Effect {
         match parse_url(args) {
-            Ok(u)
-                if u.host_str()
-                    .is_some_and(|h| self.read_hosts.iter().any(|a| a == h)) =>
-            {
-                Effect::Read
-            }
+            Ok(u) if self.is_read(&u) => Effect::Read,
             _ => Effect::External,
         }
     }
@@ -147,7 +156,13 @@ impl Tool for ReadPage {
     }
     async fn call(&self, _: &Assertion, args: Value) -> Result<Value, ToolError> {
         let url = parse_url(&args)?;
-        Ok(to_json(self.backend.read_page(&url).await?))
+        // Same split as `effect`: a Read call may only reach the read allowlist.
+        let hosts = if self.is_read(&url) {
+            self.read_hosts.clone()
+        } else {
+            own_host(&url)
+        };
+        Ok(to_json(self.backend.read_page(&url, &hosts).await?))
     }
 }
 
@@ -180,6 +195,10 @@ impl Tool for SubmitForm {
             .iter()
             .map(|(k, v)| Ok((k.clone(), v.as_str().ok_or_else(bad)?.to_owned())))
             .collect::<Result<BTreeMap<_, _>, ToolError>>()?;
-        Ok(to_json(self.backend.fill_and_submit(&url, &fields).await?))
+        Ok(to_json(
+            self.backend
+                .fill_and_submit(&url, &fields, &own_host(&url))
+                .await?,
+        ))
     }
 }

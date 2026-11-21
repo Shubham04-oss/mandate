@@ -9,13 +9,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use url::Url;
 
+/// Echoes the host set it was given as the page title.
 struct Fake(String);
 
 #[async_trait]
 impl BrowserBackend for Fake {
-    async fn read_page(&self, _: &Url) -> Result<Page, ToolError> {
+    async fn read_page(&self, _: &Url, hosts: &[String]) -> Result<Page, ToolError> {
         Ok(Page {
-            title: "t".into(),
+            title: hosts.join(","),
             text: self.0.clone(),
             live_view_url: Some("https://live".into()),
         })
@@ -24,9 +25,10 @@ impl BrowserBackend for Fake {
         &self,
         _: &Url,
         f: &BTreeMap<String, String>,
+        hosts: &[String],
     ) -> Result<Page, ToolError> {
         Ok(Page {
-            title: "sent".into(),
+            title: hosts.join(","),
             text: format!("{f:?}"),
             live_view_url: None,
         })
@@ -65,7 +67,7 @@ async fn read_page_rejects_non_https_and_caps_text() {
         .await
         .unwrap();
     assert_eq!(out["text"].as_str().unwrap().chars().count(), 100_000);
-    assert_eq!(out["title"], "t");
+    assert_eq!(out["title"], "example.com");
     assert_eq!(out["live_view_url"], "https://live");
 }
 
@@ -99,7 +101,7 @@ async fn submit_form_rejects_non_string_fields() {
         )
         .await
         .unwrap();
-    assert_eq!(out["title"], "sent");
+    assert_eq!(out["title"], "example.com");
 }
 
 #[test]
@@ -123,6 +125,26 @@ fn read_page_is_read_only_for_listed_hosts() {
     for garbage in [json!({}), json!(null), json!({ "url": 1 }), json!("x")] {
         assert_eq!(tool.effect(&garbage), Effect::External, "{garbage}");
     }
+}
+
+#[tokio::test]
+async fn tools_pass_the_hosts_each_call_may_reach() {
+    let b: Arc<dyn BrowserBackend> = Arc::new(Fake(String::new()));
+    let read = ReadPage::new(b.clone(), vec!["a.test".into(), "b.test".into()]);
+    let submit = SubmitForm::new(b);
+    let title = |v: serde_json::Value| v["title"].as_str().unwrap().to_owned();
+    // Read: the whole allowlist, so a redirect between listed hosts still works.
+    let out = read
+        .call(&who(), json!({ "url": "https://a.test/x" }))
+        .await;
+    assert_eq!(title(out.unwrap()), "a.test,b.test");
+    // External: only the approved host, so no redirect can leave it.
+    let out = read
+        .call(&who(), json!({ "url": "https://c.test/x" }))
+        .await;
+    assert_eq!(title(out.unwrap()), "c.test");
+    let args = json!({ "url": "https://a.test:8443/f", "fields": { "q": "x" } });
+    assert_eq!(title(submit.call(&who(), args).await.unwrap()), "a.test");
 }
 
 #[tokio::test]
@@ -202,7 +224,10 @@ async fn agentcore_reads_example_com() {
     }
     let b = mandate::tools::agentcore::AgentCoreBrowser::new(&cfg, id);
     let page = b
-        .read_page(&Url::parse("https://example.com").unwrap())
+        .read_page(
+            &Url::parse("https://example.com").unwrap(),
+            &["example.com".into()],
+        )
         .await
         .unwrap();
     assert!(page.title.contains("Example Domain"));
