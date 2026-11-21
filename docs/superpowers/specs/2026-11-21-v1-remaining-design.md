@@ -214,13 +214,48 @@ New migrations, numbered by lane to avoid collisions (section 8):
 - 6.5 `core/sql/app_role.sql` grows with each lane, least privilege.
 - 6.6 Brokering later: nothing here assumes one agent per conversation or one approver per approval.
 
+## 6a. Events (EventBridge enhanced custom bus)
+
+Owner's decision (2026-11-21): the core's own events go on the bus first; app events (a new email,
+a ticket assigned) follow later and are equally important, so the bus is built to take new sources
+and event types again and again without changing what already works.
+
+- **Bus:** one EventBridge enhanced custom bus per environment, `mandate-<env>` (the relaunched
+  custom bus, API `eventsv2`, Rust crate `aws-sdk-eventbridgev2`).
+- **Envelope (stable, versioned):** `{ id, source, type, tenant, occurred_at, data }`.
+  `source` is `mandate.core` now; app events will use `mandate.app.<provider>` (for example
+  `mandate.app.gmail`). `type` is `<entity>.<verb>.v<N>` (for example `approval.decided.v1`); a
+  breaking change is a new version, never an edit. `data` carries ids only, never message text,
+  arguments, emails or tokens. The envelope and each event's `data` are Rust types in
+  `core/src/events/`, with a JSON Schema generated from them and checked in, so new sources add
+  types, not code paths.
+- **Publishing:** state changes write an `outbox` row in the same transaction (lane F adds the
+  table and a `publish(tx, event)` function the other lanes call); a publisher sends unsent rows to the bus with
+  `EventGroupId` = tenant, so each organization's events arrive in order, and
+  `DeduplicationId` = event id. At least once; consumers deduplicate.
+- **Consuming:** each consumer has its own FIFO subscriber delivering to its own SQS FIFO queue with
+  a dead-letter queue. A small consumer kit in `core/src/events/consume.rs` decodes the envelope,
+  skips duplicates through an `events_inbox` table in the handler's transaction, and quarantines
+  events it cannot decode. Adding a consumer is: one handler, one subscription rule, one queue.
+- **First events:** `approval.requested.v1`, `approval.decided.v1`, `conversation.started.v1`,
+  `conversation.finished.v1`, `member.removed.v1`, `grant.created.v1`, `grant.revoked.v1`.
+- **First consumer:** the agent lane's resume step consumes `approval.decided.v1` from its queue
+  (instead of polling the outbox in-process).
+- **Local and tests:** the same publisher and consumer kit run against an in-process sink when no
+  bus is configured (`MANDATE_EVENT_BUS` unset), so tests need no AWS; one ignored live test
+  publishes to and consumes from the real dev bus.
+- **Later, app events:** they enter through a connector that turns a provider's webhook or poll
+  into envelopes with `source = mandate.app.<provider>`; agents subscribe by rule. Nothing in this
+  plan builds a connector, but nothing blocks one.
+
 ## 7. Deploy (AWS dev)
 
 - **Infrastructure as code:** OpenTofu, in `infra/`, state in an S3 bucket with locking. The owner
   runs `tofu apply`; lanes only plan and validate.
 - **AWS (ap-south-1):** one VPC; Aurora PostgreSQL serverless (scales to zero) with the migration
   role and the app role from `core/sql/app_role.sql`; ECS Fargate services for the core and eve;
-  ECR; Secrets Manager (WorkOS key, assertion key, gateway key); KMS; a custom
+  ECR; the EventBridge enhanced custom bus with FIFO subscribers and SQS FIFO queues plus
+  dead-letter queues per consumer; Secrets Manager (WorkOS key, assertion key, gateway key); KMS; a custom
   AgentCore browser in PUBLIC network mode with recordings to S3; a Bedrock guardrail; CloudWatch
   logs; an IAM role for GitHub Actions deploys through OIDC (no long-lived keys).
 - **Cloudflare:** DNS for `api.` and `app.`; the API proxied to the core's load balancer; the web app
@@ -230,7 +265,7 @@ New migrations, numbered by lane to avoid collisions (section 8):
 
 ## 8. Lanes
 
-One plan, five lanes, one account each. Each lane works on branch `lane/<name>`, opens one PR to
+One plan, six lanes, one account each. Each lane works on branch `lane/<name>`, opens one PR to
 `main`, and touches only its files. The lead reviews and merges; on merge the lead rebases the
 next lanes if they touched shared files.
 
@@ -240,6 +275,7 @@ next lanes if they touched shared files.
 | **B. Sign-in API** | `core/src/api/auth.rs`, `core/src/api/session.rs`, `core/src/api/mod.rs` (created here), `core/tests/auth.rs` | `0005`–`0009` | A |
 | **C. Org, approvals and activity API** | `core/src/api/org.rs`, `core/src/api/approvals.rs`, `core/src/api/activity.rs`, `core/src/api/agents.rs`, `core/tests/api_*.rs` | `0010`–`0014` | A; uses B's session extractor (stubbed until B merges) |
 | **D. Your agent in the web app** | `core/src/api/conversations.rs`, `core/src/eve.rs`, `core/src/guard.rs`, `agents/**` (eve), `core/tests/conversations.rs` | `0015`–`0019` | A; uses B's session extractor and C's `decide_approval` outbox (stubbed until they merge) |
+| **F. Events** | `core/src/events/**`, `core/tests/events.rs`, `schema/events/**` | `0020`–`0024` | A; lanes C and D call its `publish` within their transactions (stubbed until F merges) |
 | **E. Deploy** | `infra/**`, `.github/workflows/deploy.yml`, `core/Dockerfile`, `agents/Dockerfile`, `docs/deploy.md` | none | none; applies only with the owner |
 
 Shared files (`core/src/main.rs`, `core/src/mcp.rs` router, `core/src/lib.rs`, `Cargo.toml`,
@@ -257,7 +293,9 @@ beyond section 6; OpenTofu module structure.
 1. Passwords, password reset and two-step are in v1 (matching the screens).
 2. Self-serve sign-up creates a new organization with the person as its admin.
 3. Team bots are on hold until eve is used to its full capacity.
-4. The first end-to-end agent path is the web app; Slack and other channels come later through eve.
+4. Events: the core's own events go on the EventBridge enhanced custom bus first; app events come
+   later and the bus is built so new sources and types can be added over and over.
+5. The first end-to-end agent path is the web app; Slack and other channels come later through eve.
 
 ## 11. Lead's calls the owner can overrule
 
