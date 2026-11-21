@@ -1,0 +1,11 @@
+entity Tenant;
+entity Member;
+entity Team;
+entity Agent in [Member, Team];
+entity Tool { effect: String };
+
+action invoke, invoke_unattended appliesTo {
+    principal: Agent,
+    resource: Tool,
+    context: { granted: Bool, standing: Bool, approved: Bool }
+};

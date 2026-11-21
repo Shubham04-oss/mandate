@@ -32,6 +32,24 @@
 11. **Dependencies** carry permissive licences and pass `cargo deny`; secrets never appear in code,
     tests, logs, commits or PR text.
 
+## Browser egress
+
+- **Document navigations** (top level, redirect hops, frames) are limited per call to the allowed
+  hosts and blocked before they are sent: the read allowlist for a Read call, the requested and
+  approved host otherwise.
+- **Popups and extra targets** (new windows or tabs, out-of-process frames, workers) are closed
+  after they are reported and fail the call; their first request may already have been sent.
+- **Requests made by page script** (fetch, images, beacons) are not blocked in v1. Read calls only
+  reach admin-allowlisted hosts, and every other call was approved by a person who saw the URL.
+  Network-layer enforcement through AgentCore Browser proxy configuration is the planned upgrade.
+- The configured AgentCore browser must use PUBLIC network mode.
+- `MANDATE_READ_HOSTS` is a data-egress allowlist, not only a reading list: a Read call runs
+  without approval, and its URL (query string included) can carry any data the agent holds to any
+  listed host. List only hosts the tenant trusts with that data.
+- `live_view_url` is not usable after a call returns: the browser session ends with the call. Live
+  view and human takeover need sessions that outlive a call; that is future work.
+- A backend failure reaches the agent as a generic error; the detail goes only to the operator log.
+
 ## What a compromise of each part can do
 
 - **eve:** stall or confuse conversations; request tools the core will refuse. No credentials, no
