@@ -255,6 +255,7 @@ pub async fn remove_member(tx: &mut Tx, member: &MemberId) -> Result<(), StoreEr
              and ((principal_kind = 'member' and principal_id = $1) or granted_by = $1)"
         ),
         format!("delete from team_members where tenant_id = {t} and member_id = $1"),
+        format!("delete from sessions where tenant_id = {t} and member = $1"),
         format!("delete from members where tenant_id = {t} and id = $1"),
         format!(
             "update agents set disabled = true where tenant_id = {t} and kind = 'personal' and owner_member = $1"

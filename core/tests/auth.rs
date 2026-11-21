@@ -2208,3 +2208,104 @@ async fn invite_accept_with_code() {
         tenant_of(&inviter.memberships[0].org).as_str()
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn me_returns_person_org_orgs_and_flags() {
+    let h = Harness::new().await;
+    let u = h.user("admin");
+    let cookie = signed_in(&h, &u).await;
+    let tenant = tenant_of(&u.memberships[0].org);
+    // A team the member belongs to shows up.
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    let member = mandate::store::member_for_workos_user(&mut tx, &u.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let team = mandate::ids::TeamId::parse("eng").unwrap();
+    mandate::store::upsert_team(&mut tx, &team, "group_eng")
+        .await
+        .unwrap();
+    mandate::store::set_team_member(&mut tx, &team, &member, true)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let me = body_json(r).await;
+    assert_eq!(
+        me["person"],
+        json!({ "id": member, "name": "Ann Lee", "email": u.email, "avatar_url": null })
+    );
+    assert_eq!(
+        me["org"],
+        json!({ "id": tenant, "name": "Acme", "summary": { "people": 1, "agents": 1 } })
+    );
+    assert_eq!(
+        me["orgs"],
+        json!([{ "id": tenant, "name": "Acme", "summary": { "people": 1, "agents": 1 } }])
+    );
+    assert_eq!(me["mfa_enabled"], false);
+    assert_eq!(me["is_admin"], true);
+    assert_eq!(me["teams"], json!([{ "id": "eng", "name": "eng" }]));
+
+    let r = h.get("/v1/me", None).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(r).await["error"]["code"], "forbidden");
+}
+
+#[tokio::test]
+#[ignore]
+async fn sign_out_deletes_session_and_clears_cookie() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let cookie = signed_in(&h, &u).await;
+    let r = h
+        .app
+        .clone()
+        .oneshot(with_cookie(
+            auth_post("/v1/auth/sign-out", &h.ip, json!({})),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    let set = r.headers()[header::SET_COOKIE].to_str().unwrap();
+    assert!(
+        set.starts_with("mandate_session=;") && set.contains("Max-Age=0"),
+        "{set}"
+    );
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    // The row itself is gone, not only expired.
+    let tenant = tenant_of(&u.memberships[0].org);
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    assert!(session::profile(&mut tx, &cookie).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn removed_member_session_is_gone() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let cookie = signed_in(&h, &u).await;
+    let tenant = tenant_of(&u.memberships[0].org);
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    let member = mandate::store::member_for_workos_user(&mut tx, &u.id)
+        .await
+        .unwrap()
+        .unwrap();
+    mandate::store::remove_member(&mut tx, &member)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    assert!(
+        session::profile(&mut tx, &cookie).await.unwrap().is_none(),
+        "deleted at once"
+    );
+    drop(tx);
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}

@@ -1,7 +1,7 @@
 //! Sign-in through WorkOS's headless User Management API. WorkOS proves the person; the core
 //! decides which tenant and member that is and issues its own session. The browser never sees
 //! a WorkOS token, and WorkOS's error text never leaves this module.
-use super::session::{self, NewPending};
+use super::session::{self, NewPending, Session};
 use super::{ApiError, ApiState, Input, ratelimit};
 use crate::identity::slug;
 use crate::ids::{MemberId, TenantId};
@@ -393,10 +393,12 @@ pub(crate) fn routes(state: &Arc<ApiState>) -> Router<Arc<ApiState>> {
         .route("/v1/auth/password/reset", post(reset))
         .route("/v1/auth/invite/{token}", get(invite))
         .route("/v1/auth/invite/{token}/accept", post(invite_accept))
+        .route("/v1/auth/sign-out", post(sign_out))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit,
         ))
+        .route("/v1/me", get(me_route))
 }
 
 async fn code_start(State(s): State<Arc<ApiState>>, Input(b): Input<EmailOnly>) -> StatusCode {
@@ -995,6 +997,39 @@ async fn invite_accept(
         _ => return Err(ApiError::invalid_input()),
     };
     outcome(&s, r).await
+}
+
+async fn me_route(
+    State(s): State<Arc<ApiState>>,
+    who: Session,
+    headers: HeaderMap,
+) -> Result<axum::Json<Value>, ApiError> {
+    let token = session::cookie(&headers).ok_or_else(ApiError::signed_out)?;
+    let mut tx = s.store.begin(&who.tenant).await?;
+    let profile = session::profile(&mut tx, token)
+        .await?
+        .ok_or_else(ApiError::signed_out)?;
+    let me = me(&mut tx, &who.tenant, &who.member, who.is_admin, &profile).await?;
+    tx.commit().await?;
+    Ok(axum::Json(me))
+}
+
+/// Ends this browser's session at once; 204 even without one, so a stale tab can sign out.
+async fn sign_out(
+    State(s): State<Arc<ApiState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if let Some(token) = session::cookie(&headers)
+        && let Some(tenant) = session::token_tenant(token)
+    {
+        let mut tx = s.store.begin(&tenant).await?;
+        session::delete(&mut tx, token).await?;
+        tx.commit().await?;
+    }
+    let mut r = StatusCode::NO_CONTENT.into_response();
+    r.headers_mut()
+        .insert(header::SET_COOKIE, session::clear_cookie());
+    Ok(r)
 }
 
 /// An org as the web app sees it; its id is the tenant id the org has (or will have).
