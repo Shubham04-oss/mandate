@@ -1,3 +1,5 @@
+import type { ConnectedTool, ToolGroup } from "#/lib/tools.ts";
+
 // ponytail: sample people and organizations so the screens render as designed. Each value will come
 // from the core (the person's email, their invitation, their organizations) once the forms are wired.
 export const sample = {
@@ -106,4 +108,233 @@ export const sample = {
 		},
 	],
 	handledToday: 6,
+	// Settings → Tools
+	tools: {
+		accessOptions: [
+			{ value: "everyone", label: "Everyone" },
+			{ value: "you", label: "Only you" },
+			{ value: "engineering", label: "Engineering" },
+			{ value: "finance", label: "Finance" },
+		],
+		connected: [
+			{
+				id: "slack",
+				name: "Slack",
+				logo: "slack",
+				status: "connected",
+				access: "everyone",
+				detail: "14 channels",
+				events: [
+					{
+						id: "mention",
+						title: "You're mentioned",
+						detail: "Live · 212 this week",
+						on: true,
+					},
+					{
+						id: "dm",
+						title: "A direct message arrives",
+						detail: "Live · 48 this week",
+						on: true,
+					},
+				],
+			},
+			{
+				id: "github",
+				name: "GitHub",
+				logo: "github",
+				status: "connected",
+				access: "engineering",
+				detail: "3 repos",
+				events: [
+					{
+						id: "push",
+						title: "Push",
+						detail: "Live · 128 deliveries",
+						on: true,
+					},
+					{
+						id: "pr",
+						title: "Pull request opened",
+						detail: "Live · 37 deliveries",
+						on: true,
+					},
+					{
+						id: "issue",
+						title: "New issue",
+						detail: "Turned off after repeated failures",
+						on: false,
+					},
+				],
+			},
+			{
+				id: "notion",
+				name: "Notion",
+				logo: "notion",
+				status: "connected",
+				access: "everyone",
+				detail: "38 pages",
+				events: [],
+			},
+			{
+				id: "gmail",
+				name: "Gmail",
+				logo: "gmail",
+				status: "connecting",
+				access: "you",
+				detail: "Waiting for Google",
+				events: [],
+			},
+			{
+				id: "drive",
+				name: "Google Drive",
+				logo: "googledrive",
+				status: "connected",
+				access: "everyone",
+				detail: "52 files",
+				events: [],
+			},
+			{
+				id: "linear",
+				name: "Linear",
+				logo: "linear",
+				status: "expired",
+				access: "engineering",
+				detail: "Sign-in expired",
+				events: [],
+			},
+		] satisfies ConnectedTool[] as ConnectedTool[],
+		catalog: [
+			{
+				title: "Communication",
+				description: "Conversations, meetings and calendars.",
+				tools: [
+					{
+						id: "discord",
+						name: "Discord",
+						logo: "discord",
+						description: "Read and post in your servers' channels.",
+					},
+					{
+						id: "zoom",
+						name: "Zoom",
+						logo: "zoom",
+						description: "Schedule meetings and read their summaries.",
+					},
+					{
+						id: "gcal",
+						name: "Google Calendar",
+						logo: "googlecalendar",
+						description: "See free time and book meetings.",
+					},
+					{
+						id: "intercom",
+						name: "Intercom",
+						logo: "intercom",
+						description: "Read and answer customer conversations.",
+					},
+				],
+			},
+			{
+				title: "Planning & projects",
+				description: "Keep work moving across every team.",
+				tools: [
+					{
+						id: "asana",
+						name: "Asana",
+						logo: "asana",
+						description: "Create and update tasks and projects.",
+					},
+					{
+						id: "trello",
+						name: "Trello",
+						logo: "trello",
+						description: "Move cards and keep boards current.",
+					},
+					{
+						id: "jira",
+						name: "Jira",
+						logo: "jira",
+						description: "Find, create and update issues.",
+						keyFields: [
+							{
+								id: "token",
+								label: "API token",
+								help: "Create one at id.atlassian.com → Security → API tokens.",
+								secret: true,
+							},
+							{ id: "email", label: "Atlassian email" },
+							{
+								id: "site",
+								label: "Jira site",
+								help: "The part before .atlassian.net.",
+							},
+						],
+					},
+				],
+			},
+			{
+				title: "Files & knowledge",
+				description: "Where your team's documents live.",
+				tools: [
+					{
+						id: "dropbox",
+						name: "Dropbox",
+						logo: "dropbox",
+						description: "Find and read files and folders.",
+					},
+					{
+						id: "airtable",
+						name: "Airtable",
+						logo: "airtable",
+						description: "Read and update bases and records.",
+					},
+					{
+						id: "confluence",
+						name: "Confluence",
+						logo: "confluence",
+						description: "Search and read pages and spaces.",
+					},
+				],
+			},
+			{
+				title: "Build & business",
+				description: "Code, design, payments and customers.",
+				tools: [
+					{
+						id: "figma",
+						name: "Figma",
+						logo: "figma",
+						description: "Read files, frames and comments.",
+					},
+					{
+						id: "stripe",
+						name: "Stripe",
+						logo: "stripe",
+						description: "Look up customers, payments and invoices.",
+						keyFields: [
+							{
+								id: "key",
+								label: "Restricted key",
+								help: "Use a read-only restricted key from the Stripe dashboard.",
+								secret: true,
+							},
+						],
+					},
+					{
+						id: "hubspot",
+						name: "HubSpot",
+						logo: "hubspot",
+						description: "Read and update contacts and deals.",
+					},
+					{
+						id: "zendesk",
+						name: "Zendesk",
+						logo: "zendesk",
+						description: "Read and answer support tickets.",
+					},
+				],
+			},
+		] satisfies ToolGroup[] as ToolGroup[],
+	},
 };

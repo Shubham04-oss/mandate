@@ -1,6 +1,12 @@
-import { Link, useMatches } from "@tanstack/react-router";
+import {
+	Link,
+	useMatches,
+	useNavigate,
+	useSearch,
+} from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
+import { SettingsDialog } from "#/components/settings/settings-dialog.tsx";
 import { Avatar, AvatarGroup, AvatarImage } from "#/components/ui/avatar.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import {
@@ -27,7 +33,13 @@ declare module "@tanstack/react-router" {
 	}
 }
 
-type RailItem = { label: string; icon: IconName; to?: "/"; count?: number };
+type RailItem = {
+	label: string;
+	icon: IconName;
+	to?: "/";
+	count?: number;
+	onClick?: () => void;
+};
 
 // ponytail: only Home exists; the rest become links as their pages are built.
 const railItems: RailItem[] = [
@@ -77,6 +89,7 @@ function RailButton({ item }: { item: RailItem }) {
 							size="icon"
 							aria-label={label}
 							className={look}
+							onClick={item.onClick}
 						/>
 					)
 				}
@@ -118,7 +131,7 @@ function NeedsTab() {
  * Below the split width the rail is gone and the same places open from the header instead, so the
  * canvas keeps the whole width of a phone.
  */
-function HeaderMenu() {
+function HeaderMenu({ onSettings }: { onSettings: () => void }) {
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger
@@ -172,8 +185,7 @@ function HeaderMenu() {
 				</DropdownMenuGroup>
 				<DropdownMenuSeparator />
 				<DropdownMenuGroup>
-					{/* ponytail: opens the settings pop-up once it exists */}
-					<DropdownMenuItem>
+					<DropdownMenuItem onClick={onSettings}>
 						<Icon name="settings" strokeWidth={1.8} />
 						Settings
 					</DropdownMenuItem>
@@ -193,6 +205,14 @@ function HeaderMenu() {
 // The app frame: a collapsed rail and a header on the surround colour, the canvas below them.
 // The header is as tall as the rail is wide, so the frame reads evenly on both sides.
 export function AppShell({ children }: { children: ReactNode }) {
+	// Settings is a pop-up kept in the address (?settings=tools), so it survives a reload and Back closes it.
+	const settings = useSearch({ strict: false, select: (s) => s.settings });
+	const navigate = useNavigate();
+	const setSettings = (open: boolean) =>
+		navigate({
+			to: ".",
+			search: (prev) => ({ ...prev, settings: open ? "tools" : undefined }),
+		});
 	const title = useMatches({
 		select: (matches) =>
 			[...matches].reverse().find((m) => m.staticData.title)?.staticData.title,
@@ -215,8 +235,13 @@ export function AppShell({ children }: { children: ReactNode }) {
 						<RailButton key={item.label} item={item} />
 					))}
 					<span className="flex-1" />
-					{/* ponytail: opens the settings pop-up once it exists */}
-					<RailButton item={{ label: "Settings", icon: "settings" }} />
+					<RailButton
+						item={{
+							label: "Settings",
+							icon: "settings",
+							onClick: () => setSettings(true),
+						}}
+					/>
 					<Avatar className="mt-1.5 size-[30px]">
 						<AvatarImage src={sample.me.avatar} alt={sample.me.name} />
 					</Avatar>
@@ -225,7 +250,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 				<div className="flex min-w-0 flex-1 flex-col">
 					<header className="relative flex h-12 flex-none items-center justify-center bg-background">
 						<div className="absolute top-2 left-2 split:hidden">
-							<HeaderMenu />
+							<HeaderMenu onSettings={() => setSettings(true)} />
 						</div>
 						<h1 className="m-0 font-semibold text-[15px]">{title}</h1>
 						<Avatar className="absolute top-2.5 right-3 size-7 split:hidden">
@@ -238,6 +263,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 					</main>
 				</div>
 			</div>
+			<SettingsDialog open={settings === "tools"} onOpenChange={setSettings} />
 		</TooltipProvider>
 	);
 }
