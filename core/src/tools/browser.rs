@@ -140,6 +140,9 @@ impl Tool for ReadPage {
     fn id(&self) -> &ToolId {
         &self.id
     }
+    fn description(&self) -> &'static str {
+        "Open an https page and return its title and text."
+    }
     fn effect(&self, args: &Value) -> Effect {
         match parse_url(args) {
             Ok(u) if self.is_read(&u) => Effect::Read,
@@ -170,6 +173,9 @@ impl Tool for ReadPage {
 impl Tool for SubmitForm {
     fn id(&self) -> &ToolId {
         &self.id
+    }
+    fn description(&self) -> &'static str {
+        "Fill the named fields of the form on an https page and submit it."
     }
     fn effect(&self, _: &Value) -> Effect {
         Effect::External

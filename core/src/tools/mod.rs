@@ -19,6 +19,8 @@ pub enum ToolError {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn id(&self) -> &ToolId;
+    /// Shown to the agent in `tools/list`.
+    fn description(&self) -> &'static str;
     /// Per call, so a tool can be `Read` for some args and `External` for others.
     fn effect(&self, args: &serde_json::Value) -> Effect;
     fn input_schema(&self) -> serde_json::Value;
