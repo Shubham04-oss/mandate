@@ -37,8 +37,8 @@
 - **Document navigations** (top level, redirect hops, frames) are limited per call to the allowed
   hosts and blocked before they are sent: the read allowlist for a Read call, the requested and
   approved host otherwise.
-- **Popups and extra targets** (new windows or tabs, out-of-process frames, workers) are closed as
-  soon as they appear and fail the call.
+- **Popups and extra targets** (new windows or tabs, out-of-process frames, workers) are closed
+  after they are reported and fail the call; their first request may already have been sent.
 - **Requests made by page script** (fetch, images, beacons) are not blocked in v1. Read calls only
   reach admin-allowlisted hosts, and every other call was approved by a person who saw the URL.
   Network-layer enforcement through AgentCore Browser proxy configuration is the planned upgrade.

@@ -118,7 +118,7 @@ impl ServerHandler for Mcp {
                 // The agent is untrusted: backend detail goes to the operator log only.
                 Err(ToolError::Backend(detail)) => {
                     tracing::warn!(tool = %id, %detail, "tool backend failed");
-                    CallToolResult::error(vec![ContentBlock::text("the tool failed; see audit")])
+                    CallToolResult::error(vec![ContentBlock::text("the tool failed")])
                 }
             },
             Outcome::Ask { approval } => CallToolResult::structured(

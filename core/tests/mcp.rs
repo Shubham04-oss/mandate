@@ -392,9 +392,6 @@ async fn backend_error_detail_does_not_reach_the_agent() {
     )
     .await;
     assert_eq!(out["result"]["isError"], true, "{out}");
-    assert_eq!(
-        out["result"]["content"][0]["text"],
-        "the tool failed; see audit"
-    );
+    assert_eq!(out["result"]["content"][0]["text"], "the tool failed");
     assert!(!out.to_string().contains("SECRET"), "{out}");
 }
