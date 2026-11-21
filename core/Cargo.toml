@@ -21,7 +21,7 @@ sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "time", "uuid", "macros", "migrate"] }
 thiserror = "2"
 time = "0.3.55"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 url = "2.5.9"
 uuid = { version = "1", features = ["v4"] }
 

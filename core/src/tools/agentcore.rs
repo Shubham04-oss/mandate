@@ -1,5 +1,5 @@
 use super::ToolError;
-use super::browser::{BrowserBackend, Page};
+use super::browser::{BrowserBackend, Page, check_url};
 use async_trait::async_trait;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_sigv4::http_request::{
@@ -7,6 +7,7 @@ use aws_sigv4::http_request::{
 };
 use aws_sigv4::sign::v4;
 use chromiumoxide::Browser;
+use chromiumoxide::cdp::browser_protocol::page::EventLoadEventFired;
 use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use futures::StreamExt;
 use std::collections::BTreeMap;
@@ -14,6 +15,7 @@ use std::time::{Duration, SystemTime};
 use url::Url;
 
 const SESSION_TIMEOUT_SECS: i32 = 300;
+const OVERALL_TIMEOUT: Duration = Duration::from_secs(90);
 const NAV_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn backend(e: impl std::fmt::Display) -> ToolError {
@@ -21,6 +23,9 @@ fn backend(e: impl std::fmt::Display) -> ToolError {
 }
 
 /// Amazon Bedrock AgentCore Browser. Recording is a property of the configured browser.
+///
+/// The configured browser must use PUBLIC network mode; the URL checks here are not a substitute
+/// for network isolation.
 pub struct AgentCoreBrowser {
     client: aws_sdk_bedrockagentcore::Client,
     config: aws_config::SdkConfig,
@@ -96,7 +101,9 @@ impl AgentCoreBrowser {
             .send()
             .await
             .map_err(backend)?;
-        let result = self.drive(&started, url, fields).await;
+        let result = tokio::time::timeout(OVERALL_TIMEOUT, self.drive(&started, url, fields))
+            .await
+            .unwrap_or_else(|_| Err(backend("browser call timed out")));
         // Always stop: a leaked session bills until its timeout.
         let stop = self
             .client
@@ -142,22 +149,35 @@ impl AgentCoreBrowser {
                 .await
                 .map_err(backend)?;
             page.goto(url.as_str()).await.map_err(backend)?;
+            let landed = final_url(&page).await?;
             if let Some(fields) = fields {
+                // The approval covers the approved origin, not wherever a redirect led.
+                if landed.origin() != url.origin() {
+                    return Err(backend("page redirected to a different origin"));
+                }
+                // Listen before submitting, so the load cannot finish before we wait for it.
+                let mut loaded = page
+                    .event_listener::<EventLoadEventFired>()
+                    .await
+                    .map_err(backend)?;
                 let script = format!(
                     "({SUBMIT_JS})({})",
                     serde_json::to_string(fields).map_err(backend)?
                 );
-                let found: bool = page
+                let outcome: String = page
                     .evaluate(script)
                     .await
                     .map_err(backend)?
                     .into_value()
                     .map_err(backend)?;
-                if !found {
-                    return Err(backend("form field not found on page"));
+                match outcome.as_str() {
+                    "submitted" => {}
+                    "cross_origin" => return Err(backend("form posts to a different origin")),
+                    _ => return Err(backend("form field not found on page")),
                 }
-                // ponytail: a form that submits without navigating just times out here and we read the page as is.
-                let _ = tokio::time::timeout(NAV_TIMEOUT, page.wait_for_navigation()).await;
+                // ponytail: a form that submits without navigating times out here and we read the page as is.
+                let _ = tokio::time::timeout(NAV_TIMEOUT, loaded.next()).await;
+                final_url(&page).await?;
             }
             let title: String = page
                 .evaluate("document.title")
@@ -184,18 +204,32 @@ impl AgentCoreBrowser {
     }
 }
 
-// Sets each named element, submits the form of the last one; false if a name matches nothing.
+/// The page's current URL, refused unless it passes the same checks as a requested URL.
+async fn final_url(page: &chromiumoxide::Page) -> Result<Url, ToolError> {
+    let disallowed = || backend("redirected to a disallowed url");
+    let raw = page.url().await.map_err(backend)?.ok_or_else(disallowed)?;
+    let url = Url::parse(&raw).map_err(|_| disallowed())?;
+    check_url(&url).map_err(|_| disallowed())?;
+    Ok(url)
+}
+
+// Sets each named element and submits the form of the last one, only if it posts over https to the
+// page's own origin. Prototype calls, because a field named "action" or "requestSubmit" shadows the
+// form's own property.
 const SUBMIT_JS: &str = r#"(fields) => {
   let form = null;
   for (const [name, value] of Object.entries(fields)) {
     const el = document.querySelector('[name="' + CSS.escape(name) + '"]');
-    if (!el) return false;
+    if (!el) return 'missing';
     el.value = value;
     form = el.form || form;
   }
-  if (!form) return false;
-  setTimeout(() => form.requestSubmit ? form.requestSubmit() : form.submit(), 0);
-  return true;
+  if (!form) return 'missing';
+  const proto = HTMLFormElement.prototype;
+  const action = new URL(Object.getOwnPropertyDescriptor(proto, 'action').get.call(form));
+  if (action.protocol !== 'https:' || action.origin !== location.origin) return 'cross_origin';
+  proto.requestSubmit.call(form);
+  return 'submitted';
 }"#;
 
 #[async_trait]

@@ -46,8 +46,7 @@ fn who() -> Assertion {
 #[tokio::test]
 async fn read_page_rejects_non_https_and_caps_text() {
     let long = "é".repeat(100_050);
-    let tool = ReadPage::new(Arc::new(Fake(long)));
-    assert_eq!(tool.effect(), Effect::Read);
+    let tool = ReadPage::new(Arc::new(Fake(long)), vec![]);
     for bad in [
         "http://example.com",
         "https://u:p@example.com",
@@ -73,7 +72,8 @@ async fn read_page_rejects_non_https_and_caps_text() {
 #[tokio::test]
 async fn submit_form_rejects_non_string_fields() {
     let tool = SubmitForm::new(Arc::new(Fake(String::new())));
-    assert_eq!(tool.effect(), Effect::External);
+    let args = json!({ "url": "https://example.com", "fields": {} });
+    assert_eq!(tool.effect(&args), Effect::External);
     for fields in [
         json!({ "a": 1 }),
         json!(["a"]),
@@ -103,10 +103,82 @@ async fn submit_form_rejects_non_string_fields() {
 }
 
 #[test]
+fn read_page_is_read_only_for_listed_hosts() {
+    let tool = ReadPage::new(
+        Arc::new(Fake(String::new())),
+        vec!["docs.example.com".into()],
+    );
+    let effect = |url: &str| tool.effect(&json!({ "url": url }));
+    assert_eq!(effect("https://docs.example.com/a?b=c"), Effect::Read);
+    for other in [
+        "https://example.com",
+        "https://docs.example.com.evil.test",
+        "https://evil.test/?h=docs.example.com",
+        "http://docs.example.com",
+        "https://u:p@docs.example.com",
+        "nope",
+    ] {
+        assert_eq!(effect(other), Effect::External, "{other}");
+    }
+    for garbage in [json!({}), json!(null), json!({ "url": 1 }), json!("x")] {
+        assert_eq!(tool.effect(&garbage), Effect::External, "{garbage}");
+    }
+}
+
+#[tokio::test]
+async fn local_and_private_hosts_are_rejected() {
+    let read = ReadPage::new(Arc::new(Fake(String::new())), vec![]);
+    let submit = SubmitForm::new(Arc::new(Fake(String::new())));
+    for bad in [
+        "https://localhost/",
+        "https://LOCALHOST./",
+        "https://app.localhost/",
+        "https://metadata.google.internal/",
+        "https://127.0.0.1/",
+        "https://2130706433/",
+        "https://10.1.2.3/",
+        "https://172.16.0.1/",
+        "https://172.31.255.255/",
+        "https://192.168.1.1/",
+        "https://169.254.169.254/latest/meta-data",
+        "https://100.64.0.1/",
+        "https://100.127.255.255/",
+        "https://0.0.0.0/",
+        "https://[::1]/",
+        "https://[::]/",
+        "https://[fe80::1]/",
+        "https://[fc00::1]/",
+        "https://[fd12::1]/",
+        "https://[::ffff:127.0.0.1]/",
+        "https://[::ffff:169.254.169.254]/",
+    ] {
+        let r = read.call(&who(), json!({ "url": bad })).await;
+        assert!(matches!(r, Err(ToolError::InvalidArgs(_))), "read {bad}");
+        let r = submit
+            .call(&who(), json!({ "url": bad, "fields": {} }))
+            .await;
+        assert!(matches!(r, Err(ToolError::InvalidArgs(_))), "submit {bad}");
+    }
+    for ok in [
+        "https://8.8.8.8/",
+        "https://100.128.0.1/",
+        "https://172.32.0.1/",
+        "https://[2606:4700::1]/",
+        "https://example.com/",
+        "https://localhost.example.com/",
+    ] {
+        assert!(
+            read.call(&who(), json!({ "url": ok })).await.is_ok(),
+            "{ok}"
+        );
+    }
+}
+
+#[test]
 fn catalog_looks_up_tools_and_schemas_are_objects() {
     let b: Arc<dyn BrowserBackend> = Arc::new(Fake(String::new()));
     let cat = Catalog::new(vec![
-        Arc::new(ReadPage::new(b.clone())),
+        Arc::new(ReadPage::new(b.clone(), vec![])),
         Arc::new(SubmitForm::new(b)),
     ]);
     let id = ToolId::parse("web.read_page").unwrap();
