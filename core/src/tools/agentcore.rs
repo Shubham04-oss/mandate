@@ -183,8 +183,10 @@ impl StopOnDrop {
     }
 
     async fn stop(mut self) {
-        if let Some((client, browser_id, session_id)) = self.stop.take() {
+        // Disarm only after the stop: if this future is cancelled mid-stop, `Drop` still stops.
+        if let Some((client, browser_id, session_id)) = self.stop.clone() {
             stop_session(client, browser_id, session_id).await;
+            self.stop = None;
         }
     }
 }
@@ -412,8 +414,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
 
-    /// A client pointed at a local fake endpoint that reports each request line it gets.
-    async fn fake() -> (
+    /// A client pointed at a local fake endpoint that reports each request line it gets, and
+    /// answers only if `respond`.
+    async fn fake(
+        respond: bool,
+    ) -> (
         aws_sdk_bedrockagentcore::Client,
         mpsc::UnboundedReceiver<String>,
     ) {
@@ -428,6 +433,10 @@ mod tests {
                     let n = sock.read(&mut buf).await.unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]);
                     let _ = tx.send(req.lines().next().unwrap_or_default().to_owned());
+                    if !respond {
+                        // Hold the connection open without answering.
+                        return std::future::pending().await;
+                    }
                     let _ = sock
                         .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
                         .await;
@@ -442,6 +451,20 @@ mod tests {
             .retry_config(aws_sdk_bedrockagentcore::config::retry::RetryConfig::disabled())
             .build();
         (aws_sdk_bedrockagentcore::Client::from_conf(config), rx)
+    }
+
+    #[tokio::test]
+    async fn stop_completes_before_disarm() {
+        let (client, mut rx) = fake(false).await;
+        // The endpoint never answers, so the explicit stop is cancelled mid-flight.
+        let stopped = tokio::time::timeout(
+            Duration::from_millis(200),
+            StopOnDrop::new(&client, "br", "sess").stop(),
+        )
+        .await;
+        assert!(stopped.is_err());
+        // The cancelled stop and the one the dropped guard sends instead.
+        assert_eq!(requests(&mut rx).await.len(), 2);
     }
 
     async fn requests(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
@@ -459,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_the_guard_stops_the_session_once() {
-        let (client, mut rx) = fake().await;
+        let (client, mut rx) = fake(true).await;
         drop(StopOnDrop::new(&client, "br", "sess"));
         let seen = requests(&mut rx).await;
         assert_eq!(seen.len(), 1, "{seen:?}");
@@ -468,7 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_explicit_stop_is_not_repeated_on_drop() {
-        let (client, mut rx) = fake().await;
+        let (client, mut rx) = fake(true).await;
         StopOnDrop::new(&client, "br", "sess").stop().await;
         assert_eq!(requests(&mut rx).await.len(), 1);
     }
@@ -476,7 +499,7 @@ mod tests {
     #[test]
     fn dropping_the_guard_without_a_runtime_does_not_panic() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let client = rt.block_on(fake()).0;
+        let client = rt.block_on(fake(true)).0;
         let guard = StopOnDrop::new(&client, "br", "sess");
         drop(rt);
         drop(guard);

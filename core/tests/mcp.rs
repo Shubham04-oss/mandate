@@ -411,3 +411,35 @@ async fn invalid_args_are_refused_before_the_gate() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+#[tokio::test]
+#[ignore]
+async fn nul_in_args_is_invalid() {
+    let s = app_store().await;
+    let t = tenant();
+    seed(&t, &["web.read_page", "web.submit_form"]).await;
+    let backend = Arc::new(Recorder::default());
+    let app = app(s.clone(), backend.clone());
+
+    for (name, args) in [
+        (
+            "web.read_page",
+            json!({ "url": "https://docs.test/a\u{0}b" }),
+        ),
+        (
+            "web.submit_form",
+            json!({ "url": "https://example.com/f", "fields": { "q": "a\u{0}" } }),
+        ),
+        (
+            "web.submit_form",
+            json!({ "url": "https://example.com/f", "fields": { "q\u{0}": "a" } }),
+        ),
+    ] {
+        let out = call(&app, &t, name, args.clone()).await;
+        assert_eq!(out["error"]["code"], -32602, "{name} {args}: {out}");
+    }
+
+    assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    // No gate call: nothing audited.
+    assert_eq!(audit_count(&s, &t).await, 0);
+}
