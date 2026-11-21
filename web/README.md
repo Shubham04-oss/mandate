@@ -1,4 +1,19 @@
-Welcome to your new TanStack Start app!
+# oryxa web app
+
+## Sample data
+
+Every person, organization, email address and team on the screens is made up. They are not
+customers or real people, and they exist only so the screens render until the core supplies real
+data.
+
+- `src/lib/sample.ts`: Ada Brennan (`ada@northstar.io`), Raya Patel, Priya, Rohan, and the
+  organizations Northstar, Harbourline and Tidewater Labs. Also the two-step sign-in QR code and
+  key.
+- `src/routes/preview.popups.tsx`: the team Platform, Kenji Sato, `maria@northwind.de`, and the
+  "Q3 revenue figures" request.
+- `public/avatars/` and `public/sample/`: the avatar drawings and the QR code image.
+
+Replace each with data from the core as the screens are wired; none of it should ship.
 
 # Getting Started
 
