@@ -43,6 +43,11 @@
   reach admin-allowlisted hosts, and every other call was approved by a person who saw the URL.
   Network-layer enforcement through AgentCore Browser proxy configuration is the planned upgrade.
 - The configured AgentCore browser must use PUBLIC network mode.
+- `MANDATE_READ_HOSTS` is a data-egress allowlist, not only a reading list: a Read call runs
+  without approval, and its URL (query string included) can carry any data the agent holds to any
+  listed host. List only hosts the tenant trusts with that data.
+- `live_view_url` is not usable after a call returns: the browser session ends with the call. Live
+  view and human takeover need sessions that outlive a call; that is future work.
 - A backend failure reaches the agent as a generic error; the detail goes only to the operator log.
 
 ## What a compromise of each part can do
