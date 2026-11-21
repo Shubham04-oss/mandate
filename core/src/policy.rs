@@ -73,6 +73,25 @@ fn file_err(path: &Path, e: impl std::fmt::Display) -> PolicyError {
     }
 }
 
+/// Fails closed: an entry that cannot be read, or no policy file at all, is an error.
+fn cedar_files(
+    dir: &Path,
+    entries: impl IntoIterator<Item = std::io::Result<PathBuf>>,
+) -> Result<Vec<PathBuf>, PolicyError> {
+    let mut paths = Vec::new();
+    for e in entries {
+        let p = e.map_err(|e| file_err(dir, e))?;
+        if p.extension().is_some_and(|x| x == "cedar") {
+            paths.push(p);
+        }
+    }
+    if paths.is_empty() {
+        return Err(file_err(dir, "no *.cedar policy files"));
+    }
+    paths.sort();
+    Ok(paths)
+}
+
 impl Policy {
     pub fn load(dir: &Path) -> Result<Policy, PolicyError> {
         let schema_path = dir.join("schema.cedarschema");
@@ -81,12 +100,8 @@ impl Policy {
             Schema::from_cedarschema_str(&src).map_err(|e| file_err(&schema_path, e))?;
         let validator = Validator::new(schema.clone());
 
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-            .map_err(|e| file_err(dir, e))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "cedar"))
-            .collect();
-        paths.sort();
+        let entries = std::fs::read_dir(dir).map_err(|e| file_err(dir, e))?;
+        let paths = cedar_files(dir, entries.map(|e| e.map(|e| e.path())))?;
 
         let mut set = PolicySet::new();
         for path in paths {
@@ -234,5 +249,36 @@ mod tests {
         .unwrap();
         let err = Policy::load(d.path()).unwrap_err();
         assert!(err.to_string().contains("bad.cedar"), "{err}");
+    }
+
+    #[test]
+    fn dir_without_policy_files_fails_to_load() {
+        let d = tempfile::tempdir().unwrap();
+        let schema = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../policies/schema.cedarschema"
+        );
+        std::fs::copy(schema, d.path().join("schema.cedarschema")).unwrap();
+        let err = Policy::load(d.path()).unwrap_err();
+        assert!(err.to_string().contains("no *.cedar"), "{err}");
+    }
+
+    #[test]
+    fn unreadable_dir_entry_is_an_error() {
+        let d = Path::new("/p");
+        let entries = vec![
+            Ok(PathBuf::from("/p/a.cedar")),
+            Err(std::io::Error::other("boom")),
+        ];
+        let err = cedar_files(d, entries).unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
+        let ok = cedar_files(
+            d,
+            vec![
+                Ok(PathBuf::from("/p/b.cedar")),
+                Ok(PathBuf::from("/p/x.txt")),
+            ],
+        );
+        assert_eq!(ok.unwrap(), vec![PathBuf::from("/p/b.cedar")]);
     }
 }

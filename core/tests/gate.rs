@@ -250,3 +250,178 @@ async fn database_down_refuses() {
     .await;
     assert_eq!(out, Outcome::Refuse { reason: "internal" });
 }
+
+fn as_member(t: &TenantId, m: &str) -> Assertion {
+    Assertion {
+        member: MemberId::parse(m).unwrap(),
+        agent: AgentId::parse("tbot").unwrap(),
+        ..who(t)
+    }
+}
+
+/// Seeds team agent `tbot` owned by team `ops` (members ann and bob), with a standing grant on `tool`.
+async fn seed_team(s: &Store, t: &TenantId, tool: &str) {
+    let mut tx = s.begin(t).await.unwrap();
+    for q in [
+        "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'tbot', 'team', 'ops')",
+        "insert into team_members (tenant_id, team_id, member_id) values ($1, 'ops', 'ann'), ($1, 'ops', 'bob')",
+    ] {
+        sqlx::query(q)
+            .bind(t.as_str())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "insert into grants (tenant_id, principal_kind, principal_id, tool, standing, expires_at, granted_by) \
+         values ($1, 'agent', 'tbot', $2, true, $3, 'admin')",
+    )
+    .bind(t.as_str())
+    .bind(tool)
+    .bind(OffsetDateTime::now_utc() + Duration::hours(1))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn approve_as(s: &Store, t: &TenantId, approval: Uuid, m: &str) {
+    let mut tx = s.begin(t).await.unwrap();
+    assert!(
+        store::approve(&mut tx, approval, &MemberId::parse(m).unwrap())
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn removed_team_member_is_refused_on_the_next_call() {
+    let s = app_store().await;
+    let t = tenant();
+    seed_team(&s, &t, "docs.read").await;
+    let (p, w, tl, now) = (
+        policy(),
+        as_member(&t, "ann"),
+        tool("docs.read"),
+        OffsetDateTime::now_utc(),
+    );
+    let args = json!({});
+    let call = || authorize(&s, &p, &w, &tl, Effect::Read, &args, now);
+    assert_eq!(call().await, Outcome::Run);
+
+    let mut tx = s.begin(&t).await.unwrap();
+    store::set_team_member(
+        &mut tx,
+        &mandate::ids::TeamId::parse("ops").unwrap(),
+        &MemberId::parse("ann").unwrap(),
+        false,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        call().await,
+        Outcome::Refuse {
+            reason: "not_member"
+        }
+    );
+    assert_eq!(
+        audit_rows(&s, &t).await[1],
+        ("refuse".to_owned(), Some("not_member".to_owned()))
+    );
+    let l = list(&s, &p, &w, &[(tool("docs.read"), Effect::Read)], now).await;
+    assert!(l.is_empty());
+}
+
+#[tokio::test]
+#[ignore]
+async fn approval_is_spent_only_by_its_requester() {
+    let s = app_store().await;
+    let t = tenant();
+    seed_team(&s, &t, "mail.send").await;
+    let (p, tl, now) = (policy(), tool("mail.send"), OffsetDateTime::now_utc());
+    let args = json!({"to": "a@b.c"});
+    let (ann, bob) = (as_member(&t, "ann"), as_member(&t, "bob"));
+
+    let Outcome::Ask { approval } =
+        authorize(&s, &p, &ann, &tl, Effect::External, &args, now).await
+    else {
+        panic!("expected ask")
+    };
+    approve_as(&s, &t, approval, "bob").await;
+
+    // Bob cannot spend Ann's approval, even with the same args on the same bot.
+    let bob_out = authorize(&s, &p, &bob, &tl, Effect::External, &args, now).await;
+    assert!(
+        matches!(bob_out, Outcome::Ask { approval: a } if a != approval),
+        "{bob_out:?}"
+    );
+    assert_eq!(
+        authorize(&s, &p, &ann, &tl, Effect::External, &args, now).await,
+        Outcome::Run
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn repeated_ask_reuses_the_pending_approval() {
+    let s = app_store().await;
+    let t = tenant();
+    seed_team(&s, &t, "mail.send").await;
+    let (p, w, tl, now) = (
+        policy(),
+        as_member(&t, "ann"),
+        tool("mail.send"),
+        OffsetDateTime::now_utc(),
+    );
+    let args = json!({"to": "a@b.c"});
+    let call = || authorize(&s, &p, &w, &tl, Effect::External, &args, now);
+
+    let (Outcome::Ask { approval: a }, Outcome::Ask { approval: b }) = (call().await, call().await)
+    else {
+        panic!("expected two asks")
+    };
+    assert_eq!(a, b);
+    let mut tx = s.begin(&t).await.unwrap();
+    let n: i64 = sqlx::query_scalar("select count(*) from approvals")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    // Both asks are still audited.
+    let decisions: Vec<String> = audit_rows(&s, &t).await.into_iter().map(|r| r.0).collect();
+    assert_eq!(decisions, ["ask", "ask"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn approval_covers_only_its_exact_args() {
+    let s = app_store().await;
+    let t = tenant();
+    seed_team(&s, &t, "mail.send").await;
+    let (p, w, tl, now) = (
+        policy(),
+        as_member(&t, "ann"),
+        tool("mail.send"),
+        OffsetDateTime::now_utc(),
+    );
+    let (a, b) = (json!({"to": "a@b.c"}), json!({"to": "evil@x.y"}));
+
+    let Outcome::Ask { approval } = authorize(&s, &p, &w, &tl, Effect::External, &a, now).await
+    else {
+        panic!("expected ask")
+    };
+    approve_as(&s, &t, approval, "ann").await;
+
+    assert!(matches!(
+        authorize(&s, &p, &w, &tl, Effect::External, &b, now).await,
+        Outcome::Ask { .. }
+    ));
+    assert_eq!(
+        authorize(&s, &p, &w, &tl, Effect::External, &a, now).await,
+        Outcome::Run
+    );
+}

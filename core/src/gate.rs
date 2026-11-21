@@ -78,6 +78,14 @@ async fn decide(
             input(vec![], false, false),
         ));
     };
+    // Membership now, not at minting: a removal applies on the next call, not after the TTL.
+    if !store::may_use_agent(tx, &who.member, &who.agent).await? {
+        return Ok((
+            Decision::Refuse,
+            Some("not_member"),
+            input(parents, false, false),
+        ));
+    }
     let g = store::live_grant(tx, &who.agent, &parents, tool, now).await?;
     let input = input(parents, g.granted, g.standing);
     let d = policy.decide(&input);
@@ -95,7 +103,9 @@ async fn run_in_tx(
     now: OffsetDateTime,
 ) -> Result<Outcome, StoreError> {
     let (mut d, reason, mut input) = decide(tx, policy, who, tool, effect, now).await?;
-    if d == Decision::Ask && store::consume_approval(tx, &who.agent, tool, &hash, now).await? {
+    if d == Decision::Ask
+        && store::consume_approval(tx, &who.agent, &who.member, tool, &hash, now).await?
+    {
         input.approved = true;
         d = policy.decide(&input);
     }

@@ -395,10 +395,12 @@ pub async fn live_grant(
     })
 }
 
-/// Single use: the UPDATE spends the row atomically, so concurrent callers cannot both win.
+/// Single use, and only by the member who asked: the UPDATE spends the row atomically, so
+/// concurrent callers cannot both win.
 pub async fn consume_approval(
     tx: &mut Tx,
     agent: &AgentId,
+    member: &MemberId,
     tool: &ToolId,
     args_hash: &[u8; 32],
     now: OffsetDateTime,
@@ -406,7 +408,7 @@ pub async fn consume_approval(
     let r = sqlx::query(
         "update approvals set used_at = $4 where tenant_id = current_setting('mandate.tenant', true) and id = ( \
            select id from approvals where agent = $1 and tool = $2 and args_hash = $3 and tenant_id = current_setting('mandate.tenant', true) \
-           and approved_by is not null and used_at is null and expires_at > $4 \
+           and requested_by = $5 and approved_by is not null and used_at is null and expires_at > $4 \
            limit 1 for update skip locked) \
          returning id",
     )
@@ -414,11 +416,13 @@ pub async fn consume_approval(
     .bind(tool.as_str())
     .bind(args_hash.as_slice())
     .bind(now)
+    .bind(member.as_str())
     .fetch_optional(&mut **tx)
     .await?;
     Ok(r.is_some())
 }
 
+/// Reuses this member's unexpired pending approval for the same call instead of piling up rows.
 pub async fn request_approval(
     tx: &mut Tx,
     agent: &AgentId,
@@ -427,6 +431,23 @@ pub async fn request_approval(
     args_hash: &[u8; 32],
     now: OffsetDateTime,
 ) -> Result<Uuid, StoreError> {
+    // ponytail: two concurrent identical asks can both insert (a harmless extra row); add a
+    // partial unique index if that ever matters.
+    let pending: Option<Uuid> = sqlx::query_scalar(
+        "select id from approvals where tenant_id = current_setting('mandate.tenant', true) \
+         and agent = $1 and tool = $2 and args_hash = $3 and requested_by = $4 \
+         and approved_by is null and used_at is null and expires_at > $5 limit 1",
+    )
+    .bind(agent.as_str())
+    .bind(tool.as_str())
+    .bind(args_hash.as_slice())
+    .bind(member.as_str())
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(id) = pending {
+        return Ok(id);
+    }
     let id = Uuid::new_v4();
     sqlx::query(
         "insert into approvals (tenant_id, id, agent, tool, args_hash, requested_by, expires_at) \

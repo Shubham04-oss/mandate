@@ -219,22 +219,29 @@ async fn approval_is_spent_once_for_its_exact_args() {
     let mut tx = s.begin(&t).await.unwrap();
     let (a, tl) = (agent("bot"), tool("mail.send"));
     assert!(
-        !store::consume_approval(&mut tx, &a, &tl, &[2; 32], now)
+        !store::consume_approval(&mut tx, &a, &member("ann"), &tl, &[2; 32], now)
             .await
             .unwrap()
     );
     assert!(
-        !store::consume_approval(&mut tx, &a, &tl, &[1; 32], now + Duration::seconds(3600))
+        !store::consume_approval(
+            &mut tx,
+            &a,
+            &member("ann"),
+            &tl,
+            &[1; 32],
+            now + Duration::seconds(3600)
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        store::consume_approval(&mut tx, &a, &member("ann"), &tl, &[1; 32], now)
             .await
             .unwrap()
     );
     assert!(
-        store::consume_approval(&mut tx, &a, &tl, &[1; 32], now)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !store::consume_approval(&mut tx, &a, &tl, &[1; 32], now)
+        !store::consume_approval(&mut tx, &a, &member("ann"), &tl, &[1; 32], now)
             .await
             .unwrap()
     );
@@ -252,10 +259,16 @@ async fn concurrent_consumes_spend_one_approval() {
         let (s, t) = (s.clone(), t.clone());
         tasks.push(tokio::spawn(async move {
             let mut tx = s.begin(&t).await.unwrap();
-            let ok =
-                store::consume_approval(&mut tx, &agent("bot"), &tool("mail.send"), &[7; 32], now)
-                    .await
-                    .unwrap();
+            let ok = store::consume_approval(
+                &mut tx,
+                &agent("bot"),
+                &member("ann"),
+                &tool("mail.send"),
+                &[7; 32],
+                now,
+            )
+            .await
+            .unwrap();
             tx.commit().await.unwrap();
             ok
         }));

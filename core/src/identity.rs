@@ -465,6 +465,24 @@ fn permanent(org: Option<&str>, error: impl std::fmt::Display) -> Fail {
     }
 }
 
+/// Only the category and position: serde's message can quote values such as emails.
+fn malformed(err: &serde_json::Error) -> Fail {
+    let category = match err.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+    permanent(
+        None,
+        format!(
+            "malformed data ({category} error at line {} column {})",
+            err.line(),
+            err.column()
+        ),
+    )
+}
+
 /// A WorkOS id as a Mandate id: lowercase, other characters as `_`, at most 64 long.
 fn slug(s: &str) -> String {
     s.chars()
@@ -504,7 +522,7 @@ async fn prepare(
     e: &EventSchema,
 ) -> Result<Option<(TenantId, Change)>, Fail> {
     let data = serde_json::Value::Object(e.data.clone().into_iter().collect());
-    let shape = |err: serde_json::Error| permanent(None, format!("malformed data: {err}"));
+    let shape = |err: serde_json::Error| malformed(&err);
     let member_id =
         |id: &str, org: &str| MemberId::parse(&slug(id)).map_err(|err| permanent(Some(org), err));
     let team_id =
@@ -731,5 +749,21 @@ mod tests {
         assert_eq!(slug("a.b c/é"), "a_b_c__");
         assert_eq!(slug(&"X".repeat(80)).len(), 64);
         assert!(TenantId::parse(&slug("directory_user_01E1JG7J09H96KYP8HM9B0G5SJ")).is_ok());
+    }
+
+    #[test]
+    fn malformed_data_never_quotes_values() {
+        let data =
+            serde_json::json!({"user": "ann@x.com", "group": {"id": "g", "organization_id": "o"}});
+        let err = serde_json::from_value::<GroupUser>(data).err().unwrap();
+        assert!(
+            err.to_string().contains("ann@x.com"),
+            "serde's text does leak"
+        );
+        let Fail::Permanent { error, .. } = malformed(&err) else {
+            unreachable!()
+        };
+        assert!(!error.contains("ann@x.com"), "{error}");
+        assert_eq!(error, "malformed data (data error at line 0 column 0)");
     }
 }
