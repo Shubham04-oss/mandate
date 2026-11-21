@@ -1,7 +1,7 @@
 //! The MCP server: the only door from the agent to tools. Lists what the gate allows, gates every call.
 use crate::assertion::{Assertion, verify};
 use crate::gate::{Outcome, authorize, list};
-use crate::identity::{TokenVerifier, exchange};
+use crate::identity::{Workos, exchange};
 use crate::ids::ToolId;
 use crate::policy::{Decision, Effect, Policy};
 use crate::store::Store;
@@ -37,7 +37,7 @@ pub struct AppState {
     pub assertion_key: VerifyingKey,
     pub assertion_signing_key: SigningKey,
     /// `None` when WorkOS is not configured: the exchange route answers 404.
-    pub workos: Option<Arc<TokenVerifier>>,
+    pub workos: Option<Arc<Workos>>,
 }
 
 /// The verified assertion of this very request; never cached across requests.

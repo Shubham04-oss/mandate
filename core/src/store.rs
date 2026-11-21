@@ -39,6 +39,8 @@ pub struct AuditEntry {
     pub reason: Option<String>,
 }
 
+// Arbitrary but fixed: names the directory sync lock across every process.
+const SYNC_LOCK: i64 = 0x6d61_6e64_7379_6e63;
 const APPROVAL_TTL: Duration = Duration::seconds(3600);
 
 impl Store {
@@ -109,6 +111,23 @@ impl Store {
         self.tenant_for_org(org).await
     }
 
+    /// No tenant set: RLS tables read empty. Only for the RLS-free directory tables.
+    pub async fn begin_untenanted(&self) -> Result<Tx, StoreError> {
+        Ok(self.pool.begin().await?)
+    }
+
+    /// One sync runner at a time: a session advisory lock on a connection taken out of the
+    /// pool, so dropping it (even on panic) closes the session and frees the lock.
+    /// `None` if another runner holds it.
+    pub async fn sync_lock(&self) -> Result<Option<sqlx::PgConnection>, StoreError> {
+        let mut conn = self.pool.acquire().await?.detach();
+        let got: bool = sqlx::query_scalar("select pg_try_advisory_lock($1)")
+            .bind(SYNC_LOCK)
+            .fetch_one(&mut conn)
+            .await?;
+        Ok(got.then_some(conn))
+    }
+
     pub async fn directory_cursor(&self) -> Result<Option<String>, StoreError> {
         Ok(sqlx::query_scalar("select after from directory_cursor")
             .fetch_optional(&self.pool)
@@ -128,17 +147,77 @@ pub async fn set_directory_cursor(tx: &mut Tx, after: &str) -> Result<(), StoreE
     Ok(())
 }
 
+/// Keeps an existing AuthKit link when `workos_user` is `None`, and never links an AuthKit
+/// user that another member already holds.
 pub async fn upsert_member(
     tx: &mut Tx,
     member: &MemberId,
-    workos_user: &str,
+    directory_user: &str,
+    email: Option<&str>,
+    workos_user: Option<&str>,
 ) -> Result<(), StoreError> {
     sqlx::query(
-        "insert into members (tenant_id, id, workos_user_id) values (current_setting('mandate.tenant'), $1, $2) \
-         on conflict (tenant_id, id) do update set workos_user_id = excluded.workos_user_id",
+        "insert into members (tenant_id, id, workos_directory_user_id, email, workos_user_id) \
+         select current_setting('mandate.tenant'), $1, $2, $3, \
+           case when exists (select 1 from members m where m.tenant_id = current_setting('mandate.tenant', true) \
+             and m.workos_user_id = $4 and m.id <> $1) then null else $4 end \
+         on conflict (tenant_id, id) do update set workos_directory_user_id = excluded.workos_directory_user_id, \
+           email = excluded.email, workos_user_id = coalesce(excluded.workos_user_id, members.workos_user_id)",
     )
     .bind(member.as_str())
+    .bind(directory_user)
+    .bind(email)
     .bind(workos_user)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Links an AuthKit user to the one unlinked member with this (verified) email; `None` if
+/// there is no such member or the email is ambiguous.
+pub async fn link_member_by_email(
+    tx: &mut Tx,
+    email: &str,
+    workos_user: &str,
+) -> Result<Option<MemberId>, StoreError> {
+    let id: Option<String> = sqlx::query_scalar(
+        "update members set workos_user_id = $2 \
+         where tenant_id = current_setting('mandate.tenant', true) and workos_user_id is null \
+         and lower(email) = lower($1) \
+         and (select count(*) from members m where m.tenant_id = current_setting('mandate.tenant', true) \
+              and lower(m.email) = lower($1)) = 1 \
+         returning id",
+    )
+    .bind(email)
+    .bind(workos_user)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(id.map(|s| MemberId::parse(&s)).transpose()?)
+}
+
+/// Locks the cursor row; true if `event` is at or before it (already applied by someone).
+pub async fn cursor_passed(tx: &mut Tx, event: &str) -> Result<bool, StoreError> {
+    let after: Option<String> = sqlx::query_scalar("select after from directory_cursor for update")
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(after.is_some_and(|a| event <= a.as_str()))
+}
+
+pub async fn dead_letter(
+    tx: &mut Tx,
+    event: &str,
+    event_type: &str,
+    org: Option<&str>,
+    error: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "insert into directory_dead_letters (event_id, event_type, org_id, error) \
+         values ($1, $2, $3, $4) on conflict (event_id) do nothing",
+    )
+    .bind(event)
+    .bind(event_type)
+    .bind(org)
+    .bind(error)
     .execute(&mut **tx)
     .await?;
     Ok(())

@@ -14,13 +14,15 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 use workos::EventSchema;
 use workos::events::ListEventsParams;
+use workos::user_management::ListUsersParams;
 
 const KEYS_TTL_SECS: i64 = 600;
+const FORCED_REFRESH_COOLDOWN_SECS: i64 = 60;
 const MAX_TOKEN_LEN: usize = 8192;
 const EVENTS: [&str; 8] = [
     "dsync.user.created",
@@ -43,10 +45,12 @@ pub enum IdentityError {
     NoOrg,
     #[error("workos request failed: {0}")]
     Upstream(String),
-    #[error("cannot apply directory event {0}")]
-    BadEvent(String),
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+fn upstream(e: impl std::fmt::Display) -> IdentityError {
+    IdentityError::Upstream(e.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,17 +74,55 @@ struct WorkosKeys {
 #[async_trait]
 impl KeySource for WorkosKeys {
     async fn keys(&self) -> Result<JwkSet, IdentityError> {
-        let upstream = |e: String| IdentityError::Upstream(e);
         let r = self
             .client
             .user_management()
             .get_jwks(&self.client_id)
             .await
-            .map_err(|e| upstream(e.to_string()))?;
+            .map_err(upstream)?;
         // The SDK's typed JWKS is the same JSON jsonwebtoken reads.
         serde_json::to_value(r)
             .and_then(serde_json::from_value)
-            .map_err(|e| upstream(e.to_string()))
+            .map_err(upstream)
+    }
+}
+
+/// AuthKit users, which are not directory users: the two are linked by verified email.
+#[async_trait]
+pub trait UserLookup: Send + Sync {
+    /// The AuthKit user in `org` whose verified email is `email`.
+    async fn user_by_email(&self, email: &str, org: &str) -> Result<Option<String>, IdentityError>;
+    /// The user's email, only if verified.
+    async fn verified_email(&self, user: &str) -> Result<Option<String>, IdentityError>;
+}
+
+#[async_trait]
+impl UserLookup for workos::Client {
+    async fn user_by_email(&self, email: &str, org: &str) -> Result<Option<String>, IdentityError> {
+        let p = ListUsersParams {
+            email: Some(email.to_owned()),
+            organization_id: Some(org.to_owned()),
+            ..Default::default()
+        };
+        let users = self
+            .user_management()
+            .list_users(p)
+            .await
+            .map_err(upstream)?;
+        Ok(users
+            .data
+            .into_iter()
+            .find(|u| u.email_verified && u.email.eq_ignore_ascii_case(email))
+            .map(|u| u.id))
+    }
+
+    async fn verified_email(&self, user: &str) -> Result<Option<String>, IdentityError> {
+        let u = self
+            .user_management()
+            .get_user(user)
+            .await
+            .map_err(upstream)?;
+        Ok(u.email_verified.then_some(u.email))
     }
 }
 
@@ -92,10 +134,15 @@ struct Claims {
     org_id: Option<String>,
 }
 
+type CachedKeys = Option<(i64, Arc<JwkSet>)>;
+
 pub struct TokenVerifier {
     source: Arc<dyn KeySource>,
     validation: Validation,
-    cache: Mutex<Option<(i64, Arc<JwkSet>)>>,
+    /// Read without waiting on a fetch in flight.
+    keys: RwLock<CachedKeys>,
+    /// Held across a fetch so there is one at a time; holds the last forced refresh time.
+    refreshing: Mutex<Option<i64>>,
 }
 
 impl TokenVerifier {
@@ -120,21 +167,36 @@ impl TokenVerifier {
         TokenVerifier {
             source,
             validation: v,
-            cache: Mutex::new(None),
+            keys: RwLock::new(None),
+            refreshing: Mutex::new(None),
         }
     }
 
-    /// The lock is held across the fetch so concurrent misses share one request.
-    async fn keys(&self, now: i64, refresh: bool) -> Result<Arc<JwkSet>, IdentityError> {
-        let mut cache = self.cache.lock().await;
-        if let Some((at, set)) = &*cache
-            && !refresh
-            && now - at < KEYS_TTL_SECS
-        {
-            return Ok(set.clone());
+    fn cached(&self) -> CachedKeys {
+        self.keys.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Fetches unless another caller refreshed while this one waited, or (`forced`, for an
+    /// unknown kid) a forced refresh ran in the last minute: unknown kids cannot flood WorkOS.
+    async fn refresh(
+        &self,
+        now: i64,
+        seen: Option<&Arc<JwkSet>>,
+        forced: bool,
+    ) -> Result<Arc<JwkSet>, IdentityError> {
+        let mut last_forced = self.refreshing.lock().await;
+        if let Some((at, set)) = self.cached() {
+            let replaced = seen.is_none_or(|s| !Arc::ptr_eq(s, &set));
+            let cooling = last_forced.is_some_and(|t| now - t < FORCED_REFRESH_COOLDOWN_SECS);
+            if (replaced && now - at < KEYS_TTL_SECS) || (forced && cooling) {
+                return Ok(set);
+            }
         }
         let set = Arc::new(self.source.keys().await?);
-        *cache = Some((now, set.clone()));
+        *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Some((now, set.clone()));
+        if forced {
+            *last_forced = Some(now);
+        }
         Ok(set)
     }
 
@@ -148,10 +210,15 @@ impl TokenVerifier {
             return Err(InvalidToken);
         }
         let kid = header.kid.ok_or(InvalidToken)?;
-        let mut keys = self.keys(now, false).await?;
+        let mut keys = match self.cached() {
+            Some((at, set)) if now - at < KEYS_TTL_SECS => set,
+            stale => {
+                self.refresh(now, stale.as_ref().map(|c| &c.1), false)
+                    .await?
+            }
+        };
         if keys.find(&kid).is_none() {
-            // ponytail: any unknown kid costs one JWKS fetch; add a refetch cooldown if abused.
-            keys = self.keys(now, true).await?;
+            keys = self.refresh(now, Some(&keys), true).await?;
         }
         let jwk = keys.find(&kid).ok_or(InvalidToken)?;
         let key = DecodingKey::from_jwk(jwk).map_err(|_| InvalidToken)?;
@@ -166,6 +233,21 @@ impl TokenVerifier {
             org: c.org_id.ok_or(NoOrg)?,
             expires_at: c.exp,
         })
+    }
+}
+
+/// What the exchange needs from WorkOS.
+pub struct Workos {
+    pub verifier: TokenVerifier,
+    pub users: Arc<dyn UserLookup>,
+}
+
+impl Workos {
+    pub fn new(client: workos::Client, client_id: String) -> Self {
+        Workos {
+            verifier: TokenVerifier::new(client.clone(), client_id),
+            users: Arc::new(client),
+        }
     }
 }
 
@@ -194,7 +276,7 @@ pub(crate) async fn exchange(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let now = OffsetDateTime::now_utc().unix_timestamp();
-    let claims = match workos.verify(token, now).await {
+    let claims = match workos.verifier.verify(token, now).await {
         Ok(c) => c,
         Err(IdentityError::Upstream(detail)) => {
             tracing::warn!(%detail, "workos key fetch failed");
@@ -202,13 +284,17 @@ pub(crate) async fn exchange(
         }
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    match issue(&s.store, &claims, req, now).await {
+    match issue(&s.store, workos.users.as_ref(), &claims, req, now).await {
         Ok(Some(a)) => Json(json!({
             "assertion": sign(&a, &s.assertion_signing_key),
             "expires_at": a.expires_at,
         }))
         .into_response(),
         Ok(None) => StatusCode::FORBIDDEN.into_response(),
+        Err(IdentityError::Upstream(detail)) => {
+            tracing::warn!(%detail, "workos user lookup failed");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
         Err(error) => {
             tracing::warn!(%error, "assertion exchange failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -219,20 +305,35 @@ pub(crate) async fn exchange(
 /// `None` unless the org is a tenant, the user a member, and the agent theirs or their team's.
 async fn issue(
     store: &Store,
+    users: &dyn UserLookup,
     c: &WorkosClaims,
     req: ExchangeRequest,
     now: i64,
-) -> Result<Option<Assertion>, StoreError> {
+) -> Result<Option<Assertion>, IdentityError> {
     let Some(tenant) = store.tenant_for_org(&c.org).await? else {
         return Ok(None);
     };
     let mut tx = store.begin(&tenant).await?;
-    let Some(member) = store::member_for_workos_user(&mut tx, &c.user).await? else {
-        return Ok(None);
+    let member = match store::member_for_workos_user(&mut tx, &c.user).await? {
+        Some(m) => m,
+        None => {
+            // First sign-in: link by verified email, within this org's tenant only. The
+            // lookup is a network call, so no transaction is held across it.
+            drop(tx);
+            let Some(email) = users.verified_email(&c.user).await? else {
+                return Ok(None);
+            };
+            tx = store.begin(&tenant).await?;
+            let Some(m) = store::link_member_by_email(&mut tx, &email, &c.user).await? else {
+                return Ok(None);
+            };
+            m
+        }
     };
     if !store::may_use_agent(&mut tx, &member, &req.agent).await? {
         return Ok(None);
     }
+    tx.commit().await.map_err(StoreError::from)?;
     Ok(Some(Assertion {
         tenant,
         member,
@@ -274,7 +375,7 @@ impl EventSource for workos::Client {
                 })
             }
         })
-        .map_err(|e| IdentityError::Upstream(e.to_string()))
+        .map_err(upstream)
         .boxed()
     }
 }
@@ -284,6 +385,8 @@ struct DirUser {
     id: String,
     organization_id: String,
     state: String,
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -298,19 +401,58 @@ struct GroupUser {
     group: DirGroup,
 }
 
+/// An event reduced to what it does, with every id already validated.
 enum Change {
-    User { user: DirUser, gone: bool },
-    Group { group: DirGroup, gone: bool },
-    Membership { m: GroupUser, added: bool },
+    Member {
+        id: MemberId,
+        directory_user: String,
+        email: Option<String>,
+        workos_user: Option<String>,
+    },
+    RemoveMember(MemberId),
+    Team {
+        id: TeamId,
+        group: String,
+    },
+    RemoveTeam(TeamId),
+    Join {
+        team: TeamId,
+        group: String,
+        member: MemberId,
+        directory_user: String,
+        email: Option<String>,
+    },
+    Leave {
+        team: TeamId,
+        member: MemberId,
+    },
+    /// Nothing to change (an inactive user joining a group); only the cursor moves.
+    Nothing,
 }
 
-impl Change {
-    fn org(&self) -> &str {
-        match self {
-            Change::User { user, .. } => &user.organization_id,
-            Change::Group { group, .. } => &group.organization_id,
-            Change::Membership { m, .. } => &m.group.organization_id,
-        }
+/// Why an event was not applied: a permanent fault is dead-lettered and passed; a transient
+/// one stops the run so the next tick retries it.
+enum Fail {
+    Permanent { org: Option<String>, error: String },
+    Transient(IdentityError),
+}
+
+impl From<StoreError> for Fail {
+    fn from(e: StoreError) -> Self {
+        Fail::Transient(e.into())
+    }
+}
+
+impl From<IdentityError> for Fail {
+    fn from(e: IdentityError) -> Self {
+        Fail::Transient(e)
+    }
+}
+
+fn permanent(org: Option<&str>, error: impl std::fmt::Display) -> Fail {
+    Fail::Permanent {
+        org: org.map(str::to_owned),
+        error: error.to_string(),
     }
 }
 
@@ -329,102 +471,189 @@ fn slug(s: &str) -> String {
         .collect()
 }
 
-/// `None` for an event type Mandate does not act on.
-fn parse(e: &EventSchema) -> Result<Option<Change>, IdentityError> {
+/// `None` for an event type Mandate does not act on; otherwise the org and its change.
+async fn prepare(
+    store: &Store,
+    users: &dyn UserLookup,
+    e: &EventSchema,
+) -> Result<Option<(TenantId, Change)>, Fail> {
     let data = serde_json::Value::Object(e.data.clone().into_iter().collect());
-    let bad = |_| IdentityError::BadEvent(e.id.clone());
-    let user = |gone: bool| -> Result<Change, IdentityError> {
-        let user: DirUser = serde_json::from_value(data.clone()).map_err(bad)?;
-        // Suspended or inactive in the directory counts as gone.
-        let gone = gone || user.state != "active";
-        Ok(Change::User { user, gone })
-    };
-    let group = |gone| -> Result<Change, IdentityError> {
-        Ok(Change::Group {
-            group: serde_json::from_value(data.clone()).map_err(bad)?,
-            gone,
-        })
-    };
-    let membership = |added| -> Result<Change, IdentityError> {
-        Ok(Change::Membership {
-            m: serde_json::from_value(data.clone()).map_err(bad)?,
-            added,
-        })
-    };
-    Ok(Some(match e.event.as_str() {
-        "dsync.user.created" | "dsync.user.updated" => user(false)?,
-        "dsync.user.deleted" => user(true)?,
-        "dsync.group.created" | "dsync.group.updated" => group(false)?,
-        "dsync.group.deleted" => group(true)?,
-        "dsync.group.user_added" => membership(true)?,
-        "dsync.group.user_removed" => membership(false)?,
+    let shape = |err: serde_json::Error| permanent(None, format!("malformed data: {err}"));
+    let member_id =
+        |id: &str, org: &str| MemberId::parse(&slug(id)).map_err(|err| permanent(Some(org), err));
+    let team_id =
+        |id: &str, org: &str| TeamId::parse(&slug(id)).map_err(|err| permanent(Some(org), err));
+    let (org, change) = match e.event.as_str() {
+        kind @ ("dsync.user.created" | "dsync.user.updated" | "dsync.user.deleted") => {
+            let u: DirUser = serde_json::from_value(data).map_err(shape)?;
+            let id = member_id(&u.id, &u.organization_id)?;
+            // Suspended or inactive in the directory counts as gone.
+            let change = if kind == "dsync.user.deleted" || u.state != "active" {
+                Change::RemoveMember(id)
+            } else {
+                let workos_user = match &u.email {
+                    Some(email) => users.user_by_email(email, &u.organization_id).await?,
+                    None => None,
+                };
+                Change::Member {
+                    id,
+                    directory_user: u.id,
+                    email: u.email,
+                    workos_user,
+                }
+            };
+            (u.organization_id, change)
+        }
+        kind @ ("dsync.group.created" | "dsync.group.updated" | "dsync.group.deleted") => {
+            let g: DirGroup = serde_json::from_value(data).map_err(shape)?;
+            let id = team_id(&g.id, &g.organization_id)?;
+            let change = if kind == "dsync.group.deleted" {
+                Change::RemoveTeam(id)
+            } else {
+                Change::Team { id, group: g.id }
+            };
+            (g.organization_id, change)
+        }
+        kind @ ("dsync.group.user_added" | "dsync.group.user_removed") => {
+            let GroupUser { user, group } = serde_json::from_value(data).map_err(shape)?;
+            let org = group.organization_id;
+            if user.organization_id != org {
+                return Err(permanent(
+                    Some(&org),
+                    "user and group are in different orgs",
+                ));
+            }
+            let member = member_id(&user.id, &org)?;
+            let team = team_id(&group.id, &org)?;
+            let change = if kind == "dsync.group.user_removed" {
+                Change::Leave { team, member }
+            } else if user.state == "active" {
+                Change::Join {
+                    team,
+                    group: group.id,
+                    member,
+                    directory_user: user.id,
+                    email: user.email,
+                }
+            } else {
+                Change::Nothing
+            };
+            (org, change)
+        }
         _ => return Ok(None),
-    }))
-}
-
-async fn tenant_for(store: &Store, org: &str, event: &str) -> Result<TenantId, IdentityError> {
-    if let Some(t) = store.tenant_for_org(org).await? {
-        return Ok(t);
-    }
-    let bad = || IdentityError::BadEvent(event.to_owned());
-    let id = TenantId::parse(&slug(org)).map_err(|_| bad())?;
-    store.ensure_tenant(org, &id).await?.ok_or_else(bad)
+    };
+    let tenant = match store.tenant_for_org(&org).await? {
+        Some(t) => t,
+        None => {
+            let id = TenantId::parse(&slug(&org)).map_err(|err| permanent(Some(&org), err))?;
+            store
+                .ensure_tenant(&org, &id)
+                .await?
+                .ok_or_else(|| permanent(Some(&org), format!("tenant id {id} is taken")))?
+        }
+    };
+    Ok(Some((tenant, change)))
 }
 
 /// One event, one transaction: the change and the cursor commit together or not at all.
-async fn apply(store: &Store, e: &EventSchema, change: Change) -> Result<(), IdentityError> {
-    let tenant = tenant_for(store, change.org(), &e.id).await?;
-    let bad = |_| IdentityError::BadEvent(e.id.clone());
-    let mut tx = store.begin(&tenant).await?;
+/// False if another runner already passed this event.
+async fn apply(
+    store: &Store,
+    e: &EventSchema,
+    tenant: &TenantId,
+    change: Change,
+) -> Result<bool, StoreError> {
+    let mut tx = store.begin(tenant).await?;
+    if store::cursor_passed(&mut tx, &e.id).await? {
+        return Ok(false);
+    }
     match change {
-        Change::User { user, gone } => {
-            let m = MemberId::parse(&slug(&user.id)).map_err(bad)?;
-            if gone {
-                store::remove_member(&mut tx, &m).await?;
-            } else {
-                store::upsert_member(&mut tx, &m, &user.id).await?;
-            }
+        Change::Member {
+            id,
+            directory_user,
+            email,
+            workos_user,
+        } => {
+            store::upsert_member(
+                &mut tx,
+                &id,
+                &directory_user,
+                email.as_deref(),
+                workos_user.as_deref(),
+            )
+            .await?
         }
-        Change::Group { group, gone } => {
-            let t = TeamId::parse(&slug(&group.id)).map_err(bad)?;
-            if gone {
-                store::delete_team(&mut tx, &t).await?;
-            } else {
-                store::upsert_team(&mut tx, &t, &group.id).await?;
-            }
+        Change::RemoveMember(id) => store::remove_member(&mut tx, &id).await?,
+        Change::Team { id, group } => store::upsert_team(&mut tx, &id, &group).await?,
+        Change::RemoveTeam(id) => store::delete_team(&mut tx, &id).await?,
+        Change::Join {
+            team,
+            group,
+            member,
+            directory_user,
+            email,
+        } => {
+            store::upsert_member(&mut tx, &member, &directory_user, email.as_deref(), None).await?;
+            store::upsert_team(&mut tx, &team, &group).await?;
+            store::set_team_member(&mut tx, &team, &member, true).await?;
         }
-        Change::Membership { m, added } => {
-            let member = MemberId::parse(&slug(&m.user.id)).map_err(bad)?;
-            let team = TeamId::parse(&slug(&m.group.id)).map_err(bad)?;
-            if !added {
-                store::set_team_member(&mut tx, &team, &member, false).await?;
-            } else if m.user.state == "active" {
-                store::upsert_member(&mut tx, &member, &m.user.id).await?;
-                store::upsert_team(&mut tx, &team, &m.group.id).await?;
-                store::set_team_member(&mut tx, &team, &member, true).await?;
-            }
+        Change::Leave { team, member } => {
+            store::set_team_member(&mut tx, &team, &member, false).await?
         }
+        Change::Nothing => {}
     }
     store::set_directory_cursor(&mut tx, &e.id).await?;
-    tx.commit().await.map_err(StoreError::from)?;
+    tx.commit().await?;
     tracing::info!(event = %e.event, id = %e.id, tenant = %tenant, "directory event applied");
+    Ok(true)
+}
+
+/// Records an event that can never apply and moves the cursor past it, so one bad event
+/// cannot hold back removals in every tenant.
+async fn dead_letter(
+    store: &Store,
+    e: &EventSchema,
+    org: Option<&str>,
+    error: &str,
+) -> Result<(), StoreError> {
+    let mut tx = store.begin_untenanted().await?;
+    if store::cursor_passed(&mut tx, &e.id).await? {
+        return Ok(());
+    }
+    store::dead_letter(&mut tx, &e.id, &e.event, org, error).await?;
+    store::set_directory_cursor(&mut tx, &e.id).await?;
+    tx.commit().await?;
+    tracing::error!(id = %e.id, event = %e.event, %error, "directory event dead-lettered");
     Ok(())
 }
 
-/// Pulls directory events after the stored cursor and applies each idempotently; returns
-/// how many were applied. Stops at the first failure, leaving the cursor before it.
+/// Pulls directory events after the stored cursor and applies each idempotently; returns how
+/// many were applied. Returns 0 at once if another runner holds the sync lock.
 pub async fn sync_directory(
     store: &Store,
     source: &impl EventSource,
+    users: &impl UserLookup,
 ) -> Result<u64, IdentityError> {
+    // Held (as an open session) until this function returns.
+    let Some(_lock) = store.sync_lock().await? else {
+        return Ok(0);
+    };
     let mut events = source.events_after(store.directory_cursor().await?);
     let mut applied = 0;
     while let Some(e) = events.next().await {
         let e = e?;
-        // An unknown type is skipped; the next applied event's cursor moves past it.
-        if let Some(change) = parse(&e)? {
-            apply(store, &e, change).await?;
-            applied += 1;
+        match prepare(store, users, &e).await {
+            // An unknown type is skipped; the next applied event's cursor moves past it.
+            Ok(None) => {}
+            Ok(Some((tenant, change))) => {
+                if apply(store, &e, &tenant, change).await? {
+                    applied += 1;
+                }
+            }
+            Err(Fail::Permanent { org, error }) => {
+                dead_letter(store, &e, org.as_deref(), &error).await?
+            }
+            Err(Fail::Transient(err)) => return Err(err),
         }
     }
     Ok(applied)

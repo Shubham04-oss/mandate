@@ -10,7 +10,8 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mandate::assertion;
 use mandate::identity::{
-    EventSource, IdentityError, KeySource, TokenVerifier, WorkosClaims, sync_directory,
+    EventSource, IdentityError, KeySource, TokenVerifier, UserLookup, Workos, WorkosClaims,
+    sync_directory,
 };
 use mandate::ids::{AgentId, TenantId};
 use mandate::mcp::{AppState, router};
@@ -20,7 +21,7 @@ use mandate::tools::Catalog;
 use serde_json::{Value, json};
 use sqlx::{Connection, PgConnection, Row};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
@@ -70,16 +71,22 @@ fn jwks(kids: &[&str]) -> JwkSet {
     serde_json::from_value(json!({ "keys": keys })).unwrap()
 }
 
-/// Serves the JWKS versions in order (the last one repeats) and counts fetches.
+/// Serves the JWKS versions in order (the last one repeats) and counts fetches; when `slow`,
+/// each fetch waits for `release`.
 struct FakeKeys {
     versions: Vec<JwkSet>,
     fetches: AtomicUsize,
+    slow: AtomicBool,
+    release: tokio::sync::Notify,
 }
 
 #[async_trait]
 impl KeySource for FakeKeys {
     async fn keys(&self) -> Result<JwkSet, IdentityError> {
         let n = self.fetches.fetch_add(1, Ordering::SeqCst);
+        if self.slow.load(Ordering::SeqCst) {
+            self.release.notified().await;
+        }
         Ok(self.versions[n.min(self.versions.len() - 1)].clone())
     }
 }
@@ -88,6 +95,8 @@ fn verifier(versions: Vec<JwkSet>) -> (Arc<FakeKeys>, TokenVerifier) {
     let keys = Arc::new(FakeKeys {
         versions,
         fetches: AtomicUsize::new(0),
+        slow: AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
     });
     let v = TokenVerifier::with_source(keys.clone(), CLIENT_ID.into());
     (keys, v)
@@ -177,17 +186,56 @@ async fn unknown_kid_refetches_keys_once() {
     // Rotation: an unknown kid triggers exactly one refetch, which finds it.
     v.verify(&tok("k2"), NOW + 2).await.unwrap();
     assert_eq!(fetches(), 2);
-    // Still unknown after the one refetch: rejected, no loop.
+    // Unknown within a minute of that forced refetch: rejected from the cached set, no fetch.
     assert!(matches!(
         v.verify(&tok("k9"), NOW + 3).await,
         Err(IdentityError::InvalidToken)
     ));
+    assert_eq!(fetches(), 2);
+    // A minute later an unknown kid may force one refetch again; still unknown, rejected.
+    assert!(matches!(
+        v.verify(&tok("k9"), NOW + 62).await,
+        Err(IdentityError::InvalidToken)
+    ));
     assert_eq!(fetches(), 3);
     // The cache expires after ten minutes.
-    v.verify(&tok("k1"), NOW + 3).await.unwrap();
+    v.verify(&tok("k1"), NOW + 63).await.unwrap();
     assert_eq!(fetches(), 3);
-    v.verify(&tok("k1"), NOW + 3 + 601).await.unwrap();
+    v.verify(&tok("k1"), NOW + 62 + 600).await.unwrap();
     assert_eq!(fetches(), 4);
+}
+
+#[tokio::test]
+async fn unknown_kids_cannot_flood_or_stall_key_fetches() {
+    let (keys, v) = verifier(vec![jwks(&["k1"])]);
+    let v = Arc::new(v);
+    let fetches = || keys.fetches.load(Ordering::SeqCst);
+    let tok = |kid: &str| rs256(kid, claims("user_ann", "org_1", NOW + 3600));
+    v.verify(&tok("k1"), NOW).await.unwrap();
+    for i in 0..50 {
+        assert!(v.verify(&tok(&format!("x{i}")), NOW + 1 + i).await.is_err());
+    }
+    assert_eq!(fetches(), 2, "50 unknown kids in a minute: one extra fetch");
+
+    // A slow forced refresh in flight does not hold up tokens whose kid is cached.
+    keys.slow.store(true, Ordering::SeqCst);
+    let v2 = v.clone();
+    let stuck = tokio::spawn(async move { v2.verify(&tok("x99"), NOW + 120).await });
+    while fetches() < 3 {
+        tokio::task::yield_now().await;
+    }
+    let quick = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        v.verify(
+            &rs256("k1", claims("user_ann", "org_1", NOW + 3600)),
+            NOW + 121,
+        ),
+    )
+    .await
+    .expect("a cached kid does not wait on the refresh");
+    assert!(quick.is_ok());
+    keys.release.notify_one();
+    assert!(stuck.await.unwrap().is_err());
 }
 
 // ---- live ----
@@ -216,7 +264,8 @@ async fn app_store() -> Store {
     .unwrap();
     for g in [
         "grant select, insert, update, delete on all tables in schema public to mandate_app",
-        "revoke all on tenants, directory_cursor from mandate_app",
+        "revoke all on tenants, directory_cursor, directory_dead_letters from mandate_app",
+        "grant select, insert on directory_dead_letters to mandate_app",
         "grant select, insert on tenants to mandate_app",
         "grant select, insert, update on directory_cursor to mandate_app",
     ] {
@@ -276,9 +325,20 @@ fn group(id: &str, org: &str) -> Value {
     })
 }
 
+/// Event ids sort in stream order and are unique per test process (dead letters are keyed by them).
+fn eid(n: usize) -> String {
+    static RUN: std::sync::LazyLock<u128> = std::sync::LazyLock::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    });
+    format!("event_{:020}_{n:04}", *RUN)
+}
+
 fn event(n: usize, kind: &str, data: Value) -> Value {
     json!({
-        "object": "event", "id": format!("event_{n:04}"), "event": kind, "data": data,
+        "object": "event", "id": eid(n), "event": kind, "data": data,
         "created_at": "2026-11-21T00:00:00.000Z"
     })
 }
@@ -295,8 +355,56 @@ fn org() -> String {
     format!("org_{}", Uuid::new_v4().simple().to_string().to_uppercase())
 }
 
-/// Sync tests share the singleton cursor, so they take turns.
+/// Sync tests share the singleton cursor, so they take turns, each from a fresh cursor.
 static SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn reset_cursor() {
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let mut c = PgConnection::connect(&url).await.unwrap();
+    sqlx::query("delete from directory_cursor")
+        .execute(&mut c)
+        .await
+        .unwrap();
+}
+
+/// AuthKit users: (id, email, org, verified).
+struct FakeUsers(Vec<(String, String, String, bool)>);
+
+#[async_trait]
+impl UserLookup for FakeUsers {
+    async fn user_by_email(&self, email: &str, org: &str) -> Result<Option<String>, IdentityError> {
+        Ok(self
+            .0
+            .iter()
+            .find(|u| u.3 && u.1.eq_ignore_ascii_case(email) && u.2 == org)
+            .map(|u| u.0.clone()))
+    }
+    async fn verified_email(&self, user: &str) -> Result<Option<String>, IdentityError> {
+        Ok(self
+            .0
+            .iter()
+            .find(|u| u.0 == user && u.3)
+            .map(|u| u.1.clone()))
+    }
+}
+
+fn nobody() -> FakeUsers {
+    FakeUsers(vec![])
+}
+
+fn authkit(
+    id: &str,
+    directory_user: &str,
+    org: &str,
+    verified: bool,
+) -> (String, String, String, bool) {
+    (
+        id.into(),
+        format!("{directory_user}@example.com"),
+        org.into(),
+        verified,
+    )
+}
 
 async fn tenant_of(s: &Store, org: &str) -> TenantId {
     s.tenant_for_org(org)
@@ -306,7 +414,8 @@ async fn tenant_of(s: &Store, org: &str) -> TenantId {
 }
 
 /// Ann and Bob in group Eng with Ann a member; agents: ann's, bob's and eng's.
-async fn seed_directory(s: &Store, org: &str) -> TenantId {
+async fn seed_directory(s: &Store, org: &str, users: &FakeUsers) -> TenantId {
+    reset_cursor().await;
     let src = source(vec![
         event(
             1,
@@ -327,7 +436,7 @@ async fn seed_directory(s: &Store, org: &str) -> TenantId {
             org,
         ),
     ]);
-    assert_eq!(sync_directory(s, &src).await.unwrap(), 4);
+    assert_eq!(sync_directory(s, &src, users).await.unwrap(), 4);
     let t = tenant_of(s, org).await;
     let mut tx = s.begin(&t).await.unwrap();
     for (id, kind, m, team) in [
@@ -349,7 +458,7 @@ async fn seed_directory(s: &Store, org: &str) -> TenantId {
     t
 }
 
-fn app(store: Store, verifier: TokenVerifier) -> axum::Router {
+fn app(store: Store, verifier: TokenVerifier, users: FakeUsers) -> axum::Router {
     let key = SigningKey::from_bytes(&[7; 32]);
     router(Arc::new(AppState {
         store,
@@ -361,7 +470,10 @@ fn app(store: Store, verifier: TokenVerifier) -> axum::Router {
         catalog: Catalog::new(vec![]),
         assertion_key: key.verifying_key(),
         assertion_signing_key: key,
-        workos: Some(Arc::new(verifier)),
+        workos: Some(Arc::new(Workos {
+            verifier,
+            users: Arc::new(users),
+        })),
     }))
 }
 
@@ -386,11 +498,26 @@ async fn assertion_only_for_own_or_team_agents() {
     let _turn = SYNC.lock().await;
     let s = app_store().await;
     let o = org();
-    let t = seed_directory(&s, &o).await;
+    // Ann's AuthKit account exists at sync time and is linked then; Bob's is linked at first sign-in.
+    let t = seed_directory(
+        &s,
+        &o,
+        &FakeUsers(vec![authkit("user_ann", "directory_user_ANN", &o, true)]),
+    )
+    .await;
     let (_, v) = verifier(vec![jwks(&["k1"])]);
-    let app = app(s, v);
+    let app = app(
+        s,
+        v,
+        FakeUsers(vec![
+            authkit("user_ann", "directory_user_ANN", &o, true),
+            authkit("user_bob", "directory_user_BOB", &o, true),
+            authkit("user_eve", "eve", &o, true),
+            authkit("user_zed", "directory_user_BOB", &o, false),
+        ]),
+    );
     let now = OffsetDateTime::now_utc().unix_timestamp();
-    let ann = rs256("k1", claims("directory_user_ANN", &o, now + 600));
+    let ann = rs256("k1", claims("user_ann", &o, now + 600));
 
     for agent in ["ann-bot", "eng-bot"] {
         let (status, body) = exchange(&app, &ann, json!({ "agent": agent, "space": "s1" })).await;
@@ -408,22 +535,42 @@ async fn assertion_only_for_own_or_team_agents() {
         assert!((now + 300..=now + 302).contains(&a.expires_at));
         assert_eq!(body["expires_at"], json!(a.expires_at));
     }
-    // Another member's personal agent, an unknown agent, an unknown org, an unknown user: 403.
-    let stranger_org = rs256("k1", claims("directory_user_ANN", &org(), now + 600));
-    let stranger = rs256("k1", claims("directory_user_ZED", &o, now + 600));
+    // Another member's personal agent, an unknown agent, an unknown org, an AuthKit user whose
+    // verified email matches no member, one whose matching email is unverified, and a
+    // directory id as `sub` (not an AuthKit user): 403.
+    let tok = |sub: &str, org: &str| rs256("k1", claims(sub, org, now + 600));
+    let (stranger_org, eve, zed, dir) = (
+        tok("user_ann", &org()),
+        tok("user_eve", &o),
+        tok("user_zed", &o),
+        tok("directory_user_ANN", &o),
+    );
     for (bearer, agent) in [
         (&ann, "bob-bot"),
         (&ann, "nobody"),
         (&stranger_org, "ann-bot"),
-        (&stranger, "ann-bot"),
+        (&eve, "bob-bot"),
+        (&zed, "bob-bot"),
+        (&dir, "ann-bot"),
     ] {
         let (status, _) = exchange(&app, bearer, json!({ "agent": agent })).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{agent}");
     }
+    // Bob signs in for the first time: linked by verified email, then served.
+    let bob = tok("user_bob", &o);
+    let (status, body) = exchange(&app, &bob, json!({ "agent": "bob-bot" })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let a = assertion::verify(
+        body["assertion"].as_str().unwrap(),
+        &SigningKey::from_bytes(&[7; 32]).verifying_key(),
+        now,
+    )
+    .unwrap();
+    assert_eq!(a.member.as_str(), "directory_user_bob");
     // A bad or missing WorkOS token is 401, and a Mandate assertion is not a WorkOS token.
     let (status, _) = exchange(&app, "garbage", json!({ "agent": "ann-bot" })).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    let expired = rs256("k1", claims("directory_user_ANN", &o, now - 1));
+    let expired = rs256("k1", claims("user_ann", &o, now - 1));
     let (status, _) = exchange(&app, &expired, json!({ "agent": "ann-bot" })).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
@@ -434,7 +581,7 @@ async fn removed_user_loses_grants_and_pending_approvals() {
     let _turn = SYNC.lock().await;
     let s = app_store().await;
     let o = org();
-    let t = seed_directory(&s, &o).await;
+    let t = seed_directory(&s, &o, &nobody()).await;
     let (ann, bob) = ("directory_user_ann", "directory_user_bob");
     let later = OffsetDateTime::now_utc() + Duration::hours(1);
     let mut tx = s.begin(&t).await.unwrap();
@@ -468,7 +615,7 @@ async fn removed_user_loses_grants_and_pending_approvals() {
         "dsync.user.deleted",
         user("directory_user_ANN", &o, "inactive"),
     )]);
-    assert_eq!(sync_directory(&s, &gone).await.unwrap(), 1);
+    assert_eq!(sync_directory(&s, &gone, &nobody()).await.unwrap(), 1);
 
     let mut tx = s.begin(&t).await.unwrap();
     let members: Vec<String> = sqlx::query_scalar("select id from members order by id")
@@ -525,7 +672,7 @@ async fn removed_user_loses_grants_and_pending_approvals() {
         "dsync.user.updated",
         user("directory_user_BOB", &o, "suspended"),
     )]);
-    sync_directory(&s, &suspended).await.unwrap();
+    sync_directory(&s, &suspended, &nobody()).await.unwrap();
     let mut tx = s.begin(&t).await.unwrap();
     let n: i64 = sqlx::query_scalar("select count(*) from members")
         .fetch_one(&mut *tx)
@@ -544,7 +691,7 @@ async fn snapshot(s: &Store, t: &TenantId) -> Vec<String> {
     let mut tx = s.begin(t).await.unwrap();
     let mut out = Vec::new();
     for q in [
-        "select id || ':' || coalesce(workos_user_id, '') from members order by 1",
+        "select id || ':' || coalesce(workos_directory_user_id, '') || ':' || coalesce(workos_user_id, '') from members order by 1",
         "select id || ':' || coalesce(workos_group_id, '') from teams order by 1",
         "select team_id || ':' || member_id from team_members order by 1",
     ] {
@@ -563,6 +710,8 @@ async fn replayed_events_change_nothing() {
     let _turn = SYNC.lock().await;
     let s = app_store().await;
     let o = org();
+    reset_cursor().await;
+    let users = FakeUsers(vec![authkit("user_ann", "directory_user_ANN", &o, true)]);
     let src = source(vec![
         event(
             1,
@@ -613,30 +762,124 @@ async fn replayed_events_change_nothing() {
         ),
         event(10, "dsync.group.updated", group("directory_group_ENG", &o)),
     ]);
-    assert_eq!(sync_directory(&s, &src).await.unwrap(), 10);
+    assert_eq!(sync_directory(&s, &src, &users).await.unwrap(), 10);
     let t = tenant_of(&s, &o).await;
     let first = snapshot(&s, &t).await;
     assert_eq!(
         first,
         [
-            "directory_user_ann:directory_user_ANN,directory_user_bob:directory_user_BOB",
+            "directory_user_ann:directory_user_ANN:user_ann,directory_user_bob:directory_user_BOB:",
             "directory_group_eng:directory_group_ENG",
             "directory_group_eng:directory_user_ann",
         ]
     );
-    assert_eq!(sync_directory(&s, &src).await.unwrap(), 10);
-    assert_eq!(snapshot(&s, &t).await, first);
-    // The cursor was committed with the last event, so the next pull starts after it.
+    // The cursor was committed with the last event: the next pull starts after it, and an
+    // event the source sends again anyway is skipped.
+    assert_eq!(sync_directory(&s, &src, &users).await.unwrap(), 0);
     assert_eq!(
         src.seen_after.lock().unwrap().last().unwrap().as_deref(),
-        Some("event_0010")
+        Some(eid(10).as_str())
     );
+    // With the cursor gone, the whole batch really is applied again: same rows.
+    reset_cursor().await;
+    assert_eq!(sync_directory(&s, &src, &users).await.unwrap(), 10);
+    assert_eq!(snapshot(&s, &t).await, first);
     // Deleting the group drops its memberships.
     let del = source(vec![event(
         11,
         "dsync.group.deleted",
         group("directory_group_ENG", &o),
     )]);
-    sync_directory(&s, &del).await.unwrap();
+    sync_directory(&s, &del, &users).await.unwrap();
     assert_eq!(snapshot(&s, &t).await[1..], ["", ""]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_syncs_apply_each_event_once() {
+    let _turn = SYNC.lock().await;
+    let s = app_store().await;
+    let o = org();
+    reset_cursor().await;
+    let src = source(vec![
+        event(
+            1,
+            "dsync.user.created",
+            user("directory_user_ANN", &o, "active"),
+        ),
+        event(
+            2,
+            "dsync.user.deleted",
+            user("directory_user_ANN", &o, "inactive"),
+        ),
+        event(
+            3,
+            "dsync.user.created",
+            user("directory_user_BOB", &o, "active"),
+        ),
+    ]);
+    let users = nobody();
+    let (a, b) = tokio::join!(
+        sync_directory(&s, &src, &users),
+        sync_directory(&s, &src, &users)
+    );
+    assert_eq!(a.unwrap() + b.unwrap(), 3);
+    assert_eq!(s.directory_cursor().await.unwrap(), Some(eid(3)));
+    let t = tenant_of(&s, &o).await;
+    assert_eq!(
+        snapshot(&s, &t).await[0],
+        "directory_user_bob:directory_user_BOB:"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn bad_events_are_dead_lettered_and_removals_keep_flowing() {
+    let _turn = SYNC.lock().await;
+    let s = app_store().await;
+    let (o, other) = (org(), org());
+    reset_cursor().await;
+    let mut cross = membership(
+        3,
+        "dsync.group.user_added",
+        "directory_user_ANN",
+        "directory_group_ENG",
+        &o,
+    );
+    cross["data"]["user"]["organization_id"] = json!(other);
+    let src = source(vec![
+        event(
+            1,
+            "dsync.user.created",
+            user("directory_user_ANN", &o, "active"),
+        ),
+        event(2, "dsync.user.created", json!({ "unexpected": true })),
+        cross,
+        event(
+            4,
+            "dsync.user.deleted",
+            user("directory_user_ANN", &o, "inactive"),
+        ),
+    ]);
+    assert_eq!(sync_directory(&s, &src, &nobody()).await.unwrap(), 2);
+    assert_eq!(s.directory_cursor().await.unwrap(), Some(eid(4)));
+    let t = tenant_of(&s, &o).await;
+    assert_eq!(
+        snapshot(&s, &t).await,
+        ["", "", ""],
+        "removal applied, cross-org join not"
+    );
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let mut c = PgConnection::connect(&url).await.unwrap();
+    let dead: Vec<(String, Option<String>)> = sqlx::query(
+        "select event_id, org_id from directory_dead_letters where event_id = any($1) order by event_id",
+    )
+    .bind(vec![eid(2), eid(3)])
+    .fetch_all(&mut c)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.get(0), r.get(1)))
+    .collect();
+    assert_eq!(dead, [(eid(2), None), (eid(3), Some(o.clone()))]);
 }
