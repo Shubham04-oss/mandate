@@ -274,7 +274,7 @@ pub(crate) async fn exchange(
     Json(req): Json<ExchangeRequest>,
 ) -> Response {
     let Some(workos) = &s.workos else {
-        return StatusCode::NOT_FOUND.into_response();
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Some(token) = headers
         .get(http::header::AUTHORIZATION)

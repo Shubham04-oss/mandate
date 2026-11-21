@@ -36,7 +36,7 @@ pub struct AppState {
     pub catalog: Catalog,
     pub assertion_key: VerifyingKey,
     pub assertion_signing_key: SigningKey,
-    /// `None` when WorkOS is not configured: the exchange route answers 404.
+    /// `None` when WorkOS is not configured: the exchange route answers 503.
     pub workos: Option<Arc<Workos>>,
 }
 

@@ -267,6 +267,21 @@ async fn missing_or_bad_assertion_is_401() {
 }
 
 #[tokio::test]
+async fn assertion_exchange_is_503_without_workos() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://x:y@127.0.0.1:1/none")
+        .unwrap();
+    let app = app(Store::from_pool(pool), Arc::new(Recorder::default()));
+    let req = Request::post("/v1/assertions")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer anything")
+        .body(Body::from(json!({ "agent": "bot" }).to_string()))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 #[ignore]
 async fn list_shows_only_granted_tools() {
     let s = app_store().await;
