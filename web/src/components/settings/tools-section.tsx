@@ -40,19 +40,15 @@ import {
 // ponytail: every control here changes local state only. Connecting, disconnecting, events and who
 // can use a tool all go through the core, which holds the credentials in the token vault.
 
+// The colour lives in the dot, the text stays neutral. Orange, and its warm tint, only where the
+// person must act.
 const statusPill: Record<
 	Exclude<ToolStatus, "connected">,
-	{ label: string; className: string }
+	{ label: string; dot: string; fill: string }
 > = {
-	connecting: {
-		label: "Connecting…",
-		className: "border-border-strong text-soft-foreground",
-	},
-	expired: { label: "Expired", className: "border-warn/50 text-warn" },
-	failed: {
-		label: "Failed",
-		className: "border-destructive/50 text-danger-foreground",
-	},
+	connecting: { label: "Connecting…", dot: "bg-sea", fill: "bg-hover" },
+	expired: { label: "Expired", dot: "bg-gold-deep", fill: "bg-gold-soft" },
+	failed: { label: "Failed", dot: "bg-destructive", fill: "bg-hover" },
 };
 
 export function ToolsSection() {
@@ -69,9 +65,12 @@ export function ToolsSection() {
 
 	return (
 		<div className="flex flex-col gap-8">
-			<header className="flex flex-col gap-1.5">
-				<h2 className="m-0 font-bold text-[20px] tracking-[-0.01em]">Tools</h2>
-				<p className="m-0 max-w-[560px] text-[13px] text-muted-foreground leading-normal">
+			<header className="flex flex-col gap-3">
+				<span className="eyebrow">Connections</span>
+				<h2 className="m-0 font-semibold text-[22px] tracking-[-0.016em]">
+					Tools
+				</h2>
+				<p className="m-0 max-w-[560px] text-[13.5px] text-soft-foreground leading-normal">
 					Agents use a tool only with the access its person already has, and
 					only for the people you allow here.
 				</p>
@@ -81,7 +80,7 @@ export function ToolsSection() {
 				<div className="flex flex-wrap items-center gap-2">
 					<h3
 						id="connected-h"
-						className="m-0 font-semibold text-[11px] text-muted-foreground uppercase tracking-[0.04em]"
+						className="m-0 font-semibold text-[16px] tracking-[-0.01em]"
 					>
 						Connected
 					</h3>
@@ -89,7 +88,7 @@ export function ToolsSection() {
 						{summarizeConnections(connected)}
 					</span>
 				</div>
-				<ul className="m-0 flex list-none flex-col rounded-xl bg-raised p-0 shadow-ring">
+				<ul className="m-0 flex list-none flex-col rounded-card bg-raised p-0 shadow-card">
 					{connected.map((tool) => (
 						<ConnectedRow
 							key={tool.id}
@@ -112,7 +111,7 @@ export function ToolsSection() {
 					<div className="flex flex-col gap-1">
 						<h3
 							id="add-h"
-							className="m-0 font-semibold text-[17px] tracking-[-0.01em]"
+							className="m-0 font-semibold text-[16px] tracking-[-0.01em]"
 						>
 							Add a tool
 						</h3>
@@ -194,12 +193,12 @@ function ConnectedRow({
 								{tool.name}
 								{pill ? (
 									<Badge
-										variant="outline"
 										className={cn(
-											"h-5 bg-transparent font-semibold",
-											pill.className,
+											"h-5 gap-1.5 pr-2 pl-1.5 font-medium text-[11px] text-soft-foreground",
+											pill.fill,
 										)}
 									>
+										<i className={cn("status-dot", pill.dot)} />
 										{pill.label}
 									</Badge>
 								) : null}

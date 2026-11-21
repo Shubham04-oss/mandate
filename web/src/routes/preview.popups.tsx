@@ -165,7 +165,7 @@ function WelcomeDialog() {
 					variant="hero"
 					position="center 55%"
 				>
-					<Wordmark className="absolute top-[18px] left-[22px] z-10 text-white [text-shadow:0_1px_8px_rgba(0,0,0,0.25)] [&_i]:text-gold" />
+					<Wordmark className="absolute top-[18px] left-[22px] z-10 text-white [text-shadow:0_1px_8px_rgba(0,0,0,0.25)]" />
 				</DialogScene>
 				<DialogBody className="[[data-slot=dialog-scene]+&]:-mt-[18px]">
 					<DialogHeader>

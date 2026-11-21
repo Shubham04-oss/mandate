@@ -18,14 +18,15 @@ export function Wordmark({ className }: { className?: string }) {
 	return (
 		<span
 			className={cn(
-				"font-bold font-wordmark text-[22px] leading-none tracking-[-0.055em]",
+				"inline-flex items-baseline font-bold text-[22px] leading-none tracking-[-0.055em]",
 				className,
 			)}
 			role="img"
 			aria-label={brand.name}
 		>
 			{brand.name}
-			<i className="text-gold-deep not-italic">.</i>
+			{/* the dot: the orange's home after the eyebrow dash, gold-deep on any ground */}
+			<i className="ml-[0.1em] inline-block size-[0.2em] rounded-[0.14em] bg-gold-deep" />
 		</span>
 	);
 }

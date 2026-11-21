@@ -69,7 +69,8 @@ function RailButton({ item }: { item: RailItem }) {
 			{item.count ? (
 				<span
 					aria-hidden="true"
-					className="absolute top-[3px] right-[3px] grid h-[15px] min-w-[15px] place-items-center rounded-full bg-foreground px-[3px] font-bold text-[9px] text-canvas"
+					// orange is the colour of "needs you"; ink on it reads at 7:1
+					className="absolute top-[3px] right-[3px] grid h-[15px] min-w-[15px] place-items-center rounded-full bg-gold-deep px-[3px] font-bold text-[#111111] text-[9px]"
 				>
 					{item.count}
 				</span>
@@ -130,6 +131,7 @@ function NeedsTab({ waiting }: { waiting: Approval[] }) {
 					<PersonAvatar key={person.id} person={person} className="size-5" />
 				))}
 			</AvatarGroup>
+			<i aria-hidden="true" className="status-dot bg-gold-deep" />
 			{waiting.length} need you
 			<Icon
 				name="chevron-right"
@@ -343,7 +345,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 							className="absolute top-2.5 right-3 size-7 split:hidden"
 						/>
 					</header>
-					<main className="relative mx-2 flex min-w-0 flex-1 flex-col rounded-t-[17px] bg-canvas split:ml-0">
+					<main className="relative mx-2 flex min-w-0 flex-1 flex-col rounded-t-[17px] bg-canvas shadow-[inset_0_0_0_1px_var(--canvas-edge)] split:ml-0">
 						<NeedsTab waiting={waiting} />
 						{children}
 					</main>

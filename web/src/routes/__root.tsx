@@ -25,13 +25,25 @@ export const Route = createRootRoute({
 				href: appCss,
 			},
 		],
+		// Runs before the first paint, so the page never flashes the other theme.
+		scripts: [{ children: followDeviceTheme }],
 	}),
 	shellComponent: RootDocument,
 });
 
+// Dark unless the device asks for light; follows the setting when it changes.
+// ponytail: no in-app switch yet; the device setting decides.
+const followDeviceTheme = `(() => {
+	const light = window.matchMedia("(prefers-color-scheme: light)");
+	const apply = () => document.documentElement.classList.toggle("light", light.matches);
+	apply();
+	light.addEventListener("change", apply);
+})();`;
+
 function RootDocument({ children }: { children: React.ReactNode }) {
 	return (
-		<html lang="en">
+		// The theme class is set by the script above before React starts.
+		<html lang="en" suppressHydrationWarning>
 			<head>
 				<HeadContent />
 			</head>

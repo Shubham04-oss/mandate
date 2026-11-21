@@ -29,8 +29,8 @@ const buttonVariants = cva(
 				xs: "h-[26px] gap-1 px-2.5 text-[11.5px] [&_svg:not([class*='size-'])]:size-3",
 				sm: "h-[30px] gap-1.5 px-3 text-[12px] [&_svg:not([class*='size-'])]:size-3.5",
 				// full-width actions on the sign-in pages
-				md: "h-11 gap-2 rounded-xl px-4 text-[13px]",
-				lg: "h-[46px] gap-2.5 rounded-xl px-4 text-[13.5px]",
+				md: "h-11 gap-2 px-5 text-[13px]",
+				lg: "h-[46px] gap-2.5 px-5 text-[13.5px]",
 				icon: "size-8",
 				"icon-xs": "size-6 [&_svg:not([class*='size-'])]:size-3",
 				"icon-sm": "size-7 [&_svg:not([class*='size-'])]:size-3.5",

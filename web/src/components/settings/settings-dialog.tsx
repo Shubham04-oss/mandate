@@ -53,7 +53,7 @@ export function SettingsDialog({
 	const { me } = appRoute.useLoaderData();
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent className="h-[min(760px,calc(100dvh-2rem))] w-[min(1080px,calc(100%-2rem))] max-w-none rounded-3xl max-[720px]:h-dvh max-[720px]:w-full max-[720px]:max-w-full max-[720px]:rounded-none min-[721px]:flex-row">
+			<DialogContent className="h-[min(760px,calc(100dvh-2rem))] w-[min(1080px,calc(100%-2rem))] max-w-none rounded-window max-[720px]:h-dvh max-[720px]:w-full max-[720px]:max-w-full max-[720px]:rounded-none min-[721px]:flex-row">
 				<nav
 					aria-label="Settings"
 					className="flex flex-none flex-col gap-4 bg-background px-3 pt-5 pb-3 max-[720px]:flex-row max-[720px]:items-center max-[720px]:gap-1 max-[720px]:overflow-x-auto max-[720px]:pt-3 max-[720px]:pr-14 min-[721px]:w-56"
@@ -69,7 +69,7 @@ export function SettingsDialog({
 							key={group.id}
 							className="flex flex-col gap-0.5 max-[720px]:flex-row"
 						>
-							<span className="px-2.5 pb-1 font-semibold text-[11px] text-muted-foreground uppercase tracking-[0.04em] max-[720px]:hidden">
+							<span className="px-2.5 pb-1 font-medium text-[12px] text-muted-foreground max-[720px]:hidden">
 								{group.title}
 							</span>
 							{group.sections.map((section) => (

@@ -122,7 +122,7 @@ const quickActions: Quick[] = [
 
 function QuickActions() {
 	return (
-		<div className="quick-band rounded-2xl p-2">
+		<div className="quick-band rounded-card p-2">
 			<ul
 				aria-label="Quick actions from your connected apps"
 				className="m-0 grid list-none grid-cols-2 p-0 gap-2 min-[560px]:grid-cols-4"
@@ -160,45 +160,49 @@ type Row = {
 	when: string;
 };
 
+// Icon tiles, tinted by who acted and how it ended: sky and sea for the agent at work, green for
+// done, grey for waiting on the clock. Corners are 0.3 of the tile, as on the website.
+const tile = "grid size-[26px] place-items-center rounded-[8px]";
+
 const marks: Record<string, ReactNode> = {
 	live: (
-		<span className="grid size-6 place-items-center rounded-full bg-ok">
-			<i className="size-[7px] rounded-full bg-ok-solid" />
+		<span className={cn(tile, "bg-sky-soft")}>
+			<i className="status-dot animate-pulse bg-sea" />
 		</span>
 	),
 	agent: (
-		<Avatar className="size-6">
+		<Avatar className="size-[26px]">
 			<AvatarImage src={sample.agent.avatar} alt="" />
 		</Avatar>
 	),
 	scheduled: (
-		<span className="grid size-6 place-items-center rounded-full bg-selected text-muted-foreground">
-			<Icon name="clock" size={14} />
+		<span className={cn(tile, "bg-hover text-soft-foreground")}>
+			<Icon name="clock" size={14} strokeWidth={1.9} />
 		</span>
 	),
 	done: (
-		<span className="grid size-6 place-items-center rounded-full bg-ok text-ok-foreground">
+		<span className={cn(tile, "bg-ok text-ok-foreground")}>
 			<Icon name="check" size={14} strokeWidth={2.4} />
 		</span>
 	),
 	approved: (
-		<span className="grid size-6 place-items-center rounded-full bg-ok text-ok-foreground">
-			<Icon name="shield-check" size={14} />
+		<span className={cn(tile, "bg-ok text-ok-foreground")}>
+			<Icon name="shield-check" size={14} strokeWidth={1.9} />
 		</span>
 	),
 	refused: (
-		<span className="grid size-6 place-items-center rounded-full bg-destructive/15 text-danger-foreground">
-			<Icon name="cross-circle" size={14} />
+		<span className={cn(tile, "bg-destructive/12 text-danger-foreground")}>
+			<Icon name="cross-circle" size={14} strokeWidth={1.9} />
 		</span>
 	),
 	expired: (
-		<span className="grid size-6 place-items-center rounded-full bg-selected text-muted-foreground">
-			<Icon name="clock" size={14} />
+		<span className={cn(tile, "bg-hover text-soft-foreground")}>
+			<Icon name="clock" size={14} strokeWidth={1.9} />
 		</span>
 	),
 };
 
-/** A side panel: a painted scene fading into a surface one step darker than the canvas. */
+/** A side panel: a card with a painted scene fading into it, named by an eyebrow. */
 function SidePanel({
 	area,
 	scene,
@@ -219,7 +223,7 @@ function SidePanel({
 		<section
 			data-area={area}
 			aria-labelledby={id}
-			className="flex flex-col gap-0.5 overflow-hidden rounded-2xl bg-background px-1.5 pb-1.5"
+			className="flex flex-col gap-0.5 overflow-hidden rounded-card bg-raised px-1.5 pb-1.5 shadow-card"
 		>
 			<div
 				aria-hidden="true"
@@ -227,7 +231,7 @@ function SidePanel({
 				style={{ backgroundImage: `url(${scene})` }}
 			/>
 			<div className="-mt-[30px] relative flex h-9 items-center gap-2 px-2.5">
-				<h2 id={id} className="m-0 font-semibold text-[12.5px]">
+				<h2 id={id} className="eyebrow">
 					{title}
 				</h2>
 				{count ? (
@@ -249,7 +253,7 @@ function SidePanel({
 				>
 					<ItemMedia>{marks[row.kind]}</ItemMedia>
 					<ItemContent className="min-w-0 gap-0">
-						<ItemTitle className="block w-full truncate text-[12.5px]">
+						<ItemTitle className="block w-full truncate font-semibold text-[12.5px]">
 							{row.title}
 						</ItemTitle>
 						<ItemDescription className="truncate text-[11.5px]">
