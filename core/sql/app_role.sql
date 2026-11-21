@@ -25,3 +25,7 @@ grant usage on sequence audit_id_seq to :"role";
 grant select, insert on tenants to :"role";
 grant select, insert, update on directory_cursor to :"role";
 grant select, insert on directory_dead_letters to :"role";
+
+-- Conversations (RLS forced). Relayed events and approval links are append-only.
+grant select, insert, update on conversations to :"role";
+grant select, insert on conversation_events, conversation_approvals to :"role";

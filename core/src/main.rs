@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use mandate::api::conversations::{self, Conversations};
 use mandate::assertion::{Assertion, TTL_SECS, sign};
+use mandate::eve::EveClient;
 use mandate::identity::{Workos, sync_directory};
 use mandate::ids::{AgentId, MemberId, SpaceId, TenantId};
 use mandate::mcp::{AppState, router};
@@ -172,7 +174,16 @@ async fn serve() -> Result<()> {
         assertion_signing_key: signing,
         workos: workos.map(|(client, id)| Arc::new(Workos::new(client, id))),
     });
-    let app = router(state).route("/healthz", axum::routing::get(|| async { "ok" }));
+    let mut app = router(state.clone()).route("/healthz", axum::routing::get(|| async { "ok" }));
+    match env("MANDATE_EVE_URL") {
+        Ok(url) => {
+            let eve =
+                EveClient::new(url::Url::parse(&url).map_err(|e| format!("MANDATE_EVE_URL: {e}"))?);
+            let conv = Conversations::new(state, eve, Duration::from_secs(1));
+            app = app.merge(conversations::router(conv));
+        }
+        Err(_) => tracing::warn!("MANDATE_EVE_URL not set: /v1/conversations is off"),
+    }
 
     let bind = std::env::var("MANDATE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&bind)

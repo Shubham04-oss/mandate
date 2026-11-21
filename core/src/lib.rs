@@ -1,3 +1,4 @@
+pub mod api;
 pub mod assertion;
 pub mod eve;
 pub mod gate;
