@@ -14,7 +14,7 @@ use mandate::api::auth::{
 };
 use mandate::api::session::{self, Session};
 use mandate::api::{self, ApiState, ratelimit};
-use mandate::ids::{MemberId, TenantId};
+use mandate::ids::{AgentId, MemberId, TenantId};
 use mandate::store::Store;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1327,4 +1327,250 @@ async fn code_verify_signs_in() {
     let v = body_json(r).await;
     assert_eq!(v["status"], "signed_in");
     assert_eq!(v["me"]["is_admin"], false);
+}
+
+/// Captures the log lines written while the guard lives (this test's thread only).
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Logs;
+    fn make_writer(&'a self) -> Logs {
+        self.clone()
+    }
+}
+
+impl Logs {
+    fn capture() -> (Logs, tracing::subscriber::DefaultGuard) {
+        let logs = Logs::default();
+        let sub = tracing_subscriber::fmt()
+            .json()
+            .with_writer(logs.clone())
+            .finish();
+        (logs.clone(), tracing::subscriber::set_default(sub))
+    }
+
+    /// `(type, member, actor)` of every event published so far.
+    fn events(&self) -> Vec<(String, Option<String>, String)> {
+        let bytes = self.0.lock().unwrap().clone();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v["fields"]["message"] == "event published")
+            .map(|v| {
+                let f = &v["fields"];
+                let text = |k: &str| f[k].as_str().map(str::to_owned);
+                (
+                    text("event").unwrap(),
+                    text("member"),
+                    text("actor").unwrap(),
+                )
+            })
+            .collect()
+    }
+}
+
+fn sign_up_body(email: &str) -> Value {
+    json!({ "email": email, "password": "a long passphrase", "name": "Ann Lee", "org_name": "Acme Robotics" })
+}
+
+#[tokio::test]
+#[ignore]
+async fn sign_up_answers_next_verify_email() {
+    let h = Harness::new().await;
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let r = h.post("/v1/auth/sign-up", sign_up_body(&email)).await;
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    assert!(session_cookie(&r).is_none());
+    let v = body_json(r).await;
+    assert_eq!(v["status"], "next");
+    assert_eq!(v["next"], "verify_email");
+    assert!(v["pending"].as_str().is_some_and(|p| p.len() == 43));
+    let user = h.fake.by_email(&email).unwrap();
+    assert!(h.fake.called(&format!("send-verification {}", user.id)));
+    // An existing account gets exactly the same answer, and no second user or email.
+    let existing = h.user("member");
+    let r = h
+        .post("/v1/auth/sign-up", sign_up_body(&existing.email))
+        .await;
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let w = body_json(r).await;
+    assert_eq!(w["status"], v["status"]);
+    assert_eq!(w["next"], v["next"]);
+    assert!(w["pending"].as_str().is_some_and(|p| p.len() == 43));
+    assert!(!h.fake.called(&format!("send-verification {}", existing.id)));
+    // Too short a password is refused for every email alike, before WorkOS.
+    let mut short = sign_up_body(&format!("x-{}@acme.test", Uuid::new_v4().simple()));
+    short["password"] = json!("short");
+    let r = h.post("/v1/auth/sign-up", short).await;
+    assert_eq!(body_json(r).await["error"]["code"], "invalid_input");
+}
+
+#[tokio::test]
+#[ignore]
+async fn verify_email_creates_org_and_admin_member() {
+    let h = Harness::new().await;
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let v = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
+    let pending = v["pending"].as_str().unwrap().to_owned();
+    // A wrong code keeps the step.
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": pending, "code": "000000" }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "code_invalid");
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": pending, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(session_cookie(&r).is_some());
+    let v = body_json(r).await;
+    assert_eq!(v["status"], "signed_in", "{v}");
+    assert_eq!(v["me"]["is_admin"], true);
+    assert_eq!(v["me"]["org"]["name"], "Acme Robotics");
+    assert_eq!(
+        v["me"]["org"]["summary"],
+        json!({ "people": 1, "agents": 1 })
+    );
+    // WorkOS: an org with that name, the person its admin.
+    let user = h.fake.by_email(&email).unwrap();
+    assert!(user.verified);
+    let m = &user.memberships[0];
+    assert_eq!(
+        (m.org_name.as_str(), m.role.as_str()),
+        ("Acme Robotics", "admin")
+    );
+    assert!(h.fake.called("create-org Acme Robotics"));
+    // Mandate: a tenant for that org, an admin member linked to the user, a personal operator.
+    let tenant = h.store.tenant_for_org(&m.org).await.unwrap().unwrap();
+    assert_eq!(v["me"]["org"]["id"], tenant.as_str());
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    let member = mandate::store::member_for_workos_user(&mut tx, &user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let agent = AgentId::parse(&format!("op-{member}")).unwrap();
+    assert!(
+        mandate::store::may_use_agent(&mut tx, &member, &agent)
+            .await
+            .unwrap()
+    );
+    drop(tx);
+    // The step is used up.
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": pending, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "pending_expired");
+    // A decoy step (existing email) never verifies.
+    let existing = h.user("member");
+    let v = body_json(
+        h.post("/v1/auth/sign-up", sign_up_body(&existing.email))
+            .await,
+    )
+    .await;
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": v["pending"], "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "code_invalid");
+}
+
+#[tokio::test]
+#[ignore]
+async fn resend_is_202() {
+    let h = Harness::new().await;
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let v = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
+    let user = h.fake.by_email(&email).unwrap();
+    h.fake.calls.lock().unwrap().clear();
+    let r = h
+        .post(
+            "/v1/auth/verify-email/resend",
+            json!({ "pending": v["pending"] }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    assert!(h.fake.called(&format!("send-verification {}", user.id)));
+    // A decoy answers the same.
+    let existing = h.user("member");
+    let w = body_json(
+        h.post("/v1/auth/sign-up", sign_up_body(&existing.email))
+            .await,
+    )
+    .await;
+    let r = h
+        .post(
+            "/v1/auth/verify-email/resend",
+            json!({ "pending": w["pending"] }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+#[ignore]
+async fn sign_up_records_org_and_member_created() {
+    let h = Harness::new().await;
+    let (logs, _guard) = Logs::capture();
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let v = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": v["pending"], "code": GOOD_CODE }),
+        )
+        .await;
+    let member = body_json(r).await["me"]["person"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        logs.events(),
+        vec![
+            ("organization.created.v1".into(), None, member.clone()),
+            ("member.created.v1".into(), Some(member.clone()), member),
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn first_sign_in_records_member_created() {
+    let h = Harness::new().await;
+    let (logs, _guard) = Logs::capture();
+    let u = h.user("member");
+    let body = json!({ "email": u.email, "password": u.password });
+    let r = h.post("/v1/auth/password", body.clone()).await;
+    let member = body_json(r).await["me"]["person"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        logs.events(),
+        vec![("member.created.v1".into(), Some(member), "system".into())]
+    );
+    // The second sign-in creates nobody.
+    h.post("/v1/auth/password", body).await;
+    assert_eq!(logs.events().len(), 1);
 }

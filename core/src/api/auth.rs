@@ -323,6 +323,34 @@ impl<'de> Deserialize<'de> for Code {
     }
 }
 
+/// An opaque id or token from a link or a previous step: URL-safe characters only.
+#[derive(Debug, Clone)]
+pub struct Opaque(String);
+
+impl<'de> Deserialize<'de> for Opaque {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        bounded(d, 512, |c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+        })
+        .map(Opaque)
+    }
+}
+
+/// A person's or organization's name: trimmed, 1 to 128 characters, no control characters.
+#[derive(Debug, Clone)]
+pub struct Name(String);
+
+impl<'de> Deserialize<'de> for Name {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let s = s.trim();
+        if s.is_empty() || s.chars().count() > 128 || s.chars().any(char::is_control) {
+            return Err(serde::de::Error::custom("invalid name"));
+        }
+        Ok(Name(s.to_owned()))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmailOnly {
@@ -348,6 +376,9 @@ pub(crate) fn routes(state: &Arc<ApiState>) -> Router<Arc<ApiState>> {
         .route("/v1/auth/code/start", post(code_start))
         .route("/v1/auth/code/verify", post(code_verify))
         .route("/v1/auth/password", post(password))
+        .route("/v1/auth/sign-up", post(sign_up))
+        .route("/v1/auth/verify-email", post(verify_email))
+        .route("/v1/auth/verify-email/resend", post(resend))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit,
@@ -406,6 +437,161 @@ async fn outcome(s: &ApiState, r: Result<Authenticated, AuthError>) -> Result<Re
         Err(AuthError::Step(step)) => next(s, step).await,
         Err(e) => Err(e.into()),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignUp {
+    email: Email,
+    password: Password,
+    name: Name,
+    org_name: Name,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingCode {
+    pending: Opaque,
+    code: Code,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingOnly {
+    pending: Opaque,
+}
+
+/// The unexpired tenantless step with this id and one of `kinds`.
+async fn find_pending(
+    s: &ApiState,
+    id: &str,
+    kinds: &[&str],
+) -> Result<session::Pending, ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    let p = session::pending(&mut tx, id, kinds, OffsetDateTime::now_utc()).await?;
+    tx.commit().await?;
+    p.ok_or_else(pending_expired)
+}
+
+async fn drop_pending(s: &ApiState, id: &str) -> Result<(), ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    session::delete_pending(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The outcome of finishing a step: a wrong code may be retried on the same step (the rate
+/// limit caps guesses); anything else uses the step up.
+async fn settle(
+    s: &ApiState,
+    pending: &str,
+    r: Result<Authenticated, AuthError>,
+) -> Result<Response, ApiError> {
+    if !matches!(
+        r,
+        Err(AuthError::CodeInvalid | AuthError::CodeExpired | AuthError::Invalid)
+    ) {
+        drop_pending(s, pending).await?;
+    }
+    outcome(s, r).await
+}
+
+/// WorkOS's own password rules apply too; this floor is checked first, for every email alike.
+const MIN_PASSWORD: usize = 10;
+
+/// Answers the same whether or not the email already has an account (no account discovery).
+async fn sign_up(
+    State(s): State<Arc<ApiState>>,
+    Input(b): Input<SignUp>,
+) -> Result<Response, ApiError> {
+    if b.password.0.chars().count() < MIN_PASSWORD {
+        return Err(ApiError::invalid_input());
+    }
+    let data = match s
+        .auth
+        .create_user(b.email.as_str(), &b.password.0, &b.name.0)
+        .await
+    {
+        Ok(user) => {
+            quietly(
+                "verification email",
+                s.auth.send_verification_email(&user.id).await,
+            );
+            json!({ "user": user.id, "org_name": b.org_name.0 })
+        }
+        // An existing account (or a password WorkOS refuses, whose answer could differ for
+        // one): a step that never verifies, answered exactly like a new one.
+        Err(AuthError::Conflict | AuthError::Invalid) => json!({ "decoy": true }),
+        Err(e) => return Err(e.into()),
+    };
+    let pending = store_pending(&s, "sign_up", None, Some(b.email.as_str()), data).await?;
+    let body = json!({ "status": "next", "next": "verify_email", "pending": pending });
+    Ok((StatusCode::ACCEPTED, axum::Json(body)).into_response())
+}
+
+async fn verify_email(
+    State(s): State<Arc<ApiState>>,
+    Input(b): Input<PendingCode>,
+) -> Result<Response, ApiError> {
+    let p = find_pending(&s, &b.pending.0, &["verify_email", "sign_up"]).await?;
+    if p.kind == "verify_email" {
+        let token = p.workos_token.ok_or_else(pending_expired)?;
+        let r = s
+            .auth
+            .authenticate_with_email_verification(&token, &b.code.0)
+            .await;
+        return settle(&s, &b.pending.0, r).await;
+    }
+    let (Some(user), Some(org_name)) = (p.data["user"].as_str(), p.data["org_name"].as_str())
+    else {
+        return Err(AuthError::CodeInvalid.into());
+    };
+    let user = s.auth.verify_email(user, &b.code.0).await?;
+    drop_pending(&s, &b.pending.0).await?;
+    create_org(&s, user, org_name).await?.into_json()
+}
+
+/// Self-serve sign-up: a new WorkOS organization and tenant with this person as its admin.
+async fn create_org(s: &ApiState, user: AuthUser, org_name: &str) -> Result<SignedIn, ApiError> {
+    // ponytail: a failure after the org is created leaves it without a tenant; signing up again
+    // makes another. Fine for v1; a retry key would make it idempotent.
+    let org = s.auth.create_organization(org_name).await?;
+    s.auth.create_membership(&user.id, &org.id, "admin").await?;
+    let memberships = s.auth.memberships(&user.id).await?;
+    let tenant = tenant_for(s, &org.id).await?;
+    let profile = profile(&user, &org.name, &memberships, false);
+    let mut tx = s.store.begin(&tenant).await?;
+    let member = insert_member(&mut tx, &user).await?.ok_or_else(no_access)?;
+    let actor = || events::Actor::Member(member.clone());
+    events::publish(
+        &mut tx,
+        events::Event::OrganizationCreated { actor: actor() },
+    )
+    .await?;
+    events::publish(
+        &mut tx,
+        events::Event::MemberCreated {
+            member: member.clone(),
+            actor: actor(),
+        },
+    )
+    .await?;
+    sign_in(tx, &tenant, &member, true, &profile).await
+}
+
+/// Always 202 for a step that exists; WorkOS sends the code again.
+async fn resend(
+    State(s): State<Arc<ApiState>>,
+    Input(b): Input<PendingOnly>,
+) -> Result<StatusCode, ApiError> {
+    let p = find_pending(&s, &b.pending.0, &["verify_email", "sign_up"]).await?;
+    if let Some(user) = p.data["user"].as_str() {
+        quietly(
+            "verification email",
+            s.auth.send_verification_email(user).await,
+        );
+    }
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// An org as the web app sees it; its id is the tenant id the org has (or will have).
