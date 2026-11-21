@@ -26,6 +26,12 @@ mock_provider "aws" {
   mock_resource "aws_lb" {
     defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:loadbalancer/app/mock/0" }
   }
+  mock_resource "aws_s3_bucket" {
+    defaults = { bucket = "mandate-dev-recordings-mock", arn = "arn:aws:s3:::mandate-dev-recordings-mock" }
+  }
+  mock_resource "aws_bedrock_guardrail" {
+    defaults = { guardrail_arn = "arn:aws:bedrock:ap-south-1:000000000000:guardrail/mock", guardrail_id = "mock" }
+  }
   mock_resource "aws_kms_key" {
     defaults = { arn = "arn:aws:kms:ap-south-1:000000000000:key/mock" }
   }
@@ -380,5 +386,75 @@ run "the_core_may_publish_and_consume_and_nothing_more" {
   assert {
     condition     = jsondecode(aws_iam_role_policy.subscriber.policy).Statement[0].Resource == concat(values(aws_sqs_queue.consumer)[*].arn, values(aws_sqs_queue.dead_letter)[*].arn)
     error_message = "the delivery role sends only to the consumer queues and their dead letters"
+  }
+}
+
+run "the_browser_is_public_mode_and_records_to_a_private_bucket" {
+  command = apply
+
+  assert {
+    condition     = aws_bedrockagentcore_browser.main.network_configuration[0].network_mode == "PUBLIC"
+    error_message = "the core requires a PUBLIC network mode browser (docs/security.md)"
+  }
+  assert {
+    condition     = aws_bedrockagentcore_browser.main.recording[0].enabled && aws_bedrockagentcore_browser.main.recording[0].s3_location[0].bucket == aws_s3_bucket.recordings.bucket
+    error_message = "every session records to the recordings bucket"
+  }
+  assert {
+    condition = alltrue([
+      aws_s3_bucket_public_access_block.recordings.block_public_acls,
+      aws_s3_bucket_public_access_block.recordings.block_public_policy,
+      aws_s3_bucket_public_access_block.recordings.ignore_public_acls,
+      aws_s3_bucket_public_access_block.recordings.restrict_public_buckets,
+    ])
+    error_message = "recordings are never public"
+  }
+  assert {
+    condition     = jsondecode(aws_s3_bucket_policy.recordings.policy).Statement[0].Condition.Bool["aws:SecureTransport"] == "false" && jsondecode(aws_s3_bucket_policy.recordings.policy).Statement[0].Effect == "Deny"
+    error_message = "the bucket refuses plain HTTP"
+  }
+}
+
+run "the_guardrail_blocks_credentials" {
+  command = apply
+
+  assert {
+    condition = toset([
+      for p in aws_bedrock_guardrail.main.sensitive_information_policy_config[0].pii_entities_config : p.type if p.action == "BLOCK"
+    ]) == toset(["AWS_ACCESS_KEY", "AWS_SECRET_KEY", "PASSWORD", "PIN", "CREDIT_DEBIT_CARD_NUMBER", "CREDIT_DEBIT_CARD_CVV", "US_BANK_ACCOUNT_NUMBER", "INTERNATIONAL_BANK_ACCOUNT_NUMBER"])
+    error_message = "credentials and payment secrets are blocked outright"
+  }
+  assert {
+    condition     = length(aws_bedrock_guardrail.main.topic_policy_config[0].topics_config) > 0
+    error_message = "at least one denied topic"
+  }
+}
+
+run "the_core_uses_its_browser_and_guardrail_only" {
+  command = apply
+
+  assert {
+    condition = jsondecode(aws_iam_role_policy.core_tools.policy).Statement == [
+      {
+        Effect   = "Allow"
+        Action   = ["bedrock-agentcore:StartBrowserSession", "bedrock-agentcore:StopBrowserSession", "bedrock-agentcore:ConnectBrowserAutomationStream"]
+        Resource = aws_bedrockagentcore_browser.main.browser_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = "bedrock:ApplyGuardrail"
+        Resource = aws_bedrock_guardrail.main.guardrail_arn
+      },
+    ]
+    error_message = "one browser, one guardrail; no live view until sessions outlive a call"
+  }
+  assert {
+    condition = alltrue([for k in ["MANDATE_BROWSER_ID", "MANDATE_GUARDRAIL_ID", "MANDATE_GUARDRAIL_VERSION"] :
+    contains([for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name], k)])
+    error_message = "the core's task definition carries the browser and guardrail ids"
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role_policy.browser_recordings.policy).Statement[0].Resource == "${aws_s3_bucket.recordings.arn}/recordings/*"
+    error_message = "the browser may write recordings under its prefix only"
   }
 }

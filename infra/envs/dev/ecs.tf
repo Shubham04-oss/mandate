@@ -49,6 +49,9 @@ locals {
     MANDATE_EVENT_BUS  = awscc_eventsv2_event_bus.main.event_bus_arn
     # One MANDATE_QUEUE_<NAME> per consumer (lane F's consumer kit).
     MANDATE_QUEUE_AGENT_RESUME = aws_sqs_queue.consumer["agent-resume"].url
+    MANDATE_BROWSER_ID         = aws_bedrockagentcore_browser.main.browser_id
+    MANDATE_GUARDRAIL_ID       = aws_bedrock_guardrail.main.guardrail_id
+    MANDATE_GUARDRAIL_VERSION  = aws_bedrock_guardrail_version.main.version
   }
   eve_environment = {
     PORT                   = "3000"
