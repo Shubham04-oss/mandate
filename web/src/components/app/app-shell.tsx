@@ -4,6 +4,15 @@ import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import { Avatar, AvatarGroup, AvatarImage } from "#/components/ui/avatar.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuGroup,
+	DropdownMenuItem,
+	DropdownMenuLabel,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "#/components/ui/dropdown-menu.tsx";
+import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
@@ -105,6 +114,82 @@ function NeedsTab() {
 	);
 }
 
+/**
+ * Below the split width the rail is gone and the same places open from the header instead, so the
+ * canvas keeps the whole width of a phone.
+ */
+function HeaderMenu() {
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger
+				render={
+					<Button
+						variant="ghost"
+						aria-label="Menu"
+						className="h-8 gap-2 rounded-full pr-2.5 pl-1 text-foreground hover:bg-hover"
+					/>
+				}
+			>
+				<span
+					aria-hidden="true"
+					className="grid size-6 place-items-center rounded-[7px] bg-selected font-bold text-[11px]"
+				>
+					{sample.org.initial}
+				</span>
+				<Icon
+					name="menu"
+					size={16}
+					strokeWidth={1.8}
+					className="text-muted-foreground"
+				/>
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="start" sideOffset={6} className="w-60">
+				<DropdownMenuGroup>
+					<DropdownMenuLabel>{sample.org.name}</DropdownMenuLabel>
+					{railItems.map((item) =>
+						item.to ? (
+							<DropdownMenuItem
+								key={item.label}
+								render={<Link to={item.to} activeOptions={{ exact: true }} />}
+								className="data-[status=active]:bg-active data-[status=active]:font-semibold"
+							>
+								<Icon name={item.icon} strokeWidth={1.8} />
+								{item.label}
+							</DropdownMenuItem>
+						) : (
+							// ponytail: becomes a link as each page is built
+							<DropdownMenuItem key={item.label}>
+								<Icon name={item.icon} strokeWidth={1.8} />
+								{item.label}
+								{item.count ? (
+									<span className="ml-auto grid h-[18px] min-w-[18px] place-items-center rounded-full bg-foreground px-1.5 font-semibold text-[11px] text-canvas">
+										{item.count}
+									</span>
+								) : null}
+							</DropdownMenuItem>
+						),
+					)}
+				</DropdownMenuGroup>
+				<DropdownMenuSeparator />
+				<DropdownMenuGroup>
+					{/* ponytail: opens the settings pop-up once it exists */}
+					<DropdownMenuItem>
+						<Icon name="settings" strokeWidth={1.8} />
+						Settings
+					</DropdownMenuItem>
+					<DropdownMenuItem render={<Link to="/sign-in" />}>
+						<Avatar className="size-5">
+							<AvatarImage src={sample.me.avatar} alt="" />
+						</Avatar>
+						<span className="flex-1">{sample.me.name}</span>
+						<span className="text-[12px] text-muted-foreground">Sign out</span>
+					</DropdownMenuItem>
+				</DropdownMenuGroup>
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
 // The app frame: a collapsed rail and a header on the surround colour, the canvas below them.
 // The header is as tall as the rail is wide, so the frame reads evenly on both sides.
 export function AppShell({ children }: { children: ReactNode }) {
@@ -118,7 +203,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 			<div className="flex min-h-dvh bg-background text-foreground">
 				<nav
 					aria-label="Main"
-					className="flex w-12 flex-none flex-col items-center gap-1.5 pt-2.5 pb-3"
+					className="hidden w-12 flex-none flex-col items-center gap-1.5 pt-2.5 pb-3 split:flex"
 				>
 					<span
 						aria-hidden="true"
@@ -138,10 +223,16 @@ export function AppShell({ children }: { children: ReactNode }) {
 				</nav>
 
 				<div className="flex min-w-0 flex-1 flex-col">
-					<header className="flex h-12 flex-none items-center justify-center bg-background">
+					<header className="relative flex h-12 flex-none items-center justify-center bg-background">
+						<div className="absolute top-2 left-2 split:hidden">
+							<HeaderMenu />
+						</div>
 						<h1 className="m-0 font-semibold text-[15px]">{title}</h1>
+						<Avatar className="absolute top-2.5 right-3 size-7 split:hidden">
+							<AvatarImage src={sample.me.avatar} alt={sample.me.name} />
+						</Avatar>
 					</header>
-					<main className="relative mr-2 flex min-w-0 flex-1 flex-col rounded-t-[17px] bg-canvas">
+					<main className="relative mx-2 flex min-w-0 flex-1 flex-col rounded-t-[17px] bg-canvas split:ml-0">
 						<NeedsTab />
 						{children}
 					</main>
