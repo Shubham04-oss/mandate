@@ -1,13 +1,15 @@
 # Mandate v1, the rest: design
 
-Date: 2026-11-21. Status: draft for the owner's review. Builds on `docs/design.md` (approved) and
+Date: 2026-11-21. Status: draft for the owner's review (owner's decisions recorded in section 10). Builds on `docs/design.md` (approved) and
 the merged core slice (PR #2). One plan executes all of it, in parallel lanes.
 
 ## 1. Intent
 
 Finish Mandate v1 so a real organization can use it end to end: people sign in on our own screens,
-their personal operator and their team bots work in Slack, every risky action waits for a person
-in Slack or the web app, and everything runs in an AWS dev environment behind Cloudflare.
+they ask their personal operator for work in the web app ("Ask your agent"), every risky action
+waits for them in the web app's Approvals inbox, and everything runs in an AWS dev environment
+behind Cloudflare. A proper end-to-end stack comes first; Slack, other channels and team bots come
+later through eve's own channels (owner's decision, 2026-11-21).
 
 The owner has several Claude accounts working in parallel. So the work is one big plan with
 independent lanes, one lane per account, each lane one branch and one PR. This session is the
@@ -23,11 +25,12 @@ screens is not part of this plan.
   Management API. The web app never calls WorkOS and holds no WorkOS key.
 - **A stable API for the web app:** session, me, organization members and teams, the approvals
   inbox with approve and deny, and the activity feed.
-- **Agents in Slack:** each member's personal operator answers in a direct message; team bots answer
-  in channels they are added to. eve runs the conversations; the core verifies every Slack event,
-  owns every credential and posts every reply.
-- **Approvals in Slack and the web:** a waiting action shows as a card to the people who may approve
-  it, in Slack and in the web app's inbox; the first decision wins everywhere.
+- **Your agent in the web app:** each member talks to their personal operator from the web app.
+  eve runs the conversation behind the core; the core authenticates the member, holds every
+  credential, gates every tool and streams the agent's messages to the browser.
+- **Approvals in the web app:** a waiting action appears in the owner's Approvals inbox; approving
+  resumes the agent, denying tells it so; the first decision wins.
+- **Self-serve sign-up** creates a new organization with the person as its admin (owner's decision).
 - **Output guard on everything that leaves an agent** (Bedrock Guardrails).
 - **AWS dev environment** in ap-south-1 (profile `mumbai`) and the web app on Cloudflare Workers.
 - **Close the items parked by the core slice's review** before the first deploy.
@@ -36,7 +39,9 @@ screens is not part of this plan.
 
 - Brokering between people's agents (agent-to-agent requests with owner consent). It is the next
   plan; this plan keeps its data model open (section 6.6).
-- Microsoft Teams, email, iMessage and other channels. Slack only.
+- Slack, Microsoft Teams, email, iMessage and other channels (later, through eve's channels).
+- Team bots (on hold until eve is used to its full capacity; owner's decision). Only personal
+  operators exist in this plan.
 - Desktop computer use (WorkSpaces), Composio, code sandboxes.
 - A production environment, billing, the desktop app.
 - Wiring the web screens (the web builder does it against section 4).
@@ -98,7 +103,7 @@ All bodies are JSON. Ids are the core's validated ids.
 | POST `/v1/auth/code/start` | `{ email }` | 202 |
 | POST `/v1/auth/code/verify` | `{ email, code }` | outcome |
 | POST `/v1/auth/password` | `{ email, password }` | outcome |
-| POST `/v1/auth/sign-up` | `{ email, password, name }` | 202 `{ "status": "next", "next": "verify_email", "pending" }` |
+| POST `/v1/auth/sign-up` | `{ email, password, name, org_name }` | 202 `{ "status": "next", "next": "verify_email", "pending" }`; after verification the core creates the WorkOS organization and tenant with this person as admin |
 | POST `/v1/auth/verify-email` | `{ pending, code }` | outcome |
 | POST `/v1/auth/verify-email/resend` | `{ pending }` | 202 |
 | POST `/v1/auth/mfa/verify` | `{ pending, code }` | outcome |
@@ -144,64 +149,55 @@ membership (lane B). `members.is_admin` is set from the WorkOS organization memb
 at every sign-in (lane B), so it follows WorkOS without a directory event.
 
 **After a decision (lead's call).** One store function `decide_approval` (lane C) records approve or
-deny and writes an outbox row `approval_decided` in the same transaction. Lane D consumes that
-outbox to edit every Slack card and resume the waiting eve conversation; the web route (lane C) and
-the Slack click handler (lane D) both call `decide_approval`, so the first decision wins in one
-place. Lane C's migration adds `approvals.conversation` (opaque text, set by lane D when the turn
-came from Slack) so the resume knows where to go.
+deny (first decision wins; later ones get 409) and writes an outbox row `approval_decided` in the
+same transaction. Lane D consumes that outbox to resume or cancel the waiting eve call. Lane C's
+migration adds `approvals.conversation` (opaque text, set by lane D when the call came from a
+conversation) so the resume knows where to go.
 
-## 5. Agents in Slack
+## 5. Your agent in the web app
 
 ### 5.1 Flow
 
 ```
-Slack ──events/interactivity──> core /v1/slack/* (verify signature, dedupe by event id,
-                                 resolve tenant + member + agent + space)
-core ──turn + signed assertion──> eve (private, HTTP channel)
-eve ──tools over MCP──> core (gate, browser tools, slack.reply)
-core ──Slack Web API (bot token from the token vault)──> Slack
+web app ──(session cookie)──> core /v1/conversations/*   (authenticate, tenant + member + personal agent)
+core ──turn + signed assertion──> eve (private network only, eve's HTTP session API)
+eve ──tools over MCP──> core (gate, web.read_page, web.submit_form)
+eve ──event stream──> core ──output guard per assistant message──> web app (server-sent events)
 ```
 
-- **The core receives all Slack traffic.** It verifies Slack's signing secret in constant time,
-  rejects replays older than 5 minutes, and acknowledges within 3 seconds, handing the turn to eve
-  asynchronously (SQS or a tokio task with an outbox row; builder's call, one moving part at most).
-- **eve never talks to Slack.** It uses eve's HTTP channel with the core as the only caller, and
-  replies through the core's MCP tool `slack.reply` (effect `write`, run by default for the agent's
-  own conversation; the output guard always runs). eve therefore needs no Slack token.
-- **Mapping:** a Slack workspace installation belongs to one tenant. A DM with the app reaches the
-  sender's personal operator. A channel message mentioning a team bot reaches that bot, if the
-  sender is a member of its team; otherwise the bot replies that it can only work for its team.
-- **Installing Slack (lead's call):** an org admin starts `GET /v1/slack/install` from the web app;
-  the core runs Slack OAuth (`oauth.v2.access`), checks the admin's session, and binds the workspace
-  to that tenant. The bot token is stored in the token vault (AgentCore Identity, one API-key
-  credential provider per workspace); `slack_installations` keeps only the provider's name. A
-  workspace can be bound to one tenant only.
-- **Identity:** a Slack user is linked to a member by verified email within the tenant (Slack's
-  `users.info` email, which needs the `users:read.email` scope, against the member's directory email).
-  An unlinked sender gets a reply with a link to sign in on the web app, which completes the link.
-
-### 5.2 Approvals in Slack
-
-When the gate answers Ask, the core posts a card (Block Kit) to the people who may decide, in a DM
-from the app: what the agent wants to do, the exact arguments (from `approvals.args`), who asked,
-when it expires, and Approve / Deny buttons. Clicks arrive at `/v1/slack/interactivity`; the core
-verifies the clicker is a linked member who may decide, records the decision, edits every card for
-that approval to show the outcome ("Approved by Ada at 14:02"), and tells eve to continue. The web
-inbox shows the same state; the first decision wins (409 for later ones).
-
-### 5.3 Agents, grants and models
-
-- **Personal operators** are created by directory sync for every member (enabled while the member
-  exists). **Team bots** are created by a team admin through `POST /v1/agents { team, name }`.
-  Minimal grant management: `GET/POST/DELETE /v1/grants` for org admins and team admins (principal,
-  tool, standing, expires_at). The tool catalog for v1: `web.read_page`, `web.submit_form`,
-  `slack.reply`.
+- **Conversations** belong to one member and their personal operator. The core keeps a
+  `conversations` row (tenant, member, eve session id, title, created, updated); eve keeps the
+  transcript in its own workflow store. The core never exposes eve's session id.
+- **Streaming:** the core relays eve's session events to the browser as server-sent events, one
+  event per finished assistant message, tool call status, approval wait and completion. Each
+  assistant message passes the output guard before it is sent (whole messages, not tokens, in v1;
+  lead's call). A reconnecting browser resumes from the last event id.
+- **Approvals:** when a tool call is Ask, eve's turn pauses and the stream emits `approval_wait`
+  with the approval id. `decide_approval` (lane C) writes the decision and an outbox row; lane D
+  consumes it and resumes or cancels the waiting eve call, and the stream continues.
+- **Agents and grants:** personal operators are created for every member (directory sync or first
+  sign-in). Org admins manage grants with `GET/POST/DELETE /v1/grants` (principal, tool, standing,
+  expires_at). Tool catalog for v1: `web.read_page`, `web.submit_form`.
 - **Models** go through the owner's AI gateway: eve reads the gateway URL and model ids from its
-  environment; the gateway key is an AWS Secrets Manager secret injected into eve's task. No model
-  or provider name in code.
-- **Output guard:** `slack.reply` text passes Bedrock Guardrails `ApplyGuardrail` (personal data,
-  credentials, denied topics) before it is posted; a blocked reply is replaced by a short notice and
-  audited.
+  environment; the key is an AWS Secrets Manager secret injected into eve's task. No model or
+  provider name in code.
+- **Output guard:** Bedrock Guardrails `ApplyGuardrail` (personal data, credentials, denied topics)
+  on every assistant message before the browser sees it; a blocked message is replaced by a short
+  notice and audited.
+
+### 5.2 Conversation endpoints (added to the contract)
+
+| Method and path | Body / query | Success |
+| --- | --- | --- |
+| GET `/v1/conversations` | `?cursor` | 200 `{ items: [Conversation], next }` |
+| POST `/v1/conversations` | `{ message }` | 201 `Conversation` (the agent starts working) |
+| POST `/v1/conversations/{id}/messages` | `{ message }` | 202 |
+| GET `/v1/conversations/{id}/events` | `Last-Event-ID` header | 200 `text/event-stream` |
+| POST `/v1/conversations/{id}/cancel` | | 202 |
+
+`Conversation { id, title, created_at, updated_at, state: "working"|"waiting"|"idle" }`. Events:
+`message { role, text }`, `tool { name, status }`, `approval_wait { approval: Approval }`,
+`approval_done { approval_id, state }`, `done`, `error { code, message }`.
 
 ## 6. Data
 
@@ -211,11 +207,10 @@ New migrations, numbered by lane to avoid collisions (section 8):
 - 6.2 `approvals.denied_at`, `approvals.denied_by`; `agents.name`; `members.is_admin` (approvals
   lane). The approver-membership check from the core slice's review lands here: an approval can be
   approved or spent only while its approver may still decide.
-- 6.3 `slack_installations (tenant, team_id, bot token reference)`, `slack_links (member, slack
-  user)`, `slack_events_seen (event id, expiry)`, `approval_cards (approval, channel, ts)` (agents
-  lane). Bot tokens live in the token vault (AgentCore Identity); the table holds only a reference.
-- 6.4 All new tables are tenant-scoped with forced row-level security, except `rate_limits` and
-  `slack_events_seen` (global bookkeeping, no tenant data), each with a one-line comment why.
+- 6.3 `conversations (tenant, member, agent, eve session id, title, timestamps, state)` and an
+  `outbox` consumer for `approval_decided` (agent lane).
+- 6.4 All new tables are tenant-scoped with forced row-level security, except `rate_limits`
+  (global bookkeeping, no tenant data), with a one-line comment why.
 - 6.5 `core/sql/app_role.sql` grows with each lane, least privilege.
 - 6.6 Brokering later: nothing here assumes one agent per conversation or one approver per approval.
 
@@ -225,13 +220,13 @@ New migrations, numbered by lane to avoid collisions (section 8):
   runs `tofu apply`; lanes only plan and validate.
 - **AWS (ap-south-1):** one VPC; Aurora PostgreSQL serverless (scales to zero) with the migration
   role and the app role from `core/sql/app_role.sql`; ECS Fargate services for the core and eve;
-  ECR; Secrets Manager (WorkOS key, assertion key, gateway key, Slack signing secret); KMS; a custom
+  ECR; Secrets Manager (WorkOS key, assertion key, gateway key); KMS; a custom
   AgentCore browser in PUBLIC network mode with recordings to S3; a Bedrock guardrail; CloudWatch
   logs; an IAM role for GitHub Actions deploys through OIDC (no long-lived keys).
 - **Cloudflare:** DNS for `api.` and `app.`; the API proxied to the core's load balancer; the web app
   on Workers (`wrangler deploy`); WAF rate limiting on `/v1/auth/*` in front of the core's own limits.
-- **The owner provides:** a domain on Cloudflare, the WorkOS environment, the Slack app, and the AI
-  gateway URL and key.
+- **The owner provides:** a domain on Cloudflare, the WorkOS environment, and the AI gateway URL
+  and key.
 
 ## 8. Lanes
 
@@ -244,7 +239,7 @@ next lanes if they touched shared files.
 | **A. Hardening** | `core/src/store.rs` (approval/role fixes), `core/sql/app_role.sql`, `core/src/tools/agentcore.rs`, `core/src/tools/browser.rs` | none | none; merges first |
 | **B. Sign-in API** | `core/src/api/auth.rs`, `core/src/api/session.rs`, `core/src/api/mod.rs` (created here), `core/tests/auth.rs` | `0005`–`0009` | A |
 | **C. Org, approvals and activity API** | `core/src/api/org.rs`, `core/src/api/approvals.rs`, `core/src/api/activity.rs`, `core/src/api/agents.rs`, `core/tests/api_*.rs` | `0010`–`0014` | A; uses B's session extractor (stubbed until B merges) |
-| **D. Agents in Slack** | `core/src/slack/**`, `core/src/tools/slack.rs`, `core/src/guard.rs`, `agents/**` (eve), `core/tests/slack.rs` | `0015`–`0019` | A; uses C's approval decisions (shared store functions) |
+| **D. Your agent in the web app** | `core/src/api/conversations.rs`, `core/src/eve.rs`, `core/src/guard.rs`, `agents/**` (eve), `core/tests/conversations.rs` | `0015`–`0019` | A; uses B's session extractor and C's `decide_approval` outbox (stubbed until they merge) |
 | **E. Deploy** | `infra/**`, `.github/workflows/deploy.yml`, `core/Dockerfile`, `agents/Dockerfile`, `docs/deploy.md` | none | none; applies only with the owner |
 
 Shared files (`core/src/main.rs`, `core/src/mcp.rs` router, `core/src/lib.rs`, `Cargo.toml`,
@@ -253,13 +248,18 @@ dependency) and say so in the PR; the lead resolves conflicts at merge.
 
 ## 9. Left to the builder
 
-Internal module layout inside each lane's files; the async hand-off mechanism for Slack turns
-(within the one-moving-part limit); how eve's HTTP channel is configured; table column details
+Internal module layout inside each lane's files; the async hand-off from the core to eve (within the
+one-moving-part limit); how eve's HTTP channel is configured; table column details
 beyond section 6; OpenTofu module structure.
 
-## 10. Proposed answers awaiting the owner
+## 10. Decided by the owner (2026-11-21)
 
-1. Slack identity: link by verified email within the tenant, with a web sign-in fallback (5.1).
-2. Org admin: the WorkOS organization role `admin` (4.3).
-3. Brokering waits for the next plan (3).
-4. Session lifetimes: 12 h idle, 7 days absolute (4.1).
+1. Passwords, password reset and two-step are in v1 (matching the screens).
+2. Self-serve sign-up creates a new organization with the person as its admin.
+3. Team bots are on hold until eve is used to its full capacity.
+4. The first end-to-end agent path is the web app; Slack and other channels come later through eve.
+
+## 11. Lead's calls the owner can overrule
+
+Org admin is the WorkOS organization role `admin`; sessions last 12 h idle and 7 days at most;
+brokering waits for the next plan; assistant messages are guarded whole (no token streaming) in v1.
