@@ -151,6 +151,41 @@ impl Conversations {
         )
     }
 
+    /// Resumes the eve turn waiting on `approval`: answers its prompt and relays what follows.
+    /// False when no conversation waits on it. ponytail: lane F's consumer of
+    /// `approval.decided.v1` (fed by lane C's `decide_approval`) calls this once both merge.
+    pub async fn approval_decided(
+        self: &Arc<Self>,
+        tenant: &TenantId,
+        approval: Uuid,
+        approve: bool,
+    ) -> Result<bool, ConversationError> {
+        let mut tx = self.app.store.begin(tenant).await?;
+        let row: Option<(Uuid, String)> = sqlx::query_as(
+            "select conversation, interaction from conversation_approvals \
+             where tenant_id = current_setting('mandate.tenant', true) and approval = $1",
+        )
+        .bind(approval)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let Some((id, interaction)) = row else {
+            return Ok(false);
+        };
+        let Some(c) = load(&self.app.store, tenant, id, None).await? else {
+            return Ok(false);
+        };
+        // eve only runs the call; the core's MCP gate spends the approval, or asks again.
+        self.eve
+            .answer(&self.token(tenant, &c), &c.eve, &interaction, approve)
+            .await?;
+        let mut tx = self.app.store.begin(tenant).await?;
+        set_state(&mut tx, id, "working").await?;
+        tx.commit().await?;
+        self.kick(tenant, id).await;
+        Ok(true)
+    }
+
     /// Starts a relay for this conversation unless one already runs here.
     pub async fn kick(self: &Arc<Self>, tenant: &TenantId, id: Uuid) {
         let mut pumps = self.pumps.lock().await;
@@ -259,7 +294,7 @@ impl Conversations {
         // Network and policy work first, outside the transaction that holds the row lock.
         let mut prepared = Vec::with_capacity(facts.len());
         for f in facts {
-            prepared.push(self.prepare(&who, f, calls).await);
+            prepared.push(self.prepare(&who, id, f, calls).await?);
         }
         let mut answers = Vec::new();
         let mut tx = self.app.store.begin(tenant).await?;
@@ -293,10 +328,11 @@ impl Conversations {
     async fn prepare(
         &self,
         who: &Assertion,
+        id: Uuid,
         f: &Fact,
         calls: &mut HashMap<String, (ToolId, Value)>,
-    ) -> Prepared {
-        match f.kind.as_str() {
+    ) -> Result<Prepared, ConversationError> {
+        Ok(match f.kind.as_str() {
             "call.requested" => {
                 let name = f.data["capability"]["name"].as_str().unwrap_or_default();
                 let call = f.data["callId"].as_str().unwrap_or_default();
@@ -309,21 +345,20 @@ impl Conversations {
                 }
                 Prepared::Call(calls.get(call).cloned())
             }
-            "call.started" | "call.settled" => Prepared::Call(
-                calls
-                    .get(f.data["callId"].as_str().unwrap_or_default())
-                    .cloned(),
-            ),
+            "call.started" | "call.settled" => {
+                let call = f.data["callId"].as_str().unwrap_or_default();
+                Prepared::Call(self.call(who, id, call, calls).await?)
+            }
             "interaction.opened" if f.data["request"]["kind"] == "approval" => {
                 let call = f.data["subject"]["callId"].as_str().unwrap_or_default();
-                let Some((tool, args)) = calls.get(call).cloned() else {
-                    return Prepared::Approval(None);
+                let Some((tool, args)) = self.call(who, id, call, calls).await? else {
+                    return Ok(Prepared::Approval(None));
                 };
                 let Some(t) = self.app.catalog.get(&tool) else {
-                    return Prepared::Approval(None);
+                    return Ok(Prepared::Approval(None));
                 };
                 if t.validate(&args).is_err() {
-                    return Prepared::Approval(None);
+                    return Ok(Prepared::Approval(None));
                 }
                 let effect = t.effect(&args);
                 let now = OffsetDateTime::now_utc();
@@ -346,7 +381,35 @@ impl Conversations {
                 None => Prepared::Nothing,
             },
             _ => Prepared::Nothing,
+        })
+    }
+
+    /// A core tool call eve asked for: from this relay's memory, else from the store.
+    async fn call(
+        &self,
+        who: &Assertion,
+        id: Uuid,
+        call: &str,
+        calls: &mut HashMap<String, (ToolId, Value)>,
+    ) -> Result<Option<(ToolId, Value)>, ConversationError> {
+        if let Some(c) = calls.get(call) {
+            return Ok(Some(c.clone()));
         }
+        let mut tx = self.app.store.begin(&who.tenant).await?;
+        let row: Option<(String, sqlx::types::Json<Value>)> = sqlx::query_as(
+            "select tool, args from conversation_calls where tenant_id = current_setting('mandate.tenant', true) \
+             and conversation = $1 and call_id = $2",
+        )
+        .bind(id)
+        .bind(call)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((tool, args)) = row else {
+            return Ok(None);
+        };
+        let c = (ToolId::parse(&tool).map_err(StoreError::from)?, args.0);
+        calls.insert(call.to_owned(), c.clone());
+        Ok(Some(c))
     }
 }
 
@@ -411,7 +474,14 @@ async fn apply(
             )
             .await?;
         }
-        ("call.requested" | "call.started" | "call.settled", Prepared::Call(Some((tool, _)))) => {
+        (
+            "call.requested" | "call.started" | "call.settled",
+            Prepared::Call(Some((tool, args))),
+        ) => {
+            if f.kind == "call.requested" {
+                let call = d["callId"].as_str().unwrap_or_default();
+                remember(tx, id, call, &tool, &args).await?;
+            }
             let status = match (f.kind.as_str(), d["outcome"].as_str()) {
                 ("call.requested", _) => "requested",
                 ("call.started", _) => "running",
@@ -459,6 +529,26 @@ async fn apply(
         }
         _ => {}
     }
+    Ok(())
+}
+
+async fn remember(
+    tx: &mut Tx,
+    id: Uuid,
+    call: &str,
+    tool: &ToolId,
+    args: &Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into conversation_calls (tenant_id, conversation, call_id, tool, args) \
+         values (current_setting('mandate.tenant'), $1, $2, $3, $4) on conflict do nothing",
+    )
+    .bind(id)
+    .bind(call)
+    .bind(tool.as_str())
+    .bind(sqlx::types::Json(args))
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 

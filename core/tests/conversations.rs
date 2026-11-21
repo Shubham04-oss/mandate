@@ -823,3 +823,265 @@ async fn guardrail_blocks_a_credential() {
         Verdict::Pass
     );
 }
+
+// ---- approval wait and resume ----
+
+/// A live, non-standing grant of `tool` to `ann-op`: the policy asks before an external call.
+async fn grant(t: &TenantId, tool: &str) {
+    sqlx::query(
+        "insert into grants (tenant_id, principal_kind, principal_id, tool, standing, expires_at, granted_by) \
+         values ($1, 'agent', 'ann-op', $2, false, now() + interval '1 hour', 'admin')",
+    )
+    .bind(t.as_str())
+    .bind(tool)
+    .execute(&common::admin_pool().await)
+    .await
+    .unwrap();
+}
+
+fn form_args() -> Value {
+    json!({ "url": "https://forms.test/expense", "fields": { "amount": "42" } })
+}
+
+/// A turn that asks to submit a form and pauses on eve's approval prompt `int_1`.
+fn ask_turn(fake: &FakeEve, tool: &str) {
+    fake.push(fact_line(json!([
+        { "type": "turn.started", "data": { "turnId": "turn_0" } },
+        { "type": "delivery.consumed", "data": { "parts": [{ "kind": "text", "text": "file my expense" }] } },
+        { "type": "call.requested", "data": {
+            "callId": "call_1", "owner": { "runId": "run_0" },
+            "capability": { "kind": "tool", "name": tool }, "input": form_args() } },
+        { "type": "interaction.opened", "data": {
+            "interactionId": "int_1", "subject": { "callId": "call_1" },
+            "request": { "kind": "approval", "prompt": "Approve?" } } },
+        { "type": "turn.paused", "data": { "turnId": "turn_0", "awaiting": [{ "interactionId": "int_1" }] } }
+    ])));
+}
+
+/// The rest of that turn once eve has the answer.
+fn finish_turn(fake: &FakeEve, approved: bool) {
+    let (outcome, call, reply) = if approved {
+        ("accepted", "completed", "Submitted.")
+    } else {
+        (
+            "declined",
+            "rejected",
+            "The expense form was not submitted: you denied it.",
+        )
+    };
+    fake.push(fact_line(json!([
+        { "type": "interaction.settled", "data": { "interactionId": "int_1", "outcome": outcome } }
+    ])));
+    fake.push(fact_line(json!([
+        { "type": "call.settled", "data": { "callId": "call_1", "outcome": call } },
+        { "type": "content.completed", "data": { "kind": "text", "phase": "reply", "value": reply } },
+        { "type": "turn.settled", "data": { "turnId": "turn_0", "outcome": "completed" } }
+    ])));
+}
+
+async fn wait_state(h: &Harness, t: &TenantId, id: &str, want: &str) {
+    for _ in 0..200 {
+        if h.state(t, id).await == want {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("conversation never became {want}");
+}
+
+/// Starts the asking turn and returns (conversation, approval id from approval_wait).
+async fn asked(h: &Harness, t: &TenantId) -> (String, Uuid) {
+    seed(t).await;
+    grant(t, "web.submit_form").await;
+    ask_turn(&h.fake, "mandate__web.submit_form");
+    let id = start(h, t, "file my expense").await;
+    wait_state(h, t, &id, "waiting").await;
+    let got = read_sse(&h.app(t, "ann"), &id, None, 3).await;
+    let wait = got
+        .iter()
+        .find(|e| e.event == "approval_wait")
+        .expect("approval_wait");
+    let approval = Uuid::parse_str(wait.data["approval"]["id"].as_str().unwrap()).unwrap();
+    (id, approval)
+}
+
+fn answers(h: &Harness) -> Vec<Seen> {
+    h.fake
+        .seen()
+        .into_iter()
+        .filter(|s| s.body.get("answers").is_some())
+        .collect()
+}
+
+#[tokio::test]
+#[ignore]
+async fn ask_emits_approval_wait_with_the_approval() {
+    let h = harness().await;
+    let t = tenant();
+    let (id, approval) = asked(&h, &t).await;
+    let got = read_sse(&h.app(&t, "ann"), &id, None, 3).await;
+    assert_eq!(
+        got[1],
+        Sse {
+            id: 2,
+            event: "tool".into(),
+            data: json!({ "name": "web.submit_form", "status": "requested" })
+        }
+    );
+    let a = &got[2].data["approval"];
+    assert_eq!(got[2].event, "approval_wait");
+    assert_eq!(a["tool"], "web.submit_form");
+    // The owner sees exactly the call that will run.
+    assert_eq!(a["args"], form_args());
+    assert_eq!(a["requested_by"]["id"], "ann");
+    assert_eq!(a["state"], "pending");
+    // The approval is in the store, unapproved, and the ask is audited.
+    let mut tx = h.store.begin(&t).await.unwrap();
+    let (by, approved): (String, Option<String>) =
+        sqlx::query_as("select requested_by, approved_by from approvals where id = $1")
+            .bind(approval)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!((by.as_str(), approved), ("ann", None));
+    let asks: i64 = sqlx::query_scalar(
+        "select count(*) from audit where decision = 'ask' and tool = 'web.submit_form'",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(asks, 1);
+    // Nobody answered eve: the turn waits for the owner.
+    assert!(answers(&h).is_empty());
+}
+
+#[tokio::test]
+#[ignore]
+async fn approval_decided_resumes_the_turn() {
+    let h = harness().await;
+    let t = tenant();
+    let (id, approval) = asked(&h, &t).await;
+    let ann = MemberId::parse("ann").unwrap();
+    let mut tx = h.store.begin(&t).await.unwrap();
+    assert!(
+        mandate::store::approve(&mut tx, approval, &ann)
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    // ponytail: called directly until lane F's consumer delivers approval.decided.v1.
+    assert!(h.conv.approval_decided(&t, approval, true).await.unwrap());
+    let sent = answers(&h);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].path, "/eve/v1/session/wrun_FAKE01");
+    assert_eq!(
+        sent[0].body,
+        json!({ "answers": [{ "interactionId": "int_1", "optionId": "approve" }] })
+    );
+    let a = assertion_of(&sent[0]);
+    assert_eq!((a.member.as_str(), a.agent.as_str()), ("ann", "ann-op"));
+    finish_turn(&h.fake, true);
+    h.settle(&t, &id).await;
+    let got = read_sse(&h.app(&t, "ann"), &id, None, 7).await;
+    let tail: Vec<(&str, Value)> = got[3..]
+        .iter()
+        .map(|e| (e.event.as_str(), e.data.clone()))
+        .collect();
+    assert_eq!(
+        tail,
+        vec![
+            (
+                "approval_done",
+                json!({ "approval_id": approval.to_string(), "state": "approved" })
+            ),
+            (
+                "tool",
+                json!({ "name": "web.submit_form", "status": "completed" })
+            ),
+            (
+                "message",
+                json!({ "role": "assistant", "text": "Submitted." })
+            ),
+            ("done", json!({})),
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn deny_tells_the_agent_and_continues() {
+    let h = harness().await;
+    let t = tenant();
+    let (id, approval) = asked(&h, &t).await;
+    assert!(h.conv.approval_decided(&t, approval, false).await.unwrap());
+    assert_eq!(
+        answers(&h)[0].body,
+        json!({ "answers": [{ "interactionId": "int_1", "optionId": "deny" }] })
+    );
+    finish_turn(&h.fake, false);
+    h.settle(&t, &id).await;
+    let got = read_sse(&h.app(&t, "ann"), &id, None, 7).await;
+    let kinds: Vec<(&str, Value)> = got[3..]
+        .iter()
+        .map(|e| (e.event.as_str(), e.data.clone()))
+        .collect();
+    assert_eq!(
+        kinds[0],
+        (
+            "approval_done",
+            json!({ "approval_id": approval.to_string(), "state": "denied" })
+        )
+    );
+    assert_eq!(
+        kinds[1],
+        (
+            "tool",
+            json!({ "name": "web.submit_form", "status": "denied" })
+        )
+    );
+    assert_eq!(kinds[2].0, "message");
+    assert_eq!(kinds[3].0, "done");
+    // The conversation goes on: the next message reaches eve.
+    let (status, _) = call(
+        &h.app(&t, "ann"),
+        "POST",
+        &format!("/v1/conversations/{id}/messages"),
+        Some(json!({ "message": "ok, never mind" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+#[ignore]
+async fn refused_or_unknown_tool_prompt_is_denied_without_an_approval() {
+    let h = harness().await;
+    let t = tenant();
+    seed(&t).await; // no grant: the core refuses web.submit_form
+    ask_turn(&h.fake, "mandate__web.submit_form");
+    let id = start(&h, &t, "file my expense").await;
+    for _ in 0..200 {
+        if !answers(&h).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        answers(&h)[0].body,
+        json!({ "answers": [{ "interactionId": "int_1", "optionId": "deny" }] })
+    );
+    let mut tx = h.store.begin(&t).await.unwrap();
+    let n: i64 = sqlx::query_scalar("select count(*) from approvals")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    // An approval that no conversation waits on resumes nothing.
+    assert!(
+        !h.conv
+            .approval_decided(&t, Uuid::new_v4(), true)
+            .await
+            .unwrap()
+    );
+    let _ = id;
+}

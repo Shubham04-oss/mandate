@@ -28,4 +28,4 @@ grant select, insert on directory_dead_letters to :"role";
 
 -- Conversations (RLS forced). Relayed events and approval links are append-only.
 grant select, insert, update on conversations to :"role";
-grant select, insert on conversation_events, conversation_approvals to :"role";
+grant select, insert on conversation_events, conversation_approvals, conversation_calls to :"role";

@@ -36,10 +36,20 @@ create table conversation_approvals (
   primary key (tenant_id, approval)
 );
 
+-- The core tools eve asked to call, so a relay that restarts mid-turn still knows each call.
+create table conversation_calls (
+  tenant_id text not null,
+  conversation uuid not null,
+  call_id text not null,
+  tool text not null,
+  args jsonb not null,
+  primary key (tenant_id, conversation, call_id)
+);
+
 do $$
 declare t text;
 begin
-  foreach t in array array['conversations','conversation_events','conversation_approvals'] loop
+  foreach t in array array['conversations','conversation_events','conversation_approvals','conversation_calls'] loop
     execute format('alter table %I enable row level security', t);
     execute format('alter table %I force row level security', t);
     execute format($p$create policy tenant_isolation on %I
