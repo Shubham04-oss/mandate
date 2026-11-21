@@ -593,8 +593,8 @@ async fn removed_user_loses_grants_and_pending_approvals() {
     // (agent, requested_by, approved_by, used): which survive Ann's removal is asserted below.
     for (agent, req, appr, used) in [
         ("bob-bot", ann, None, false),      // she requested it
-        ("ann-bot", bob, None, false),      // she could approve it
-        ("eng-bot", bob, None, false),      // she could approve it via Eng
+        ("ann-bot", bob, None, false),      // she could approve it: stays (others' requests)
+        ("eng-bot", bob, None, false),      // Eng can still approve it: stays
         ("bob-bot", bob, Some(ann), false), // she approved it, not yet used
         ("bob-bot", bob, None, false),      // nothing to do with her: stays
         ("bob-bot", ann, Some(bob), true),  // spent: history, stays
@@ -630,7 +630,7 @@ async fn removed_user_loses_grants_and_pending_approvals() {
         .unwrap();
     assert_eq!(grants, ["directory_group_eng"]);
     let left: Vec<(String, String, bool)> = sqlx::query(
-        "select agent, requested_by, used_at is not null as used from approvals order by used",
+        "select agent, requested_by, used_at is not null as used from approvals order by used, agent",
     )
     .fetch_all(&mut *tx)
     .await
@@ -641,7 +641,9 @@ async fn removed_user_loses_grants_and_pending_approvals() {
     assert_eq!(
         left,
         [
+            ("ann-bot".into(), bob.into(), false),
             ("bob-bot".into(), bob.into(), false),
+            ("eng-bot".into(), bob.into(), false),
             ("bob-bot".into(), ann.into(), true)
         ]
     );

@@ -227,18 +227,15 @@ pub async fn dead_letter(
     Ok(())
 }
 
-/// A person who left: no membership, no grants from or to them, no pending approval they
-/// asked for or could give, and their personal agent disabled.
+/// A person who left: no membership, no grants from or to them, no unspent approval they
+/// asked for or gave, and their personal agent disabled. Others' requests stay: a teammate
+/// can still approve them.
 pub async fn remove_member(tx: &mut Tx, member: &MemberId) -> Result<(), StoreError> {
     let t = "current_setting('mandate.tenant', true)";
     for q in [
-        // Before team_members goes: "could approve" includes their teams' agents.
         format!(
-            "delete from approvals a where a.tenant_id = {t} and a.used_at is null \
-             and (a.requested_by = $1 or a.approved_by = $1 or exists ( \
-               select 1 from agents g where g.tenant_id = {t} and g.id = a.agent \
-               and (g.owner_member = $1 or exists (select 1 from team_members tm \
-                 where tm.tenant_id = {t} and tm.team_id = g.owner_team and tm.member_id = $1))))"
+            "delete from approvals where tenant_id = {t} and used_at is null \
+             and (requested_by = $1 or approved_by = $1)"
         ),
         format!(
             "delete from grants where tenant_id = {t} \
