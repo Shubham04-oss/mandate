@@ -38,4 +38,33 @@ The rule that shapes everything: **the Rust core holds all authority, the agent 
 - [docs/security.md](docs/security.md): the trust model and the rules every change follows
 - [CLAUDE.md](CLAUDE.md): how to work in this repository
 
-Status: design. No code yet.
+## Status
+
+The core slice is built: the Rust core (`core/`) with Cedar policy proven by SymCC, grants and
+single-use approvals in Postgres under row-level security, WorkOS sign-in and directory sync, and
+the MCP tool server with a governed browser (AgentCore). eve, the web app and infrastructure are
+not built yet.
+
+## Run
+
+`scripts/check.sh` runs fmt, clippy, tests, `cargo deny` and the policy proofs (needs `cvc5`). With
+`DATABASE_URL` set to a Postgres superuser it also runs the live database tests.
+
+1. `mandate migrate`, connected as the migration role (`MANDATE_MIGRATION_DATABASE_URL`, falling
+   back to `DATABASE_URL`).
+2. Create the app role (login, not superuser, not bypassrls) and apply its grants:
+   `psql "$MANDATE_MIGRATION_DATABASE_URL" -v role=mandate_app -f core/sql/app_role.sql`.
+3. `mandate serve`, connected as the app role. It refuses a role that bypasses row-level security.
+
+| Variable | Used by | What |
+| --- | --- | --- |
+| `DATABASE_URL` | serve | Postgres as the app role from `core/sql/app_role.sql` |
+| `MANDATE_MIGRATION_DATABASE_URL` | migrate | Postgres as the role that owns the schema |
+| `MANDATE_ASSERTION_PRIVATE_KEY` | serve | Path to the Ed25519 PEM key that signs assertions |
+| `MANDATE_ASSERTION_PUBLIC_KEY` | serve | Path to its public key (optional; checked against the private key) |
+| `MANDATE_BROWSER_ID` | serve | AgentCore browser id; the browser must use PUBLIC network mode |
+| `MANDATE_READ_HOSTS` | serve | Comma-separated hosts a page read may reach without approval |
+| `WORKOS_API_KEY`, `WORKOS_CLIENT_ID` | serve | WorkOS; without them `/v1/assertions` answers 503 and directory sync is off |
+| `MANDATE_BIND` | serve | Listen address (default `127.0.0.1:8080`) |
+| `MANDATE_POLICY_DIR` | serve | Cedar policies (default `policies`) |
+| `RUST_LOG` | all | Log filter (default `info`) |
