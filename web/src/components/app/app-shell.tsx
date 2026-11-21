@@ -6,7 +6,7 @@ import {
 	useRouter,
 	useSearch,
 } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { PersonAvatar } from "#/components/auth/parts.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import { SettingsDialog } from "#/components/settings/settings-dialog.tsx";
@@ -18,7 +18,12 @@ import {
 	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuLabel,
+	DropdownMenuRadioGroup,
+	DropdownMenuRadioItem,
 	DropdownMenuSeparator,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "#/components/ui/dropdown-menu.tsx";
 import {
@@ -29,6 +34,12 @@ import {
 } from "#/components/ui/tooltip.tsx";
 import { describeApproval } from "#/lib/activity.ts";
 import { type Approval, api, type Me, type Person } from "#/lib/api/index.ts";
+import {
+	chooseTheme,
+	parseChoice,
+	readChoice,
+	themeChoices,
+} from "#/lib/theme.ts";
 
 declare module "@tanstack/react-router" {
 	interface StaticDataRouteOption {
@@ -171,12 +182,44 @@ function AccountItems({
 				<Icon name="settings" strokeWidth={1.8} />
 				Settings
 			</DropdownMenuItem>
+			<ThemeItem />
 			<DropdownMenuItem onClick={signOut}>
 				<PersonAvatar person={person} className="size-5" />
 				<span className="flex-1">{person.name}</span>
 				<span className="text-[12px] text-muted-foreground">Sign out</span>
 			</DropdownMenuItem>
 		</DropdownMenuGroup>
+	);
+}
+
+/** Light, dark, or whatever the device is set to. Kept on this device only. */
+function ThemeItem() {
+	const [choice, setChoice] = useState(readChoice);
+	const current = themeChoices.find((c) => c.value === choice)?.label;
+	return (
+		<DropdownMenuSub>
+			<DropdownMenuSubTrigger>
+				<Icon name="moon" strokeWidth={1.8} />
+				<span className="flex-1">Theme</span>
+				<span className="text-[12px] text-muted-foreground">{current}</span>
+			</DropdownMenuSubTrigger>
+			<DropdownMenuSubContent>
+				<DropdownMenuRadioGroup
+					value={choice}
+					onValueChange={(value) => {
+						const next = parseChoice(value);
+						setChoice(next);
+						chooseTheme(next);
+					}}
+				>
+					{themeChoices.map((c) => (
+						<DropdownMenuRadioItem key={c.value} value={c.value} closeOnClick>
+							{c.label}
+						</DropdownMenuRadioItem>
+					))}
+				</DropdownMenuRadioGroup>
+			</DropdownMenuSubContent>
+		</DropdownMenuSub>
 	);
 }
 
@@ -273,9 +316,7 @@ function RailAccount({ me, onSettings }: { me: Me; onSettings: () => void }) {
 				className="w-60"
 			>
 				<DropdownMenuGroup>
-					<DropdownMenuLabel className="normal-case tracking-normal">
-						{me.person.email}
-					</DropdownMenuLabel>
+					<DropdownMenuLabel>{me.person.email}</DropdownMenuLabel>
 				</DropdownMenuGroup>
 				<AccountItems person={me.person} onSettings={onSettings} />
 			</DropdownMenuContent>

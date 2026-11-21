@@ -2,6 +2,7 @@ import { TanStackDevtools } from "@tanstack/react-devtools";
 import { createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { Toaster } from "#/components/ui/sonner.tsx";
+import { themeScript } from "#/lib/theme.ts";
 
 import appCss from "../styles.css?url";
 
@@ -26,19 +27,10 @@ export const Route = createRootRoute({
 			},
 		],
 		// Runs before the first paint, so the page never flashes the other theme.
-		scripts: [{ children: followDeviceTheme }],
+		scripts: [{ children: themeScript }],
 	}),
 	shellComponent: RootDocument,
 });
-
-// Dark unless the device asks for light; follows the setting when it changes.
-// ponytail: no in-app switch yet; the device setting decides.
-const followDeviceTheme = `(() => {
-	const light = window.matchMedia("(prefers-color-scheme: light)");
-	const apply = () => document.documentElement.classList.toggle("light", light.matches);
-	apply();
-	light.addEventListener("change", apply);
-})();`;
 
 function RootDocument({ children }: { children: React.ReactNode }) {
 	return (

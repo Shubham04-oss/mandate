@@ -19,6 +19,10 @@ const extra = {
 		</>
 	),
 	check: <path d="M20 6 9 17l-5-5" />,
+	// from the Oryxa Website Language icons, drawn to the Pika rules
+	moon: (
+		<path d="M20.6 14.6C19.5 15.06 18.29 15.32 17.02 15.32C11.9 15.32 7.75 11.17 7.75 6.05C7.75 4.92 7.95 3.84 8.32 2.84C4.66 4.11 2 7.6 2 11.7C2 16.94 6.25 21.18 11.48 21.18C15.79 21.18 19.43 18.31 20.6 14.6Z" />
+	),
 	dot: <circle cx="12" cy="12" r="4" />,
 };
 
