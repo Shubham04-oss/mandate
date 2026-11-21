@@ -110,6 +110,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-recursion"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f8abc12baad266b1c8cec146854c195b5864b4221d4b2ca7296a7ae82d9e451"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -835,6 +846,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cedar-policy-symcc"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a7c407b6cc02b922e5246d34505c0268dd9d73a470e473e052787db29a3e4b4"
+dependencies = [
+ "async-recursion",
+ "cedar-policy",
+ "cedar-policy-core",
+ "chrono",
+ "itertools 0.15.0",
+ "miette",
+ "nonempty",
+ "num-bigint 0.5.1",
+ "num-traits",
+ "ref-cast",
+ "smol_str",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -929,8 +961,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -2283,6 +2317,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "cedar-policy",
+ "cedar-policy-symcc",
  "chromiumoxide",
  "clap",
  "ed25519-dalek",
@@ -2408,6 +2443,16 @@ name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -3383,7 +3428,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "thiserror",
  "time",
