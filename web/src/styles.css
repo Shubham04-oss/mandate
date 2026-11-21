@@ -21,10 +21,12 @@
 	--raised: #242424;
 	--hover: #1d1d1d;
 	--selected: #262626;
+	--active: #303030;
 
 	/* lines */
 	--border-quiet: #353535;
 	--border-strong: #555555;
+	--field: #3a3a3a;
 
 	/* text */
 	--text: #f2f2f2;
@@ -57,9 +59,11 @@
 	--raised: #fafafa;
 	--hover: #ebebeb;
 	--selected: #e4e4e4;
+	--active: #e9e9e9;
 
 	--border-quiet: #e6e6e6;
 	--border-strong: #cccccc;
+	--field: #e0e0e0;
 
 	--text: #111111;
 	--text-soft: #404040;
@@ -126,6 +130,8 @@
 	--color-raised: var(--raised);
 	--color-hover: var(--hover);
 	--color-selected: var(--selected);
+	--color-active: var(--active);
+	--color-field: var(--field);
 	--color-border-strong: var(--border-strong);
 	--color-soft-foreground: var(--text-soft);
 	--color-ok: var(--ok-fill);
@@ -214,5 +220,109 @@
 	.light .scene-soft,
 	.light .scene-band {
 		filter: none;
+	}
+}
+
+/*
+ * Home. Narrow: one column that flows down. Wide: the ask box sits on the exact centre line with the
+ * question above it and the quick actions below, and the two side panels fill the margins.
+ */
+@layer components {
+	.home-grid {
+		flex: 1;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-areas: "greet" "ask" "below" "left" "right";
+		row-gap: 18px;
+		column-gap: 16px;
+		/* room at the top for the tab that hangs from the canvas edge */
+		padding: 60px 20px 40px;
+		align-content: start;
+	}
+
+	.home-grid > [data-area="greet"],
+	.home-grid > [data-area="ask"],
+	.home-grid > [data-area="below"] {
+		width: 100%;
+		max-width: 680px;
+		justify-self: center;
+	}
+
+	.home-grid > [data-area="greet"] { grid-area: greet; }
+	.home-grid > [data-area="ask"] { grid-area: ask; }
+	.home-grid > [data-area="below"] { grid-area: below; }
+	.home-grid > [data-area="left"] { grid-area: left; }
+	.home-grid > [data-area="right"] { grid-area: right; }
+
+	@media (min-width: 760px) {
+		.home-grid {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			grid-template-areas: "greet greet" "ask ask" "below below" "left right";
+		}
+	}
+
+	@media (min-width: 1240px) {
+		.home-grid {
+			grid-template-columns: minmax(0, 1fr) minmax(0, 680px) minmax(0, 1fr);
+			grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr);
+			grid-template-areas: "left greet right" "left ask right" "left below right";
+			column-gap: 48px;
+			row-gap: 20px;
+			padding: 24px 32px;
+			align-content: stretch;
+		}
+
+		.home-grid > [data-area="greet"] { align-self: end; }
+		.home-grid > [data-area="below"] { align-self: start; }
+		.home-grid > [data-area="left"],
+		.home-grid > [data-area="right"] {
+			align-self: center;
+			width: 100%;
+			max-width: 300px;
+		}
+		.home-grid > [data-area="left"] { justify-self: end; }
+		.home-grid > [data-area="right"] { justify-self: start; }
+	}
+
+	/* A tab cut out of the canvas in the surround colour, hanging from its top edge. The curved
+	   shoulders make it read as a slice taken out rather than a box laid on top. */
+	.tab-cut {
+		border-radius: 0 0 14px 14px;
+		background: var(--base);
+	}
+
+	.tab-cut::before,
+	.tab-cut::after {
+		content: "";
+		position: absolute;
+		top: 0;
+		width: 14px;
+		height: 14px;
+	}
+
+	.tab-cut::before {
+		left: -14px;
+		background: radial-gradient(circle at 0 100%, transparent 13.5px, var(--base) 14px);
+	}
+
+	.tab-cut::after {
+		right: -14px;
+		background: radial-gradient(circle at 100% 100%, transparent 13.5px, var(--base) 14px);
+	}
+
+	/* The painted band behind the quick actions, under a sea-deep veil so white text stays legible. */
+	.quick-band {
+		position: relative;
+		isolation: isolate;
+		overflow: hidden;
+		background: var(--sea-deep) url(/scenes/bottles.webp) center 62% / cover no-repeat;
+	}
+
+	.quick-band::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		z-index: -1;
+		background: linear-gradient(180deg, rgb(13 24 40 / 0.3), rgb(13 24 40 / 0.7));
 	}
 }

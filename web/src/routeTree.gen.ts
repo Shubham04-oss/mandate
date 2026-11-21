@@ -9,7 +9,7 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as IndexRouteImport } from './routes/index'
+import { Route as AppRouteImport } from './routes/_app'
 import { Route as ChooseOrganizationRouteImport } from './routes/choose-organization'
 import { Route as EmailVerifiedRouteImport } from './routes/email-verified'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
@@ -22,14 +22,14 @@ import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as SsoRouteImport } from './routes/sso'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
+import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as MfaSetupRouteImport } from './routes/mfa_.setup'
 import { Route as PreviewPopupsRouteImport } from './routes/preview.popups'
 import { Route as SignInCodeRouteImport } from './routes/sign-in_.code'
 import { Route as SignInRequiredRouteImport } from './routes/sign-in_.required'
 
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const AppRoute = AppRouteImport.update({
+  id: '/_app',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChooseOrganizationRoute = ChooseOrganizationRouteImport.update({
@@ -92,6 +92,11 @@ const VerifyEmailRoute = VerifyEmailRouteImport.update({
   path: '/verify-email',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AppIndexRoute = AppIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppRoute,
+} as any)
 const MfaSetupRoute = MfaSetupRouteImport.update({
   id: '/mfa_/setup',
   path: '/mfa/setup',
@@ -114,7 +119,7 @@ const SignInRequiredRoute = SignInRequiredRouteImport.update({
 } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
+  '/': typeof AppIndexRoute
   '/choose-organization': typeof ChooseOrganizationRoute
   '/email-verified': typeof EmailVerifiedRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -133,7 +138,6 @@ export interface FileRoutesByFullPath {
   '/sign-in/required': typeof SignInRequiredRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
   '/choose-organization': typeof ChooseOrganizationRoute
   '/email-verified': typeof EmailVerifiedRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -150,10 +154,11 @@ export interface FileRoutesByTo {
   '/preview/popups': typeof PreviewPopupsRoute
   '/sign-in/code': typeof SignInCodeRoute
   '/sign-in/required': typeof SignInRequiredRoute
+  '/': typeof AppIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
+  '/_app': typeof AppRouteWithChildren
   '/choose-organization': typeof ChooseOrganizationRoute
   '/email-verified': typeof EmailVerifiedRoute
   '/forgot-password': typeof ForgotPasswordRoute
@@ -170,6 +175,7 @@ export interface FileRoutesById {
   '/preview/popups': typeof PreviewPopupsRoute
   '/sign-in_/code': typeof SignInCodeRoute
   '/sign-in_/required': typeof SignInRequiredRoute
+  '/_app/': typeof AppIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -193,7 +199,6 @@ export interface FileRouteTypes {
     | '/sign-in/required'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/'
     | '/choose-organization'
     | '/email-verified'
     | '/forgot-password'
@@ -210,9 +215,10 @@ export interface FileRouteTypes {
     | '/preview/popups'
     | '/sign-in/code'
     | '/sign-in/required'
+    | '/'
   id:
     | '__root__'
-    | '/'
+    | '/_app'
     | '/choose-organization'
     | '/email-verified'
     | '/forgot-password'
@@ -229,10 +235,11 @@ export interface FileRouteTypes {
     | '/preview/popups'
     | '/sign-in_/code'
     | '/sign-in_/required'
+    | '/_app/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
+  AppRoute: typeof AppRouteWithChildren
   ChooseOrganizationRoute: typeof ChooseOrganizationRoute
   EmailVerifiedRoute: typeof EmailVerifiedRoute
   ForgotPasswordRoute: typeof ForgotPasswordRoute
@@ -253,11 +260,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/': {
-      id: '/'
-      path: '/'
+    '/_app': {
+      id: '/_app'
+      path: ''
       fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+      preLoaderRoute: typeof AppRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/choose-organization': {
@@ -344,6 +351,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof VerifyEmailRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_app/': {
+      id: '/_app/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/mfa_/setup': {
       id: '/mfa_/setup'
       path: '/mfa/setup'
@@ -375,8 +389,18 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface AppRouteChildren {
+  AppIndexRoute: typeof AppIndexRoute
+}
+
+const AppRouteChildren: AppRouteChildren = {
+  AppIndexRoute: AppIndexRoute,
+}
+
+const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
+  AppRoute: AppRouteWithChildren,
   ChooseOrganizationRoute: ChooseOrganizationRoute,
   EmailVerifiedRoute: EmailVerifiedRoute,
   ForgotPasswordRoute: ForgotPasswordRoute,

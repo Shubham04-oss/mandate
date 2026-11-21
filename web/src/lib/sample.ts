@@ -38,4 +38,72 @@ export const sample = {
 		},
 	],
 	mfa: { qr: "/sample/mfa-qr.svg", secret: "JBSW Y3DP EHPK 3PXP" },
+	// Home
+	needsYou: [
+		{
+			id: "q3",
+			avatar: "/avatars/priya.svg",
+			who: "Priya Shah",
+			what: "Q3 revenue for the EU",
+		},
+		{
+			id: "mail",
+			avatar: "/avatars/agent.svg",
+			who: "Support bot",
+			what: "Email to dana@acme.com",
+		},
+		{
+			id: "ops",
+			avatar: "/avatars/rohan.svg",
+			who: "Rohan Mehta",
+			what: "Ops bot in #incidents",
+		},
+	],
+	working: [
+		{
+			id: "expenses",
+			kind: "live",
+			title: "Filing October expenses",
+			detail: "Live in Expensify",
+			when: "3 of 5",
+		},
+		{
+			id: "launch",
+			kind: "agent",
+			title: "Summarising #launch",
+			detail: "Slack",
+			when: "2 min",
+		},
+		{
+			id: "weekly",
+			kind: "scheduled",
+			title: "Weekly report for Raya",
+			detail: "Scheduled",
+			when: "Mon 9:00",
+		},
+	],
+	recent: [
+		{
+			id: "kenji",
+			kind: "done",
+			title: "Answered Kenji",
+			detail: "Release date",
+			when: "10:12",
+		},
+		{
+			id: "crm",
+			kind: "refused",
+			title: "Refused a CRM export",
+			detail: "Policy refused it",
+			when: "09:40",
+		},
+		{
+			id: "ops-end",
+			kind: "expired",
+			title: "Ops bot's access ended",
+			detail: "1-hour grant on #incidents",
+			when: "09:00",
+		},
+	],
+	handledToday: 6,
 };
