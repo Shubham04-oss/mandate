@@ -1,6 +1,6 @@
 # Mandate v1, the rest: design
 
-Date: 2026-11-21. Status: draft for the owner's review (owner's decisions recorded in section 10). Builds on `docs/design.md` (approved) and
+Date: 2026-11-21. Status: approved by the owner, 2026-11-21 (decisions in section 10). Builds on `docs/design.md` (approved) and
 the merged core slice (PR #2). One plan executes all of it, in parallel lanes.
 
 ## 1. Intent
