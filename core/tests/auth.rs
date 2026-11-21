@@ -8,7 +8,7 @@ use common::app_store;
 use http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use mandate::api::session::{self, Session};
-use mandate::api::{self, ApiState};
+use mandate::api::{self, ApiState, ratelimit};
 use mandate::ids::{MemberId, TenantId};
 use mandate::store::Store;
 use serde_json::{Value, json};
@@ -403,4 +403,127 @@ async fn idle_and_absolute_expiry() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// A router with only the sign-in rate limit in front of an open route.
+fn limited(state: Arc<ApiState>) -> Router {
+    let routes = Router::new()
+        .route("/v1/auth/probe", post(|| async { StatusCode::ACCEPTED }))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ratelimit::limit,
+        ));
+    api::with_routes(routes, state)
+}
+
+fn random_ip() -> String {
+    let b = Uuid::new_v4().into_bytes();
+    format!("10.{}.{}.{}", b[0], b[1], b[2])
+}
+
+fn auth_post(uri: &str, ip: &str, body: Value) -> Request<Body> {
+    Request::post(uri)
+        .header("x-mandate", "1")
+        .header(header::ORIGIN, WEB)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("cf-connecting-ip", ip)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Counting is per calendar minute: start a burst early in a minute so it fits in one window.
+async fn fresh_minute() {
+    let s = OffsetDateTime::now_utc().second();
+    if s >= 40 {
+        tokio::time::sleep(std::time::Duration::from_secs(u64::from(61 - s))).await;
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn sixth_attempt_per_email_is_429() {
+    let app = limited(state(app_store().await));
+    let email = format!("ann-{}@example.com", Uuid::new_v4().simple());
+    fresh_minute().await;
+    for i in 0..5 {
+        // Case and spaces do not make a new subject.
+        let typed = if i % 2 == 0 {
+            email.to_uppercase()
+        } else {
+            format!(" {email}")
+        };
+        let r = app
+            .clone()
+            .oneshot(auth_post(
+                "/v1/auth/probe",
+                &random_ip(),
+                json!({ "email": typed }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::ACCEPTED, "attempt {}", i + 1);
+    }
+    let r = app
+        .clone()
+        .oneshot(auth_post(
+            "/v1/auth/probe",
+            &random_ip(),
+            json!({ "email": email }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    let wait: i64 = r.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&wait), "{wait}");
+    assert_eq!(body_json(r).await["error"]["code"], "rate_limited");
+    // Another person is not held back.
+    let other = format!("bob-{}@example.com", Uuid::new_v4().simple());
+    let r = app
+        .oneshot(auth_post(
+            "/v1/auth/probe",
+            &random_ip(),
+            json!({ "email": other }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+#[ignore]
+async fn ip_limit_applies_across_emails() {
+    let app = limited(state(app_store().await));
+    let ip = random_ip();
+    fresh_minute().await;
+    for i in 0..30 {
+        let email = format!("p{i}-{}@example.com", Uuid::new_v4().simple());
+        let r = app
+            .clone()
+            .oneshot(auth_post("/v1/auth/probe", &ip, json!({ "email": email })))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::ACCEPTED, "attempt {}", i + 1);
+    }
+    let email = format!("late-{}@example.com", Uuid::new_v4().simple());
+    let r = app
+        .clone()
+        .oneshot(auth_post("/v1/auth/probe", &ip, json!({ "email": email })))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(r.headers().contains_key(header::RETRY_AFTER));
+    // A pending step is a subject too; another IP is unaffected.
+    let r = app
+        .oneshot(auth_post(
+            "/v1/auth/probe",
+            &random_ip(),
+            json!({ "pending": "abc" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
 }

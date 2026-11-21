@@ -1,5 +1,6 @@
 //! The web app's JSON API. The core authenticates every request from its own session cookie;
 //! the web app decides nothing and never talks to WorkOS.
+pub mod ratelimit;
 pub mod session;
 
 use crate::store::{Store, StoreError};
