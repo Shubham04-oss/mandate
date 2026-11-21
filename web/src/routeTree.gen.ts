@@ -10,33 +10,245 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ChooseOrganizationRouteImport } from './routes/choose-organization'
+import { Route as EmailVerifiedRouteImport } from './routes/email-verified'
+import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
+import { Route as InviteRouteImport } from './routes/invite'
+import { Route as LinkExpiredRouteImport } from './routes/link-expired'
+import { Route as MfaRouteImport } from './routes/mfa'
+import { Route as NoAccessRouteImport } from './routes/no-access'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as SignUpRouteImport } from './routes/sign-up'
+import { Route as SsoRouteImport } from './routes/sso'
+import { Route as VerifyEmailRouteImport } from './routes/verify-email'
+import { Route as MfaSetupRouteImport } from './routes/mfa_.setup'
+import { Route as PreviewPopupsRouteImport } from './routes/preview.popups'
+import { Route as SignInCodeRouteImport } from './routes/sign-in_.code'
+import { Route as SignInRequiredRouteImport } from './routes/sign-in_.required'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ChooseOrganizationRoute = ChooseOrganizationRouteImport.update({
+  id: '/choose-organization',
+  path: '/choose-organization',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EmailVerifiedRoute = EmailVerifiedRouteImport.update({
+  id: '/email-verified',
+  path: '/email-verified',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
+  id: '/forgot-password',
+  path: '/forgot-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const InviteRoute = InviteRouteImport.update({
+  id: '/invite',
+  path: '/invite',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LinkExpiredRoute = LinkExpiredRouteImport.update({
+  id: '/link-expired',
+  path: '/link-expired',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MfaRoute = MfaRouteImport.update({
+  id: '/mfa',
+  path: '/mfa',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const NoAccessRoute = NoAccessRouteImport.update({
+  id: '/no-access',
+  path: '/no-access',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignInRoute = SignInRouteImport.update({
+  id: '/sign-in',
+  path: '/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignUpRoute = SignUpRouteImport.update({
+  id: '/sign-up',
+  path: '/sign-up',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SsoRoute = SsoRouteImport.update({
+  id: '/sso',
+  path: '/sso',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VerifyEmailRoute = VerifyEmailRouteImport.update({
+  id: '/verify-email',
+  path: '/verify-email',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MfaSetupRoute = MfaSetupRouteImport.update({
+  id: '/mfa_/setup',
+  path: '/mfa/setup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PreviewPopupsRoute = PreviewPopupsRouteImport.update({
+  id: '/preview/popups',
+  path: '/preview/popups',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignInCodeRoute = SignInCodeRouteImport.update({
+  id: '/sign-in_/code',
+  path: '/sign-in/code',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignInRequiredRoute = SignInRequiredRouteImport.update({
+  id: '/sign-in_/required',
+  path: '/sign-in/required',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/choose-organization': typeof ChooseOrganizationRoute
+  '/email-verified': typeof EmailVerifiedRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/invite': typeof InviteRoute
+  '/link-expired': typeof LinkExpiredRoute
+  '/mfa': typeof MfaRoute
+  '/no-access': typeof NoAccessRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/sso': typeof SsoRoute
+  '/verify-email': typeof VerifyEmailRoute
+  '/mfa/setup': typeof MfaSetupRoute
+  '/preview/popups': typeof PreviewPopupsRoute
+  '/sign-in/code': typeof SignInCodeRoute
+  '/sign-in/required': typeof SignInRequiredRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/choose-organization': typeof ChooseOrganizationRoute
+  '/email-verified': typeof EmailVerifiedRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/invite': typeof InviteRoute
+  '/link-expired': typeof LinkExpiredRoute
+  '/mfa': typeof MfaRoute
+  '/no-access': typeof NoAccessRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/sso': typeof SsoRoute
+  '/verify-email': typeof VerifyEmailRoute
+  '/mfa/setup': typeof MfaSetupRoute
+  '/preview/popups': typeof PreviewPopupsRoute
+  '/sign-in/code': typeof SignInCodeRoute
+  '/sign-in/required': typeof SignInRequiredRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/choose-organization': typeof ChooseOrganizationRoute
+  '/email-verified': typeof EmailVerifiedRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/invite': typeof InviteRoute
+  '/link-expired': typeof LinkExpiredRoute
+  '/mfa': typeof MfaRoute
+  '/no-access': typeof NoAccessRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/sign-in': typeof SignInRoute
+  '/sign-up': typeof SignUpRoute
+  '/sso': typeof SsoRoute
+  '/verify-email': typeof VerifyEmailRoute
+  '/mfa_/setup': typeof MfaSetupRoute
+  '/preview/popups': typeof PreviewPopupsRoute
+  '/sign-in_/code': typeof SignInCodeRoute
+  '/sign-in_/required': typeof SignInRequiredRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/choose-organization'
+    | '/email-verified'
+    | '/forgot-password'
+    | '/invite'
+    | '/link-expired'
+    | '/mfa'
+    | '/no-access'
+    | '/reset-password'
+    | '/sign-in'
+    | '/sign-up'
+    | '/sso'
+    | '/verify-email'
+    | '/mfa/setup'
+    | '/preview/popups'
+    | '/sign-in/code'
+    | '/sign-in/required'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/choose-organization'
+    | '/email-verified'
+    | '/forgot-password'
+    | '/invite'
+    | '/link-expired'
+    | '/mfa'
+    | '/no-access'
+    | '/reset-password'
+    | '/sign-in'
+    | '/sign-up'
+    | '/sso'
+    | '/verify-email'
+    | '/mfa/setup'
+    | '/preview/popups'
+    | '/sign-in/code'
+    | '/sign-in/required'
+  id:
+    | '__root__'
+    | '/'
+    | '/choose-organization'
+    | '/email-verified'
+    | '/forgot-password'
+    | '/invite'
+    | '/link-expired'
+    | '/mfa'
+    | '/no-access'
+    | '/reset-password'
+    | '/sign-in'
+    | '/sign-up'
+    | '/sso'
+    | '/verify-email'
+    | '/mfa_/setup'
+    | '/preview/popups'
+    | '/sign-in_/code'
+    | '/sign-in_/required'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ChooseOrganizationRoute: typeof ChooseOrganizationRoute
+  EmailVerifiedRoute: typeof EmailVerifiedRoute
+  ForgotPasswordRoute: typeof ForgotPasswordRoute
+  InviteRoute: typeof InviteRoute
+  LinkExpiredRoute: typeof LinkExpiredRoute
+  MfaRoute: typeof MfaRoute
+  NoAccessRoute: typeof NoAccessRoute
+  ResetPasswordRoute: typeof ResetPasswordRoute
+  SignInRoute: typeof SignInRoute
+  SignUpRoute: typeof SignUpRoute
+  SsoRoute: typeof SsoRoute
+  VerifyEmailRoute: typeof VerifyEmailRoute
+  MfaSetupRoute: typeof MfaSetupRoute
+  PreviewPopupsRoute: typeof PreviewPopupsRoute
+  SignInCodeRoute: typeof SignInCodeRoute
+  SignInRequiredRoute: typeof SignInRequiredRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +260,139 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/choose-organization': {
+      id: '/choose-organization'
+      path: '/choose-organization'
+      fullPath: '/choose-organization'
+      preLoaderRoute: typeof ChooseOrganizationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/email-verified': {
+      id: '/email-verified'
+      path: '/email-verified'
+      fullPath: '/email-verified'
+      preLoaderRoute: typeof EmailVerifiedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/forgot-password': {
+      id: '/forgot-password'
+      path: '/forgot-password'
+      fullPath: '/forgot-password'
+      preLoaderRoute: typeof ForgotPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/invite': {
+      id: '/invite'
+      path: '/invite'
+      fullPath: '/invite'
+      preLoaderRoute: typeof InviteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/link-expired': {
+      id: '/link-expired'
+      path: '/link-expired'
+      fullPath: '/link-expired'
+      preLoaderRoute: typeof LinkExpiredRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mfa': {
+      id: '/mfa'
+      path: '/mfa'
+      fullPath: '/mfa'
+      preLoaderRoute: typeof MfaRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/no-access': {
+      id: '/no-access'
+      path: '/no-access'
+      fullPath: '/no-access'
+      preLoaderRoute: typeof NoAccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-in': {
+      id: '/sign-in'
+      path: '/sign-in'
+      fullPath: '/sign-in'
+      preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-up': {
+      id: '/sign-up'
+      path: '/sign-up'
+      fullPath: '/sign-up'
+      preLoaderRoute: typeof SignUpRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sso': {
+      id: '/sso'
+      path: '/sso'
+      fullPath: '/sso'
+      preLoaderRoute: typeof SsoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/verify-email': {
+      id: '/verify-email'
+      path: '/verify-email'
+      fullPath: '/verify-email'
+      preLoaderRoute: typeof VerifyEmailRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mfa_/setup': {
+      id: '/mfa_/setup'
+      path: '/mfa/setup'
+      fullPath: '/mfa/setup'
+      preLoaderRoute: typeof MfaSetupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/preview/popups': {
+      id: '/preview/popups'
+      path: '/preview/popups'
+      fullPath: '/preview/popups'
+      preLoaderRoute: typeof PreviewPopupsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-in_/code': {
+      id: '/sign-in_/code'
+      path: '/sign-in/code'
+      fullPath: '/sign-in/code'
+      preLoaderRoute: typeof SignInCodeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sign-in_/required': {
+      id: '/sign-in_/required'
+      path: '/sign-in/required'
+      fullPath: '/sign-in/required'
+      preLoaderRoute: typeof SignInRequiredRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ChooseOrganizationRoute: ChooseOrganizationRoute,
+  EmailVerifiedRoute: EmailVerifiedRoute,
+  ForgotPasswordRoute: ForgotPasswordRoute,
+  InviteRoute: InviteRoute,
+  LinkExpiredRoute: LinkExpiredRoute,
+  MfaRoute: MfaRoute,
+  NoAccessRoute: NoAccessRoute,
+  ResetPasswordRoute: ResetPasswordRoute,
+  SignInRoute: SignInRoute,
+  SignUpRoute: SignUpRoute,
+  SsoRoute: SsoRoute,
+  VerifyEmailRoute: VerifyEmailRoute,
+  MfaSetupRoute: MfaSetupRoute,
+  PreviewPopupsRoute: PreviewPopupsRoute,
+  SignInCodeRoute: SignInCodeRoute,
+  SignInRequiredRoute: SignInRequiredRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

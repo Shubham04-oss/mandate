@@ -1,17 +1,218 @@
-
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/plus-jakarta-sans";
+@import "@fontsource/inter/latin-700.css";
 
-* {
-  box-sizing: border-box;
+/* Dark is the default; `.light` on <html> switches theme. */
+@custom-variant dark (&:not(.light *));
+
+/*
+ * Tokens from the oryxa design system (canvas "oryxa workspace redesign", ds/oryxa/tokens.json).
+ * shadcn's variable names are mapped onto them below, so library components take the design as is.
+ * Hue appears only for status, destructive actions and the brand dot.
+ */
+:root {
+	color-scheme: dark;
+
+	/* surfaces */
+	--base: #111111;
+	--canvas: #1e1e1e;
+	--raised: #242424;
+	--hover: #1d1d1d;
+	--selected: #262626;
+
+	/* lines */
+	--border-quiet: #353535;
+	--border-strong: #555555;
+
+	/* text */
+	--text: #f2f2f2;
+	--text-soft: #a8a8a8;
+	--text-muted: #999999;
+
+	/* shadows and scrims */
+	--shade-66: #00000066;
+	--shade-88: #00000088;
+	--shade-99: #00000099;
+
+	/* status */
+	--ok-fill: #263a2e;
+	--ok-text: #b9e6c6;
+	--ok-solid: #3f9d63;
+	--danger: #d4544f;
+	--danger-text: #ef7a75;
+
+	/* brand */
+	--gold-deep: #d98e62;
+	--gold: #f2b79f;
+	--sea-deep: #1c3350;
 }
 
-html,
-body,
-#app {
-  min-height: 100%;
+.light {
+	color-scheme: light;
+
+	--base: #f4f4f4;
+	--canvas: #ffffff;
+	--raised: #fafafa;
+	--hover: #ebebeb;
+	--selected: #e4e4e4;
+
+	--border-quiet: #e6e6e6;
+	--border-strong: #cccccc;
+
+	--text: #111111;
+	--text-soft: #404040;
+	--text-muted: #737373;
+
+	--shade-66: #0000002d;
+	--shade-88: #0000003d;
+	--shade-99: #00000044;
+
+	--ok-fill: #e4eee8;
+	--ok-text: #175829;
+	--danger-text: #c2413c;
 }
 
-body {
-  margin: 0;
+/* shadcn's names, pointed at the oryxa roles */
+:root,
+.light {
+	--background: var(--base);
+	--foreground: var(--text);
+	--card: var(--raised);
+	--card-foreground: var(--text);
+	--popover: var(--raised);
+	--popover-foreground: var(--text);
+	--primary: var(--text);
+	--primary-foreground: var(--canvas);
+	--secondary: var(--raised);
+	--secondary-foreground: var(--text);
+	--muted: var(--hover);
+	--muted-foreground: var(--text-muted);
+	--accent: var(--selected);
+	--accent-foreground: var(--text);
+	--destructive: var(--danger);
+	--border: var(--border-quiet);
+	--input: var(--border-quiet);
+	--ring: var(--text-muted);
 }
 
+@theme inline {
+	--font-sans: "Plus Jakarta Sans Variable", ui-sans-serif, system-ui, sans-serif;
+	--font-wordmark: Inter, "Plus Jakarta Sans Variable", sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+
+	/* surface steps shadcn has no name for */
+	--color-canvas: var(--canvas);
+	--color-raised: var(--raised);
+	--color-hover: var(--hover);
+	--color-selected: var(--selected);
+	--color-border-strong: var(--border-strong);
+	--color-soft-foreground: var(--text-soft);
+	--color-ok: var(--ok-fill);
+	--color-ok-foreground: var(--ok-text);
+	--color-ok-solid: var(--ok-solid);
+	--color-danger-foreground: var(--danger-text);
+	--color-gold-deep: var(--gold-deep);
+	--color-gold: var(--gold);
+	--color-sea-deep: var(--sea-deep);
+
+	/* radius scale from the tokens: button-sm, control, choice, card, panel, dialog */
+	--radius-sm: 8px;
+	--radius-md: 10px;
+	--radius-lg: 12px;
+	--radius-xl: 14px;
+	--radius-2xl: 18px;
+	--radius-3xl: 22px;
+	--radius-item: 9px;
+	--radius-row: 11px;
+	--radius-section: 16px;
+
+	/* depth is a 1px ring plus a short shadow; long shadows are for overlays only */
+	--shadow-ring: 0 0 0 1px var(--border-quiet);
+	--shadow-raised: 0 0 0 1px var(--border-quiet), 0 1px 3px var(--shade-66);
+	--shadow-tile: 0 0 0 1px var(--border-quiet), 0 4px 14px var(--shade-66);
+	--shadow-icon: 0 0 0 1px var(--border-quiet), 0 4px 12px var(--shade-66);
+	--shadow-field: inset 0 0 0 1px var(--border-quiet);
+	--shadow-field-focus: inset 0 0 0 1.5px var(--text), 0 0 0 4px var(--hover);
+	--shadow-field-invalid: inset 0 0 0 1.5px var(--danger);
+	--shadow-dialog: 0 0 0 1px var(--border-quiet), 0 24px 64px var(--shade-66);
+	--shadow-float: 0 0 0 1px var(--border-quiet), 0 12px 32px var(--shade-66);
+	--shadow-menu: 0 0 0 1px var(--border-quiet), 0 12px 34px var(--shade-88);
+
+	/* below this width the auth scene becomes a band */
+	--breakpoint-split: 800px;
+}
+
+@layer base {
+	* {
+		@apply border-border outline-ring/50;
+	}
+
+	html,
+	body {
+		min-height: 100%;
+	}
+
+	body {
+		margin: 0;
+		@apply bg-background font-sans text-foreground antialiased;
+		font-size: 13px;
+	}
+}
+
+/*
+ * Painted scenes. They sit at the edge of a surface and fade into it, so text sits on the surface,
+ * never on the painting. A touch muted in dark so they sit with the greys.
+ */
+@layer components {
+	.scene {
+		background-size: cover;
+		background-position: center;
+	}
+
+	.scene-fade-b {
+		mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.7) 45%, transparent 100%);
+	}
+
+	.scene-fade-r {
+		mask-image: linear-gradient(to right, #000 30%, transparent);
+	}
+
+	.scene-dim {
+		filter: brightness(0.82) saturate(0.9);
+	}
+
+	.scene-soft {
+		filter: saturate(0.92);
+	}
+
+	.scene-band {
+		filter: brightness(0.86) saturate(0.92);
+	}
+
+	.light .scene-dim,
+	.light .scene-soft,
+	.light .scene-band {
+		filter: none;
+	}
+}
