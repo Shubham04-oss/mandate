@@ -63,6 +63,11 @@ impl Store {
         })
     }
 
+    #[doc(hidden)]
+    pub fn from_pool(pool: PgPool) -> Store {
+        Store { pool }
+    }
+
     pub async fn migrate(&self) -> Result<(), StoreError> {
         sqlx::migrate!("./migrations").run(&self.pool).await?;
         Ok(())
