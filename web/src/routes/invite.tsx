@@ -20,7 +20,9 @@ function Invite() {
 		<AuthLayout scene="harbour">
 			<AuthForm label="Join your team">
 				<Title>Join your team</Title>
-				<Lead>Your invitation is ready. Accept it to enter the workspace.</Lead>
+				<Lead>
+					Your invitation is ready. Accept it to join the organization.
+				</Lead>
 				<InviteCard org={sample.org} />
 				<Button type="submit" size="lg">
 					Accept invitation

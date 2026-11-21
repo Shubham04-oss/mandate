@@ -23,7 +23,6 @@ import {
 import { Input } from "#/components/ui/input.tsx";
 import { brand } from "#/lib/brand.ts";
 import { checkPassword } from "#/lib/password.ts";
-import { sample } from "#/lib/sample.ts";
 
 export const Route = createFileRoute("/sign-up")({
 	head: () => ({ meta: [{ title: `Create an account · ${brand.name}` }] }),
@@ -35,11 +34,8 @@ function SignUp() {
 	return (
 		<AuthLayout scene="crows-nest">
 			<AuthForm label="Create an account">
-				<Title>Bring your crew aboard</Title>
-				<Lead>
-					Start free. Your agent, {sample.agent.name}, is ready as soon as
-					you're in.
-				</Lead>
+				<Title>Create your account</Title>
+				<Lead>Your agent is ready as soon as you're in.</Lead>
 				<GoogleButton>Sign up with Google</GoogleButton>
 				<FieldSeparator>or with email</FieldSeparator>
 				<Field className="gap-1.5">
@@ -82,7 +78,7 @@ function SignUp() {
 					Create account
 				</Button>
 				<Aside>
-					Already aboard? <TextLink to="/sign-in">Sign in</TextLink>
+					Already have an account? <TextLink to="/sign-in">Sign in</TextLink>
 				</Aside>
 			</AuthForm>
 		</AuthLayout>

@@ -33,7 +33,7 @@ function MfaChallenge() {
 					Verify
 				</Button>
 				<Aside>
-					Lost your device? Ask your workspace admin to reset it.
+					Lost your device? Ask your admin to reset it.
 					<br />
 					<TextLink to="/sign-in">Back to sign in</TextLink>
 				</Aside>

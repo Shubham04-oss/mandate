@@ -27,14 +27,14 @@ function SignIn() {
 			sceneCard={
 				<SceneCard
 					avatar={sample.agent.avatar}
-					title={`${sample.agent.name} kept watch`}
-					line="3 things need you this morning"
+					title="Your agent"
+					line="3 requests are waiting for you"
 				/>
 			}
 		>
 			<AuthForm label="Sign in">
 				<Title>Welcome back</Title>
-				<Lead>Sign in to pick up where your crew left off.</Lead>
+				<Lead>Sign in to continue.</Lead>
 				<GoogleButton lastUsed>Continue with Google</GoogleButton>
 				<FieldSeparator>or with email</FieldSeparator>
 				<Field className="gap-1.5">

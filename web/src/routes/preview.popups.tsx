@@ -152,7 +152,7 @@ function WelcomeDialog() {
 	const steps = [
 		{ label: "Connect Slack", done: true },
 		{ label: "Invite your team", done: false },
-		{ label: `Ask ${sample.agent.name} its first question`, done: false },
+		{ label: "Ask your agent its first question", done: false },
 	];
 	return (
 		<Dialog>
@@ -169,12 +169,10 @@ function WelcomeDialog() {
 				</DialogScene>
 				<DialogBody className="[[data-slot=dialog-scene]+&]:-mt-[18px]">
 					<DialogHeader>
-						<DialogTitle>
-							Welcome aboard, {sample.me.name.split(" ")[0]}
-						</DialogTitle>
+						<DialogTitle>Welcome, {sample.me.name.split(" ")[0]}</DialogTitle>
 						<DialogDescription>
-							{sample.agent.name} is your agent here. It reads only what you let
-							it, and asks before it acts for you.
+							Your agent works only with what you grant it, and asks before it
+							acts for you.
 						</DialogDescription>
 					</DialogHeader>
 					<ol className="m-0 flex list-none flex-col gap-1 p-0">
@@ -264,7 +262,7 @@ function InviteDialog() {
 						<InputGroupInput
 							aria-label="Add people or emails"
 							placeholder="Add people or emails"
-							className="h-7 w-auto min-w-20 px-1 text-[12.5px]"
+							className="h-7 w-auto min-w-36 px-1 text-[12.5px]"
 						/>
 					</InputGroup>
 					<Field orientation="horizontal">
@@ -354,7 +352,7 @@ function AgentToast() {
 		<SceneToast
 			scene={sceneUrl("bottles")}
 			avatar={sample.agent.avatar}
-			title={`${sample.agent.name} finished your task`}
+			title="Your agent finished a task"
 			description="4 sources read · 1 needs your approval"
 			action={
 				<Button variant="outline" size="sm">
@@ -449,7 +447,7 @@ function NothingWaiting() {
 			</EmptyHeader>
 			<EmptyContent className="relative">
 				<Button className="mt-1.5 bg-white text-sea-deep hover:bg-white/90">
-					Ask {sample.agent.name}
+					Ask your agent
 				</Button>
 			</EmptyContent>
 		</Empty>

@@ -9,7 +9,6 @@ import {
 import { Icon } from "#/components/icons/icon.tsx";
 import { buttonVariants } from "#/components/ui/button.tsx";
 import { brand } from "#/lib/brand.ts";
-import { sample } from "#/lib/sample.ts";
 
 export const Route = createFileRoute("/email-verified")({
 	head: () => ({ meta: [{ title: `Email verified · ${brand.name}` }] }),
@@ -22,10 +21,7 @@ function EmailVerified() {
 			<AuthStatus label="Email verified">
 				<StatusIcon icon="check-circle" tone="ok" />
 				<Title>Email verified</Title>
-				<Lead>
-					Your account is ready, and {sample.agent.name} is waiting for its
-					first question.
-				</Lead>
+				<Lead>Your account is ready.</Lead>
 				{/* ponytail: goes to sign-in until the app has a home to land on */}
 				<Link to="/sign-in" className={buttonVariants({ size: "lg" })}>
 					Continue <Icon name="arrow-right" />

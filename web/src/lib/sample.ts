@@ -3,7 +3,7 @@
 export const sample = {
 	email: "ada@northstar.io",
 	me: { name: "Ada Brennan", avatar: "/avatars/ada.svg" },
-	agent: { name: "Krude", avatar: "/avatars/krude.svg" },
+	agent: { avatar: "/avatars/agent.svg" },
 	org: {
 		name: "Northstar",
 		initial: "N",
