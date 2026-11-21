@@ -6,11 +6,11 @@
 
 **Architecture:** One Rust crate with a binary. A signed turn assertion says who is asking; Cedar policies plus grants and one-time approvals stored in Postgres decide run / ask / refuse; every decision is audited; an MCP server built on `rmcp` lists only allowed tools and gates every call. Browser tools sit behind a trait with an AgentCore Browser backend.
 
-**Tech Stack:** Rust 2024 edition, tokio, axum 0.8, rmcp 3.11, cedar-policy 4.15, sqlx 0.9 (Postgres), ed25519-dalek 3, aws-sdk-bedrockagentcore 1.88, chromiumoxide 0.9, cedar-policy-symcc (tests only), async-trait, clap, tracing, tracing-subscriber, sha2, base64, url, thiserror, serde, uuid, time.
+**Tech Stack:** Rust 2024 edition, tokio, axum 0.8, rmcp 3.11, cedar-policy 4.15, sqlx 0.9 (Postgres), ed25519-dalek 3, workos 3.7 (official SDK), jsonwebtoken 12, aws-sdk-bedrockagentcore 1.88, chromiumoxide 0.9, cedar-policy-symcc (tests only), async-trait, clap, tracing, tracing-subscriber, sha2, base64, url, thiserror, serde, uuid, time.
 
 **Spec:** `docs/design.md` (sections 7, 8.1, 8.4, 8.5) and `docs/security.md`.
 
-This is Plan 1 of 3. Plan 2: eve and the Slack channel (identity at the edge, output guard, AI gateway). Plan 3: web sign-in.
+This is Plan 1 of 3. Plan 2: eve and the Slack channel (identity at the edge, Slack account linking, output guard, AI gateway). Plan 3: the web app with AuthKit sign-in.
 
 ## Global Constraints
 
@@ -49,6 +49,7 @@ core/src/tools/mod.rs           Tool trait, catalog
 core/src/tools/browser.rs       browser tools and the BrowserBackend trait
 core/src/tools/agentcore.rs     AgentCore Browser backend
 core/src/mcp.rs                 MCP server over streamable HTTP
+core/src/identity.rs            WorkOS token verification, assertion exchange, directory sync
 core/src/main.rs                `mandate serve | migrate | dev-assert`
 core/migrations/0001_init.sql
 policies/schema.cedarschema
@@ -301,7 +302,41 @@ Behavior: every request needs `Authorization: Bearer <assertion>`; invalid → H
 - [ ] **Step 4: Run** — Expected: PASS.
 - [ ] **Step 5: Commit** `core: MCP server with listing and the gate`.
 
-### Task 8: The binary
+### Task 8: Sign-in and directory sync (WorkOS)
+
+**Files:**
+- Create: `core/src/identity.rs`, `core/migrations/0002_identity.sql`, `core/tests/identity.rs`
+- Modify: `core/src/mcp.rs` (mount the exchange route), `core/src/store.rs` (directory writes)
+
+**Interfaces:**
+- Consumes: `Store`, `sign`, `Assertion`, `TTL_SECS`, ids.
+- Produces:
+  - `pub struct WorkosClaims { pub user: String, pub org: String, pub expires_at: i64 }`
+  - `pub struct TokenVerifier` with `TokenVerifier::new(client: workos::Client, client_id: String)` and `async fn verify(&self, token: &str, now: i64) -> Result<WorkosClaims, IdentityError>` — RS256 only; checks signature against keys from `user_management().get_jwks(client_id)` (cached 10 minutes, refetched once on an unknown `kid`), issuer, expiry; an unknown `org` is an error.
+  - Route `POST /v1/assertions` with `Authorization: Bearer <WorkOS access token>` and body `{ "agent": "<id>", "space": "<id>"? }` → `{ "assertion": "<token>", "expires_at": <unix> }`. Issued only if the agent is the member's personal agent or a bot of a team the member belongs to, in the tenant mapped from `org`. Otherwise 403.
+  - `pub async fn sync_directory(store: &Store, client: &workos::Client) -> Result<u64, IdentityError>` — pulls `events().list_events_auto_paging` for `dsync.user.*`, `dsync.group.*`, `dsync.group.user_added`, `dsync.group.user_removed` after the stored cursor; applies each event idempotently; stores the cursor in the same transaction; returns events applied. `mandate serve` runs it every 60 s.
+  - Tables: `tenants (id, workos_org_id unique)`, `members.workos_user_id`, `teams.workos_group_id`, `directory_cursor (singleton)`.
+  - Effects of a user deleted or deactivated: member removed; grants with that member as principal or `granted_by` deleted; pending approvals they requested or could approve deleted; their personal agent disabled. One transaction per event.
+  - Env: `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`.
+
+Use the SDK's session helper for token verification if it exposes it publicly; otherwise verify with `jsonwebtoken` 12 against the SDK's `get_jwks` response.
+
+- [ ] **Step 1: Write the failing tests** (a local RSA key pair and a fake JWKS for verification; live Postgres for sync, fed with recorded event JSON, no network)
+
+```rust
+#[tokio::test] async fn valid_token_verifies_and_hs256_or_expired_or_wrong_issuer_is_rejected() {}
+#[tokio::test] async fn unknown_kid_refetches_keys_once() {}
+#[tokio::test] #[ignore] async fn assertion_only_for_own_or_team_agents() {}       // other member's personal agent -> 403
+#[tokio::test] #[ignore] async fn removed_user_loses_grants_and_pending_approvals() {}
+#[tokio::test] #[ignore] async fn replayed_events_change_nothing() {}              // apply the same batch twice -> same rows
+```
+
+- [ ] **Step 2: Run** — Expected: FAIL.
+- [ ] **Step 3: Implement** `TokenVerifier`, the route, `sync_directory` and the migration.
+- [ ] **Step 4: Run** — Expected: PASS.
+- [ ] **Step 5: Commit** `core: WorkOS sign-in exchange and directory sync`.
+
+### Task 9: The binary
 
 **Files:**
 - Create: `core/src/main.rs`, `core/tests/cli.rs`
@@ -326,7 +361,7 @@ Behavior: every request needs `Authorization: Bearer <assertion>`; invalid → H
 - [ ] **Step 4: Run** `scripts/check.sh` with `DATABASE_URL` set — Expected: PASS.
 - [ ] **Step 5: Commit** `core: mandate binary`.
 
-### Task 9: Policy proofs in CI
+### Task 10: Policy proofs in CI
 
 **Files:**
 - Create: `core/tests/proofs.rs`, `docs/policy-proofs.md`

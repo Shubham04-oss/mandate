@@ -115,6 +115,13 @@ Owns every decision and every credential path. Modes of one binary (`mandate ser
   passes that assertion back on every tool call and approval; the core rejects anything without a
   valid one. The web app signs in through the core (OIDC with the org's identity provider). So a
   broken eve cannot forge who asked, who approved, or which tenant a run belongs to.
+- **Authentication: WorkOS** (official Rust SDK, `workos` crate). People sign in through AuthKit;
+  enterprise SSO is set up by the customer's IT in WorkOS's admin portal. A WorkOS organization is a
+  tenant. Directory sync (SCIM) feeds members, teams and team membership, pulled from the WorkOS
+  Events API (no inbound webhook endpoint); a user removed from the directory loses their grants and
+  pending approvals at once. The core verifies WorkOS access tokens against WorkOS's published keys,
+  then mints its own assertion: WorkOS proves the person, Mandate decides access. Slack and Teams
+  users are linked to members once, through a WorkOS sign-in.
 - **Policy layers.** Platform policies are Cedar files in the repo, proven by SymCC in CI. Tenant
   settings are data chosen from templates (no raw Cedar in v1) and enter evaluation as entities and
   context. Grants are data, not policy. SymCC proves the platform invariants hold for any grant or
