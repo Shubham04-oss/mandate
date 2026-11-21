@@ -9,7 +9,11 @@ cedar-policy = "4.15"
 ed25519-dalek = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "time", "uuid", "macros", "migrate"] }
 thiserror = "2"
+time = "0.3.55"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
