@@ -1,7 +1,9 @@
 //! WorkOS sign-in and directory sync. Verifier tests are offline (local RSA key, fake JWKS);
 //! live tests need DATABASE_URL (a superuser), `--ignored`, and are fed recorded event JSON.
+mod common;
 use async_trait::async_trait;
 use axum::body::Body;
+use common::app_store;
 use ed25519_dalek::SigningKey;
 use futures::stream::{self, BoxStream, StreamExt};
 use http::{Request, StatusCode};
@@ -27,7 +29,6 @@ use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const APP_PASSWORD: &str = "mandate_app_test";
 const CLIENT_ID: &str = "client_test";
 const ISSUER: &str = "https://api.workos.com/user_management/client_test";
 const NOW: i64 = 1_800_000_000;
@@ -262,47 +263,6 @@ async fn a_failed_forced_refresh_also_cools_down() {
 }
 
 // ---- live ----
-
-// Copied from tests/store.rs, plus the grants an operator gives on the RLS-free identity tables.
-async fn app_store() -> Store {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    Store::connect_for_migration(&url)
-        .await
-        .unwrap()
-        .migrate()
-        .await
-        .unwrap();
-    let mut c = PgConnection::connect(&url).await.unwrap();
-    // Serialise role creation across parallel tests.
-    sqlx::query("select pg_advisory_lock(4242)")
-        .execute(&mut c)
-        .await
-        .unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "do $$ begin if not exists (select from pg_roles where rolname = 'mandate_app') then \
-         create role mandate_app login password '{APP_PASSWORD}'; end if; end $$"
-    )))
-    .execute(&mut c)
-    .await
-    .unwrap();
-    for g in [
-        "grant select, insert, update, delete on all tables in schema public to mandate_app",
-        "revoke all on tenants, directory_cursor, directory_dead_letters from mandate_app",
-        "grant select, insert on directory_dead_letters to mandate_app",
-        "grant select, insert on tenants to mandate_app",
-        "grant select, insert, update on directory_cursor to mandate_app",
-    ] {
-        sqlx::query(g).execute(&mut c).await.unwrap();
-    }
-    sqlx::query("select pg_advisory_unlock(4242)")
-        .execute(&mut c)
-        .await
-        .unwrap();
-    let host = url.split_once('@').unwrap().1;
-    Store::connect(&format!("postgres://mandate_app:{APP_PASSWORD}@{host}"))
-        .await
-        .unwrap()
-}
 
 /// Serves a fixed batch whatever the cursor (so replays really replay) and records each cursor.
 struct FakeEvents {

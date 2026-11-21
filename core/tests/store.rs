@@ -1,51 +1,11 @@
 //! Live tests: need DATABASE_URL (a superuser), run with `--ignored`.
+mod common;
+use common::app_store;
 use mandate::ids::{AgentId, MemberId, TenantId, ToolId};
 use mandate::policy::Parent;
 use mandate::store::{self, AuditEntry, Store, Tx};
-use sqlx::{Connection, PgConnection};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
-
-const APP_PASSWORD: &str = "mandate_app_test";
-
-/// Migrates as the superuser, ensures the non-superuser `mandate_app` role, and returns a
-/// store connected as that role, so RLS actually applies.
-async fn app_store() -> Store {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    Store::connect_for_migration(&url)
-        .await
-        .unwrap()
-        .migrate()
-        .await
-        .unwrap();
-    let mut c = PgConnection::connect(&url).await.unwrap();
-    // Serialise role creation across parallel tests.
-    sqlx::query("select pg_advisory_lock(4242)")
-        .execute(&mut c)
-        .await
-        .unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "do $$ begin if not exists (select from pg_roles where rolname = 'mandate_app') then \
-         create role mandate_app login password '{APP_PASSWORD}'; end if; end $$"
-    )))
-    .execute(&mut c)
-    .await
-    .unwrap();
-    sqlx::query(
-        "grant select, insert, update, delete on all tables in schema public to mandate_app",
-    )
-    .execute(&mut c)
-    .await
-    .unwrap();
-    sqlx::query("select pg_advisory_unlock(4242)")
-        .execute(&mut c)
-        .await
-        .unwrap();
-    let host = url.split_once('@').unwrap().1;
-    Store::connect(&format!("postgres://mandate_app:{APP_PASSWORD}@{host}"))
-        .await
-        .unwrap()
-}
 
 fn tenant() -> TenantId {
     TenantId::parse(&format!("t-{}", Uuid::new_v4().simple())).unwrap()
@@ -373,4 +333,16 @@ async fn superuser_role_is_refused() {
         Store::connect(&url).await,
         Err(store::StoreError::UnsafeRole)
     ));
+}
+
+#[tokio::test]
+#[ignore]
+async fn audit_is_append_only_for_the_app_role() {
+    let s = app_store().await;
+    let t = tenant();
+    for q in ["update audit set reason = 'x'", "delete from audit"] {
+        let mut tx = s.begin(&t).await.unwrap();
+        let err = sqlx::query(q).execute(&mut *tx).await.unwrap_err();
+        assert!(err.to_string().contains("permission denied"), "{q}: {err}");
+    }
 }

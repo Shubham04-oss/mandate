@@ -1,53 +1,15 @@
 //! Live tests: need DATABASE_URL (a superuser), run with `--ignored`.
+mod common;
+use common::app_store;
 use mandate::assertion::Assertion;
 use mandate::gate::{Outcome, args_hash, authorize, list};
 use mandate::ids::{AgentId, MemberId, TenantId, ToolId};
 use mandate::policy::{Decision, Effect, Policy};
 use mandate::store::{self, Store};
 use serde_json::json;
-use sqlx::{Connection, PgConnection};
 use std::path::Path;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
-
-const APP_PASSWORD: &str = "mandate_app_test";
-
-// Copied from tests/store.rs: migrate as superuser, connect as non-superuser `mandate_app`.
-async fn app_store() -> Store {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    Store::connect_for_migration(&url)
-        .await
-        .unwrap()
-        .migrate()
-        .await
-        .unwrap();
-    let mut c = PgConnection::connect(&url).await.unwrap();
-    sqlx::query("select pg_advisory_lock(4242)")
-        .execute(&mut c)
-        .await
-        .unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "do $$ begin if not exists (select from pg_roles where rolname = 'mandate_app') then \
-         create role mandate_app login password '{APP_PASSWORD}'; end if; end $$"
-    )))
-    .execute(&mut c)
-    .await
-    .unwrap();
-    sqlx::query(
-        "grant select, insert, update, delete on all tables in schema public to mandate_app",
-    )
-    .execute(&mut c)
-    .await
-    .unwrap();
-    sqlx::query("select pg_advisory_unlock(4242)")
-        .execute(&mut c)
-        .await
-        .unwrap();
-    let host = url.split_once('@').unwrap().1;
-    Store::connect(&format!("postgres://mandate_app:{APP_PASSWORD}@{host}"))
-        .await
-        .unwrap()
-}
 
 fn policy() -> Policy {
     Policy::load(Path::new(concat!(

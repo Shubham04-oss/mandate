@@ -1,6 +1,8 @@
 //! MCP server over the in-process router. Live tests need DATABASE_URL (a superuser), `--ignored`.
+mod common;
 use async_trait::async_trait;
 use axum::body::Body;
+use common::app_store;
 use ed25519_dalek::SigningKey;
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -12,7 +14,6 @@ use mandate::store::{self, Store};
 use mandate::tools::browser::{BrowserBackend, Page, ReadPage, SubmitForm};
 use mandate::tools::{Catalog, ToolError};
 use serde_json::{Value, json};
-use sqlx::{Connection, PgConnection};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,8 +22,6 @@ use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
-
-const APP_PASSWORD: &str = "mandate_app_test";
 
 /// Counts every backend call, so a test can prove a refused call never reached it.
 #[derive(Default)]
@@ -159,43 +158,6 @@ async fn call(app: &axum::Router, t: &TenantId, name: &str, args: Value) -> Valu
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body
-}
-
-// Copied from tests/gate.rs: migrate as superuser, connect as non-superuser `mandate_app`.
-async fn app_store() -> Store {
-    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    Store::connect_for_migration(&url)
-        .await
-        .unwrap()
-        .migrate()
-        .await
-        .unwrap();
-    let mut c = PgConnection::connect(&url).await.unwrap();
-    sqlx::query("select pg_advisory_lock(4242)")
-        .execute(&mut c)
-        .await
-        .unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "do $$ begin if not exists (select from pg_roles where rolname = 'mandate_app') then \
-         create role mandate_app login password '{APP_PASSWORD}'; end if; end $$"
-    )))
-    .execute(&mut c)
-    .await
-    .unwrap();
-    sqlx::query(
-        "grant select, insert, update, delete on all tables in schema public to mandate_app",
-    )
-    .execute(&mut c)
-    .await
-    .unwrap();
-    sqlx::query("select pg_advisory_unlock(4242)")
-        .execute(&mut c)
-        .await
-        .unwrap();
-    let host = url.split_once('@').unwrap().1;
-    Store::connect(&format!("postgres://mandate_app:{APP_PASSWORD}@{host}"))
-        .await
-        .unwrap()
 }
 
 /// Seeds agent `bot` owned by `ann`, with a live non-standing grant on each given tool.
