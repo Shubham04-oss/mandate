@@ -12,7 +12,12 @@ const APP_PASSWORD: &str = "mandate_app_test";
 /// store connected as that role, so RLS actually applies.
 async fn app_store() -> Store {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    Store::connect(&url).await.unwrap().migrate().await.unwrap();
+    Store::connect_for_migration(&url)
+        .await
+        .unwrap()
+        .migrate()
+        .await
+        .unwrap();
     let mut c = PgConnection::connect(&url).await.unwrap();
     // Serialise role creation across parallel tests.
     sqlx::query("select pg_advisory_lock(4242)")
@@ -345,4 +350,14 @@ async fn only_the_owner_can_approve() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn superuser_role_is_refused() {
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    assert!(matches!(
+        Store::connect(&url).await,
+        Err(store::StoreError::UnsafeRole)
+    ));
 }

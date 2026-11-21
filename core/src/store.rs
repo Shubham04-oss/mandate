@@ -12,6 +12,8 @@ pub enum StoreError {
     Db(#[from] sqlx::Error),
     #[error("migration error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    #[error("database role bypasses row-level security (superuser or bypassrls)")]
+    UnsafeRole,
     #[error("stored id is invalid: {0}")]
     Id(#[from] crate::ids::IdError),
 }
@@ -40,7 +42,22 @@ pub struct AuditEntry {
 const APPROVAL_TTL: Duration = Duration::seconds(3600);
 
 impl Store {
+    /// Refuses a role that bypasses RLS: tenant isolation would silently not apply.
     pub async fn connect(url: &str) -> Result<Store, StoreError> {
+        let store = Self::connect_for_migration(url).await?;
+        let unsafe_role: bool = sqlx::query_scalar(
+            "select rolsuper or rolbypassrls from pg_roles where rolname = current_user",
+        )
+        .fetch_one(&store.pool)
+        .await?;
+        if unsafe_role {
+            return Err(StoreError::UnsafeRole);
+        }
+        Ok(store)
+    }
+
+    /// Skips the role check; only for running `migrate` with an elevated role.
+    pub async fn connect_for_migration(url: &str) -> Result<Store, StoreError> {
         Ok(Store {
             pool: PgPool::connect(url).await?,
         })
@@ -67,7 +84,7 @@ pub async fn agent_parents(
     tx: &mut Tx,
     agent: &AgentId,
 ) -> Result<Option<Vec<Parent>>, StoreError> {
-    let row = sqlx::query("select owner_member, owner_team from agents where id = $1")
+    let row = sqlx::query("select owner_member, owner_team from agents where id = $1 and tenant_id = current_setting('mandate.tenant', true)")
         .bind(agent.as_str())
         .fetch_optional(&mut **tx)
         .await?;
@@ -102,7 +119,7 @@ pub async fn live_grant(
     }
     let row = sqlx::query(
         "select count(*) as n, coalesce(bool_or(standing), false) as standing from grants \
-         where tool = $1 and expires_at > $2 \
+         where tool = $1 and expires_at > $2 and tenant_id = current_setting('mandate.tenant', true) \
          and (principal_kind, principal_id) in (select * from unnest($3::text[], $4::text[]))",
     )
     .bind(tool.as_str())
@@ -126,8 +143,8 @@ pub async fn consume_approval(
     now: OffsetDateTime,
 ) -> Result<bool, StoreError> {
     let r = sqlx::query(
-        "update approvals set used_at = $4 where id = ( \
-           select id from approvals where agent = $1 and tool = $2 and args_hash = $3 \
+        "update approvals set used_at = $4 where tenant_id = current_setting('mandate.tenant', true) and id = ( \
+           select id from approvals where agent = $1 and tool = $2 and args_hash = $3 and tenant_id = current_setting('mandate.tenant', true) \
            and approved_by is not null and used_at is null and expires_at > $4 \
            limit 1 for update skip locked) \
          returning id",
@@ -170,11 +187,11 @@ pub async fn request_approval(
 pub async fn approve(tx: &mut Tx, approval: Uuid, approver: &MemberId) -> Result<bool, StoreError> {
     let r = sqlx::query(
         "update approvals set approved_by = $2 from agents g \
-         where approvals.id = $1 and approvals.approved_by is null and approvals.used_at is null \
+         where approvals.id = $1 and approvals.tenant_id = current_setting('mandate.tenant', true) and approvals.approved_by is null and approvals.used_at is null \
          and approvals.expires_at > now() \
-         and g.tenant_id = approvals.tenant_id and g.id = approvals.agent \
+         and g.tenant_id = approvals.tenant_id and g.tenant_id = current_setting('mandate.tenant', true) and g.id = approvals.agent \
          and (g.owner_member = $2 or exists ( \
-              select 1 from team_members tm where tm.tenant_id = g.tenant_id \
+              select 1 from team_members tm where tm.tenant_id = g.tenant_id and tm.tenant_id = current_setting('mandate.tenant', true) \
               and tm.team_id = g.owner_team and tm.member_id = $2)) \
          returning approvals.id",
     )
