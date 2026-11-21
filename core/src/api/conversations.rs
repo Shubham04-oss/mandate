@@ -4,6 +4,7 @@
 use crate::assertion::{Assertion, TTL_SECS, sign};
 use crate::eve::{EveClient, EveError, EveSessionId, Fact, Record};
 use crate::gate::{self, args_hash};
+use crate::guard::{Guard, NOTICE, screen};
 use crate::ids::{AgentId, MemberId, TenantId, ToolId};
 use crate::mcp::AppState;
 use crate::policy::Decision;
@@ -101,6 +102,7 @@ pub enum ConversationError {
 pub struct Conversations {
     pub app: Arc<AppState>,
     pub eve: EveClient,
+    pub guard: Arc<dyn Guard>,
     /// Pause between relay reconnects and between browser polls.
     pub poll: Duration,
     /// Conversations with a relay running in this process; a second one would only waste work.
@@ -116,10 +118,16 @@ struct Conv {
 }
 
 impl Conversations {
-    pub fn new(app: Arc<AppState>, eve: EveClient, poll: Duration) -> Arc<Self> {
+    pub fn new(
+        app: Arc<AppState>,
+        eve: EveClient,
+        guard: Arc<dyn Guard>,
+        poll: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             app,
             eve,
+            guard,
             poll,
             pumps: Mutex::new(HashSet::new()),
         })
@@ -333,9 +341,21 @@ impl Conversations {
                     .map(|(_, d)| d);
                 Prepared::Approval(decision.map(|d| (d, tool, args)))
             }
+            "content.completed" => match assistant_text(&f.data) {
+                Some(text) => Prepared::Guarded(screen(self.guard.as_ref(), text).await),
+                None => Prepared::Nothing,
+            },
             _ => Prepared::Nothing,
         }
     }
+}
+
+/// A finished, uninterrupted text part the agent wrote for the person: what the guard checks.
+fn assistant_text(d: &Value) -> Option<&str> {
+    let ok = d["kind"] == "text"
+        && (d["phase"] == "reply" || d["phase"] == "narration")
+        && d.get("interrupted").is_none();
+    d["value"].as_str().filter(|t| ok && !t.trim().is_empty())
 }
 
 enum Prepared {
@@ -343,6 +363,8 @@ enum Prepared {
     Call(Option<(ToolId, Value)>),
     /// `None`: refused, unknown or invalid; the prompt is denied.
     Approval(Option<(Decision, ToolId, Value)>),
+    /// The guard's answer for an assistant message; `Err` names why it was withheld.
+    Guarded(Result<(), &'static str>),
 }
 
 async fn apply(
@@ -370,15 +392,24 @@ async fn apply(
                 push(tx, id, "message", ev).await?;
             }
         }
-        ("content.completed", _)
-            if d["kind"] == "text"
-                && (d["phase"] == "reply" || d["phase"] == "narration")
-                && d.get("interrupted").is_none() =>
-        {
-            if let Some(text) = d["value"].as_str().filter(|t| !t.trim().is_empty()) {
-                let ev = json!({ "role": "assistant", "text": text });
-                push(tx, id, "message", ev).await?;
-            }
+        ("content.completed", Prepared::Guarded(verdict)) => {
+            let Some(text) = assistant_text(d) else {
+                return Ok(());
+            };
+            let shown = match verdict {
+                Ok(()) => text,
+                Err(reason) => {
+                    withheld(tx, who, text, reason).await?;
+                    NOTICE
+                }
+            };
+            push(
+                tx,
+                id,
+                "message",
+                json!({ "role": "assistant", "text": shown }),
+            )
+            .await?;
         }
         ("call.requested" | "call.started" | "call.settled", Prepared::Call(Some((tool, _)))) => {
             let status = match (f.kind.as_str(), d["outcome"].as_str()) {
@@ -429,6 +460,26 @@ async fn apply(
         _ => {}
     }
     Ok(())
+}
+
+/// Audits a withheld message by its hash only: the text itself is never stored.
+async fn withheld(
+    tx: &mut Tx,
+    who: &Assertion,
+    text: &str,
+    reason: &str,
+) -> Result<(), StoreError> {
+    let entry = AuditEntry {
+        agent: who.agent.clone(),
+        member: who.member.clone(),
+        tool: ToolId::parse("guard.output")?,
+        args_hash: args_hash(&Value::String(text.to_owned())),
+        decision: "refuse".into(),
+        reason: Some(reason.to_owned()),
+        approval_id: None,
+        approved_by: None,
+    };
+    store::audit(tx, &entry).await
 }
 
 fn valid_eve_id(s: &str) -> bool {

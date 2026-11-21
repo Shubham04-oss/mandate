@@ -4,6 +4,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use mandate::api::conversations::{self, Conversations};
 use mandate::assertion::{Assertion, TTL_SECS, sign};
 use mandate::eve::EveClient;
+use mandate::guard::{BedrockGuard, Guard, Unconfigured};
 use mandate::identity::{Workos, sync_directory};
 use mandate::ids::{AgentId, MemberId, SpaceId, TenantId};
 use mandate::mcp::{AppState, router};
@@ -179,7 +180,19 @@ async fn serve() -> Result<()> {
         Ok(url) => {
             let eve =
                 EveClient::new(url::Url::parse(&url).map_err(|e| format!("MANDATE_EVE_URL: {e}"))?);
-            let conv = Conversations::new(state, eve, Duration::from_secs(1));
+            let guard: Arc<dyn Guard> = match (
+                env("MANDATE_GUARDRAIL_ID"),
+                env("MANDATE_GUARDRAIL_VERSION"),
+            ) {
+                (Ok(id), Ok(version)) => Arc::new(BedrockGuard::new(&aws, id, version)),
+                _ => {
+                    tracing::warn!(
+                        "MANDATE_GUARDRAIL_ID or MANDATE_GUARDRAIL_VERSION not set: every agent message is withheld"
+                    );
+                    Arc::new(Unconfigured)
+                }
+            };
+            let conv = Conversations::new(state, eve, guard, Duration::from_secs(1));
             app = app.merge(conversations::router(conv));
         }
         Err(_) => tracing::warn!("MANDATE_EVE_URL not set: /v1/conversations is off"),

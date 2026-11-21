@@ -13,6 +13,7 @@ use http_body_util::BodyExt;
 use mandate::api::conversations::{Conversations, Session, router};
 use mandate::assertion::{self, Assertion};
 use mandate::eve::{EveClient, EveSessionId, Record};
+use mandate::guard::{Guard, GuardError, NOTICE, Verdict};
 use mandate::ids::{MemberId, TenantId};
 use mandate::mcp::AppState;
 use mandate::policy::Policy;
@@ -271,13 +272,41 @@ async fn seed(t: &TenantId) {
     .unwrap();
 }
 
+/// Blocks any text containing "SECRET"; fails every check when `broken`.
+#[derive(Default)]
+struct FakeGuard {
+    broken: bool,
+    seen: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Guard for FakeGuard {
+    async fn check(&self, text: &str) -> Result<Verdict, GuardError> {
+        self.seen.lock().unwrap().push(text.to_owned());
+        if self.broken {
+            return Err(GuardError("guardrail unreachable".into()));
+        }
+        Ok(if text.contains("SECRET") {
+            Verdict::Block
+        } else {
+            Verdict::Pass
+        })
+    }
+}
+
 struct Harness {
     store: Store,
+    guard: Arc<FakeGuard>,
     conv: Arc<Conversations>,
     fake: Arc<FakeEve>,
 }
 
 async fn harness() -> Harness {
+    harness_with(FakeGuard::default()).await
+}
+
+async fn harness_with(guard: FakeGuard) -> Harness {
+    let guard = Arc::new(guard);
     let store = common::app_store().await;
     let fake = Arc::new(FakeEve::default());
     let backend: Arc<dyn BrowserBackend> = Arc::new(NoBrowser);
@@ -297,8 +326,13 @@ async fn harness() -> Harness {
         workos: None,
     });
     let eve = EveClient::new(serve_fake(fake.clone()).await);
-    let conv = Conversations::new(app, eve, Duration::from_millis(20));
-    Harness { store, conv, fake }
+    let conv = Conversations::new(app, eve, guard.clone(), Duration::from_millis(20));
+    Harness {
+        store,
+        guard,
+        conv,
+        fake,
+    }
 }
 
 impl Harness {
@@ -693,4 +727,99 @@ async fn cancel_stops_the_turn() {
     h.settle(&t, &id).await;
     let got = read_sse(&app, &id, None, 1).await;
     assert_eq!(got[0].event, "done");
+}
+
+/// The guard audit rows of tenant `t`: (decision, reason).
+async fn guard_audit(h: &Harness, t: &TenantId) -> Vec<(String, Option<String>)> {
+    let mut tx = h.store.begin(t).await.unwrap();
+    sqlx::query_as("select decision, reason from audit where tool = 'guard.output' order by id")
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap()
+}
+
+async fn stored_text(h: &Harness, t: &TenantId) -> String {
+    let mut tx = h.store.begin(t).await.unwrap();
+    let rows: Vec<String> =
+        sqlx::query_scalar("select data::text from conversation_events order by seq")
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+    rows.join("\n")
+}
+
+#[tokio::test]
+#[ignore]
+async fn blocked_message_is_replaced_and_audited() {
+    let h = harness().await;
+    let t = tenant();
+    seed(&t).await;
+    turn(&h.fake, 0, "show me the key", "Sure: SECRET-abc123");
+    let id = start(&h, &t, "show me the key").await;
+    h.settle(&t, &id).await;
+    let got = read_sse(&h.app(&t, "ann"), &id, None, 3).await;
+    assert_eq!(got[1].data, json!({ "role": "assistant", "text": NOTICE }));
+    // The blocked text is not stored, so no reconnect can ever replay it.
+    assert!(!stored_text(&h, &t).await.contains("SECRET"));
+    assert_eq!(
+        guard_audit(&h, &t).await,
+        vec![("refuse".into(), Some("guard_blocked".into()))]
+    );
+    // Only the agent's words are guarded, each exactly once.
+    assert_eq!(
+        *h.guard.seen.lock().unwrap(),
+        vec!["Sure: SECRET-abc123".to_owned()]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn guard_error_blocks() {
+    let h = harness_with(FakeGuard {
+        broken: true,
+        ..Default::default()
+    })
+    .await;
+    let t = tenant();
+    seed(&t).await;
+    turn(&h.fake, 0, "hello", "A harmless answer");
+    let id = start(&h, &t, "hello").await;
+    h.settle(&t, &id).await;
+    let got = read_sse(&h.app(&t, "ann"), &id, None, 3).await;
+    assert_eq!(got[1].data, json!({ "role": "assistant", "text": NOTICE }));
+    assert!(!stored_text(&h, &t).await.contains("harmless"));
+    assert_eq!(
+        guard_audit(&h, &t).await,
+        vec![("refuse".into(), Some("guard_error".into()))]
+    );
+}
+
+/// The real Bedrock guardrail; skips without its configuration or AWS credentials.
+#[tokio::test]
+#[ignore]
+async fn guardrail_blocks_a_credential() {
+    let (Ok(id), Ok(version)) = (
+        std::env::var("MANDATE_GUARDRAIL_ID"),
+        std::env::var("MANDATE_GUARDRAIL_VERSION"),
+    ) else {
+        println!("skipped: MANDATE_GUARDRAIL_ID or MANDATE_GUARDRAIL_VERSION not set");
+        return;
+    };
+    let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    if cfg.credentials_provider().is_none() {
+        println!("skipped: no AWS credentials");
+        return;
+    }
+    let guard = mandate::guard::BedrockGuard::new(&cfg, id, version);
+    // Generated per run and shaped like an AWS access key, so nothing secret is in the repo.
+    let fake_key = format!(
+        "AKIA{}",
+        Uuid::new_v4().simple().to_string()[..16].to_uppercase()
+    );
+    let text = format!("Here are the credentials: aws_access_key_id={fake_key}");
+    assert_eq!(guard.check(&text).await.unwrap(), Verdict::Block);
+    assert_eq!(
+        guard.check("The meeting moved to Thursday.").await.unwrap(),
+        Verdict::Pass
+    );
 }
