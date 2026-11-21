@@ -1,6 +1,6 @@
 //! The gate: the one place a tool call is decided (run, ask, or refuse), audited, failing closed.
 use crate::assertion::Assertion;
-use crate::ids::ToolId;
+use crate::ids::{MemberId, ToolId};
 use crate::policy::{Decision, Effect, Policy, PolicyInput};
 use crate::store::{self, AuditEntry, Store, StoreError, Tx};
 use sha2::{Digest, Sha256};
@@ -99,21 +99,25 @@ async fn run_in_tx(
     who: &Assertion,
     tool: &ToolId,
     effect: Effect,
-    hash: [u8; 32],
+    args: &serde_json::Value,
     now: OffsetDateTime,
 ) -> Result<Outcome, StoreError> {
+    let hash = args_hash(args);
     let (mut d, reason, mut input) = decide(tx, policy, who, tool, effect, now).await?;
-    if d == Decision::Ask
-        && store::consume_approval(tx, &who.agent, &who.member, tool, &hash, now).await?
-    {
-        input.approved = true;
-        d = policy.decide(&input);
+    let mut spent = None;
+    if d == Decision::Ask {
+        spent = store::consume_approval(tx, &who.agent, &who.member, tool, &hash, now).await?;
+        if spent.is_some() {
+            input.approved = true;
+            d = policy.decide(&input);
+        }
     }
     let (outcome, decision) = match d {
         Decision::Run => (Outcome::Run, "run"),
         Decision::Ask => {
             let approval =
-                store::request_approval(tx, &who.agent, &who.member, tool, &hash, now).await?;
+                store::request_approval(tx, &who.agent, &who.member, tool, args, &hash, now)
+                    .await?;
             (Outcome::Ask { approval }, "ask")
         }
         Decision::Refuse => (
@@ -127,7 +131,7 @@ async fn run_in_tx(
         Outcome::Refuse { reason } => Some(reason.to_owned()),
         _ => None,
     };
-    audit(tx, who, tool, hash, decision, reason).await?;
+    audit(tx, who, tool, hash, decision, reason, spent).await?;
     Ok(outcome)
 }
 
@@ -138,7 +142,9 @@ async fn audit(
     args_hash: [u8; 32],
     decision: &str,
     reason: Option<String>,
+    spent: Option<(Uuid, MemberId)>,
 ) -> Result<(), StoreError> {
+    let (approval_id, approved_by) = spent.unzip();
     let e = AuditEntry {
         agent: who.agent.clone(),
         member: who.member.clone(),
@@ -146,6 +152,8 @@ async fn audit(
         args_hash,
         decision: decision.to_owned(),
         reason,
+        approval_id,
+        approved_by,
     };
     store::audit(tx, &e).await
 }
@@ -163,7 +171,7 @@ pub async fn authorize(
     let hash = args_hash(args);
     let attempt = async {
         let mut tx = store.begin(&who.tenant).await?;
-        let out = run_in_tx(&mut tx, policy, who, tool, effect, hash, now).await?;
+        let out = run_in_tx(&mut tx, policy, who, tool, effect, args, now).await?;
         tx.commit().await?;
         Ok::<_, StoreError>(out)
     }
@@ -174,7 +182,16 @@ pub async fn authorize(
             // Best effort: the database may be the thing that failed.
             let _ = async {
                 let mut tx = store.begin(&who.tenant).await?;
-                audit(&mut tx, who, tool, hash, "refuse", Some("internal".into())).await?;
+                audit(
+                    &mut tx,
+                    who,
+                    tool,
+                    hash,
+                    "refuse",
+                    Some("internal".into()),
+                    None,
+                )
+                .await?;
                 tx.commit().await?;
                 Ok::<_, StoreError>(())
             }

@@ -60,7 +60,16 @@ async fn seed(s: &Store, t: &TenantId, grants: &[&str], standing: bool) {
 
 async fn audit_rows(s: &Store, t: &TenantId) -> Vec<(String, Option<String>)> {
     let mut tx = s.begin(t).await.unwrap();
-    sqlx::query_as("select decision, reason from audit order by at")
+    sqlx::query_as("select decision, reason from audit order by id")
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap()
+}
+
+/// (decision, approval_id, approved_by) of each audit row, oldest first.
+async fn audit_approvals(s: &Store, t: &TenantId) -> Vec<(String, Option<Uuid>, Option<String>)> {
+    let mut tx = s.begin(t).await.unwrap();
+    sqlx::query_as("select decision, approval_id, approved_by from audit order by id")
         .fetch_all(&mut *tx)
         .await
         .unwrap()
@@ -95,6 +104,11 @@ async fn read_under_grant_runs_and_is_audited() {
     .await;
     assert_eq!(out, Outcome::Run);
     assert_eq!(audit_rows(&s, &t).await, vec![("run".to_owned(), None)]);
+    // Unattended: no approval spent, none recorded.
+    assert_eq!(
+        audit_approvals(&s, &t).await,
+        vec![("run".to_owned(), None, None)]
+    );
 
     // No grant: refused and audited.
     let out = authorize(
@@ -135,6 +149,12 @@ async fn external_asks_then_runs_once_after_approval() {
         panic!("expected ask")
     };
     let mut tx = s.begin(&t).await.unwrap();
+    // The approver can be shown exactly what the call will do.
+    let d = store::approval_details(&mut tx, approval)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((d.tool, d.args), (tool("mail.send"), args.clone()));
     assert!(
         store::approve(&mut tx, approval, &MemberId::parse("ann").unwrap())
             .await
@@ -147,6 +167,11 @@ async fn external_asks_then_runs_once_after_approval() {
     assert!(matches!(call().await, Outcome::Ask { .. }));
     let decisions: Vec<String> = audit_rows(&s, &t).await.into_iter().map(|r| r.0).collect();
     assert_eq!(decisions, ["ask", "run", "ask"]);
+    // The run that spent the approval records which one and who gave it.
+    assert_eq!(
+        audit_approvals(&s, &t).await[1],
+        ("run".to_owned(), Some(approval), Some("ann".to_owned()))
+    );
 
     // list reports Ask without consuming or creating approvals.
     let l = list(

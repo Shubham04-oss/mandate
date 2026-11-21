@@ -37,6 +37,19 @@ pub struct AuditEntry {
     pub args_hash: [u8; 32],
     pub decision: String,
     pub reason: Option<String>,
+    /// The approval a run spent, and who gave it; `None` for an unattended call.
+    pub approval_id: Option<Uuid>,
+    pub approved_by: Option<MemberId>,
+}
+
+/// What an approver is shown: exactly the call that will run.
+#[derive(Debug, Clone)]
+pub struct ApprovalDetails {
+    pub agent: AgentId,
+    pub tool: ToolId,
+    pub args: serde_json::Value,
+    pub requested_by: MemberId,
+    pub expires_at: OffsetDateTime,
 }
 
 // Arbitrary but fixed: names the directory sync lock across every process.
@@ -393,7 +406,7 @@ pub async fn live_grant(
 }
 
 /// Single use, and only by the member who asked: the UPDATE spends the row atomically, so
-/// concurrent callers cannot both win.
+/// concurrent callers cannot both win. Returns the spent approval and who gave it.
 pub async fn consume_approval(
     tx: &mut Tx,
     agent: &AgentId,
@@ -401,13 +414,13 @@ pub async fn consume_approval(
     tool: &ToolId,
     args_hash: &[u8; 32],
     now: OffsetDateTime,
-) -> Result<bool, StoreError> {
-    let r = sqlx::query(
+) -> Result<Option<(Uuid, MemberId)>, StoreError> {
+    let r: Option<(Uuid, String)> = sqlx::query_as(
         "update approvals set used_at = $4 where tenant_id = current_setting('mandate.tenant', true) and id = ( \
            select id from approvals where agent = $1 and tool = $2 and args_hash = $3 and tenant_id = current_setting('mandate.tenant', true) \
            and requested_by = $5 and approved_by is not null and used_at is null and expires_at > $4 \
            limit 1 for update skip locked) \
-         returning id",
+         returning id, approved_by",
     )
     .bind(agent.as_str())
     .bind(tool.as_str())
@@ -416,15 +429,18 @@ pub async fn consume_approval(
     .bind(member.as_str())
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(r.is_some())
+    r.map(|(id, by)| Ok((id, MemberId::parse(&by)?)))
+        .transpose()
 }
 
 /// Reuses this member's unexpired pending approval for the same call instead of piling up rows.
+/// `args` are stored for the approver to see; `args_hash` must be their hash.
 pub async fn request_approval(
     tx: &mut Tx,
     agent: &AgentId,
     member: &MemberId,
     tool: &ToolId,
+    args: &serde_json::Value,
     args_hash: &[u8; 32],
     now: OffsetDateTime,
 ) -> Result<Uuid, StoreError> {
@@ -447,18 +463,49 @@ pub async fn request_approval(
     }
     let id = Uuid::new_v4();
     sqlx::query(
-        "insert into approvals (tenant_id, id, agent, tool, args_hash, requested_by, expires_at) \
-         values (current_setting('mandate.tenant'), $1, $2, $3, $4, $5, $6)",
+        "insert into approvals (tenant_id, id, agent, tool, args, args_hash, requested_by, expires_at) \
+         values (current_setting('mandate.tenant'), $1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(id)
     .bind(agent.as_str())
     .bind(tool.as_str())
+    .bind(sqlx::types::Json(args))
     .bind(args_hash.as_slice())
     .bind(member.as_str())
     .bind(now + APPROVAL_TTL)
     .execute(&mut **tx)
     .await?;
     Ok(id)
+}
+
+/// `None` if there is no such approval in this tenant.
+pub async fn approval_details(
+    tx: &mut Tx,
+    approval: Uuid,
+) -> Result<Option<ApprovalDetails>, StoreError> {
+    let row: Option<(
+        String,
+        String,
+        sqlx::types::Json<serde_json::Value>,
+        String,
+        OffsetDateTime,
+    )> = sqlx::query_as(
+        "select agent, tool, args, requested_by, expires_at from approvals \
+             where id = $1 and tenant_id = current_setting('mandate.tenant', true)",
+    )
+    .bind(approval)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((agent, tool, args, requested_by, expires_at)) = row else {
+        return Ok(None);
+    };
+    Ok(Some(ApprovalDetails {
+        agent: AgentId::parse(&agent)?,
+        tool: ToolId::parse(&tool)?,
+        args: args.0,
+        requested_by: MemberId::parse(&requested_by)?,
+        expires_at,
+    }))
 }
 
 /// Only the owner of a personal agent, or a member of the owning team, may approve; false
@@ -483,8 +530,8 @@ pub async fn approve(tx: &mut Tx, approval: Uuid, approver: &MemberId) -> Result
 
 pub async fn audit(tx: &mut Tx, e: &AuditEntry) -> Result<(), StoreError> {
     sqlx::query(
-        "insert into audit (tenant_id, agent, member, tool, args_hash, decision, reason) \
-         values (current_setting('mandate.tenant'), $1, $2, $3, $4, $5, $6)",
+        "insert into audit (tenant_id, agent, member, tool, args_hash, decision, reason, approval_id, approved_by) \
+         values (current_setting('mandate.tenant'), $1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(e.agent.as_str())
     .bind(e.member.as_str())
@@ -492,6 +539,8 @@ pub async fn audit(tx: &mut Tx, e: &AuditEntry) -> Result<(), StoreError> {
     .bind(e.args_hash.as_slice())
     .bind(&e.decision)
     .bind(&e.reason)
+    .bind(e.approval_id)
+    .bind(e.approved_by.as_ref().map(MemberId::as_str))
     .execute(&mut **tx)
     .await?;
     Ok(())

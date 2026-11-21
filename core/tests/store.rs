@@ -4,6 +4,7 @@ use common::app_store;
 use mandate::ids::{AgentId, MemberId, TenantId, ToolId};
 use mandate::policy::Parent;
 use mandate::store::{self, AuditEntry, Store, Tx};
+use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -159,6 +160,7 @@ async fn approved(s: &Store, t: &TenantId, now: OffsetDateTime, hash: &[u8; 32])
         &agent("bot"),
         &member("ann"),
         &tool("mail.send"),
+        &json!({"to": "a@b.c"}),
         hash,
         now,
     )
@@ -175,16 +177,17 @@ async fn approval_is_spent_once_for_its_exact_args() {
     let s = app_store().await;
     let t = tenant();
     let now = OffsetDateTime::now_utc();
-    approved(&s, &t, now, &[1; 32]).await;
+    let id = approved(&s, &t, now, &[1; 32]).await;
     let mut tx = s.begin(&t).await.unwrap();
     let (a, tl) = (agent("bot"), tool("mail.send"));
     assert!(
-        !store::consume_approval(&mut tx, &a, &member("ann"), &tl, &[2; 32], now)
+        store::consume_approval(&mut tx, &a, &member("ann"), &tl, &[2; 32], now)
             .await
             .unwrap()
+            .is_none()
     );
     assert!(
-        !store::consume_approval(
+        store::consume_approval(
             &mut tx,
             &a,
             &member("ann"),
@@ -194,16 +197,20 @@ async fn approval_is_spent_once_for_its_exact_args() {
         )
         .await
         .unwrap()
+        .is_none()
+    );
+    // Spent: names the approval and who gave it, for the audit row.
+    assert_eq!(
+        store::consume_approval(&mut tx, &a, &member("ann"), &tl, &[1; 32], now)
+            .await
+            .unwrap(),
+        Some((id, member("ann")))
     );
     assert!(
         store::consume_approval(&mut tx, &a, &member("ann"), &tl, &[1; 32], now)
             .await
             .unwrap()
-    );
-    assert!(
-        !store::consume_approval(&mut tx, &a, &member("ann"), &tl, &[1; 32], now)
-            .await
-            .unwrap()
+            .is_none()
     );
 }
 
@@ -235,7 +242,7 @@ async fn concurrent_consumes_spend_one_approval() {
     }
     let mut wins = 0;
     for h in tasks {
-        wins += usize::from(h.await.unwrap());
+        wins += usize::from(h.await.unwrap().is_some());
     }
     assert_eq!(wins, 1);
 }
@@ -262,6 +269,7 @@ async fn only_the_owner_can_approve() {
         &agent("bot"),
         &member("ann"),
         &tool("mail.send"),
+        &json!({"to": "a@b.c"}),
         &h,
         now,
     )
@@ -280,6 +288,7 @@ async fn only_the_owner_can_approve() {
         &agent("teambot"),
         &member("ann"),
         &tool("db.drop"),
+        &json!({"to": "a@b.c"}),
         &h,
         now,
     )
@@ -298,6 +307,7 @@ async fn only_the_owner_can_approve() {
         &agent("bot"),
         &member("ann"),
         &tool("x"),
+        &json!({"to": "a@b.c"}),
         &h,
         now - Duration::hours(2),
     )
@@ -319,6 +329,8 @@ async fn only_the_owner_can_approve() {
             args_hash: h,
             decision: "allow".into(),
             reason: None,
+            approval_id: None,
+            approved_by: None,
         },
     )
     .await
@@ -345,4 +357,27 @@ async fn audit_is_append_only_for_the_app_role() {
         let err = sqlx::query(q).execute(&mut *tx).await.unwrap_err();
         assert!(err.to_string().contains("permission denied"), "{q}: {err}");
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn approval_details_show_the_exact_args_to_the_tenant_only() {
+    let s = app_store().await;
+    let (t, other) = (tenant(), tenant());
+    let now = OffsetDateTime::now_utc();
+    let id = approved(&s, &t, now, &[4; 32]).await;
+    let mut tx = s.begin(&t).await.unwrap();
+    let d = store::approval_details(&mut tx, id).await.unwrap().unwrap();
+    assert_eq!(d.agent, agent("bot"));
+    assert_eq!(d.tool, tool("mail.send"));
+    assert_eq!(d.args, json!({"to": "a@b.c"}));
+    assert_eq!(d.requested_by, member("ann"));
+    assert!(d.expires_at > now);
+    let mut tx = s.begin(&other).await.unwrap();
+    assert!(
+        store::approval_details(&mut tx, id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

@@ -16,6 +16,7 @@ grant usage on schema public to :"role";
 grant select, insert, update, delete on members, teams, team_members, agents, grants, approvals to :"role";
 -- Append-only: the app can never rewrite or erase history.
 grant select, insert on audit to :"role";
+grant usage on sequence audit_id_seq to :"role";
 
 -- RLS-free directory tables.
 grant select, insert on tenants to :"role";

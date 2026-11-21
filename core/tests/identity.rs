@@ -599,7 +599,7 @@ async fn removed_user_loses_grants_and_pending_approvals() {
         ("bob-bot", bob, None, false),      // nothing to do with her: stays
         ("bob-bot", ann, Some(bob), true),  // spent: history, stays
     ] {
-        sqlx::query("insert into approvals (tenant_id, id, agent, tool, args_hash, requested_by, approved_by, expires_at, used_at) values ($1, $2, $3, 'web.submit_form', '\\x00', $4, $5, $6, $7)")
+        sqlx::query("insert into approvals (tenant_id, id, agent, tool, args, args_hash, requested_by, approved_by, expires_at, used_at) values ($1, $2, $3, 'web.submit_form', '{}', '\\x00', $4, $5, $6, $7)")
             .bind(t.as_str()).bind(Uuid::new_v4()).bind(agent).bind(req).bind(appr).bind(later)
             .bind(used.then_some(later))
             .execute(&mut *tx).await.unwrap();
