@@ -43,8 +43,8 @@ pub struct AgentCoreBrowser {
 
 impl AgentCoreBrowser {
     pub fn new(config: &aws_config::SdkConfig, browser_id: impl Into<String>) -> Self {
-        // rustls is built with both ring and aws-lc-rs here, so the wss client needs one chosen;
-        // an Err means a provider is already installed, which is fine.
+        // rustls is built with both ring and aws-lc-rs here, so the wss client needs one chosen.
+        // A provider someone else already installed wins silently (the Err is ignored).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         Self {
             client: aws_sdk_bedrockagentcore::Client::new(config),
@@ -118,21 +118,13 @@ impl AgentCoreBrowser {
             .await
             .map_err(|_| timed_out())?
             .map_err(backend)?;
+        // From here on, every path stops the session once: awaited below, or spawned on drop if a
+        // panic or a cancelled caller ends this future first. A leaked session bills until its timeout.
+        let guard = StopOnDrop::new(&self.client, &self.browser_id, started.session_id());
         let result = tokio::time::timeout_at(deadline, self.drive(&started, url, fields, hosts))
             .await
             .unwrap_or_else(|_| Err(timed_out()));
-        // Always stop: a leaked session bills until its timeout.
-        let stop = self
-            .client
-            .stop_browser_session()
-            .browser_identifier(&self.browser_id)
-            .session_id(started.session_id())
-            .send();
-        match tokio::time::timeout(STOP_TIMEOUT, stop).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!(error = %e, "stop_browser_session failed"),
-            Err(_) => tracing::warn!("stop_browser_session timed out"),
-        }
+        guard.stop().await;
         result
     }
 
@@ -175,6 +167,56 @@ impl AgentCoreBrowser {
         let _ = browser.close().await;
         pump.abort();
         out
+    }
+}
+
+/// Stops a browser session exactly once: `stop` awaits it, otherwise `Drop` spawns it.
+struct StopOnDrop {
+    stop: Option<(aws_sdk_bedrockagentcore::Client, String, String)>,
+}
+
+impl StopOnDrop {
+    fn new(client: &aws_sdk_bedrockagentcore::Client, browser_id: &str, session_id: &str) -> Self {
+        Self {
+            stop: Some((client.clone(), browser_id.to_owned(), session_id.to_owned())),
+        }
+    }
+
+    async fn stop(mut self) {
+        if let Some((client, browser_id, session_id)) = self.stop.take() {
+            stop_session(client, browser_id, session_id).await;
+        }
+    }
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        let Some((client, browser_id, session_id)) = self.stop.take() else {
+            return;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => drop(rt.spawn(stop_session(client, browser_id, session_id))),
+            Err(_) => {
+                tracing::warn!("no runtime to stop the browser session; it runs to its timeout")
+            }
+        }
+    }
+}
+
+async fn stop_session(
+    client: aws_sdk_bedrockagentcore::Client,
+    browser_id: String,
+    session_id: String,
+) {
+    let stop = client
+        .stop_browser_session()
+        .browser_identifier(browser_id)
+        .session_id(session_id)
+        .send();
+    match tokio::time::timeout(STOP_TIMEOUT, stop).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "stop_browser_session failed"),
+        Err(_) => tracing::warn!("stop_browser_session timed out"),
     }
 }
 
@@ -249,8 +291,9 @@ async fn watch_other_targets(
         .event_listener::<EventTargetCreated>()
         .await
         .map_err(backend)?
-        // Frames are seen browser-wide, including other tabs' (the AgentCore browser has another tab that makes one); this
-        // page's frames come through `attached` below.
+        // Frames show up browser-wide, other tabs' too (the AgentCore browser has another tab that
+        // makes one). This page's own frames still arrive through `attached` below, because
+        // chromiumoxide auto-attaches every page session (page_init_commands in handler/target.rs).
         .filter(|e| futures::future::ready(e.target_info.r#type != "iframe"))
         .map(|e| e.target_info.target_id.clone());
     // Children of the page (frames, workers) arrive through chromiumoxide's own auto-attach.
@@ -359,5 +402,83 @@ impl BrowserBackend for AgentCoreBrowser {
         hosts: &[String],
     ) -> Result<Page, ToolError> {
         self.run(url, Some(fields), hosts).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_bedrockagentcore::config::{BehaviorVersion, Credentials, Region};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::mpsc;
+
+    /// A client pointed at a local fake endpoint that reports each request line it gets.
+    async fn fake() -> (
+        aws_sdk_bedrockagentcore::Client,
+        mpsc::UnboundedReceiver<String>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let _ = tx.send(req.lines().next().unwrap_or_default().to_owned());
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
+                        .await;
+                });
+            }
+        });
+        let config = aws_sdk_bedrockagentcore::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("ap-south-1"))
+            .credentials_provider(Credentials::new("AKIDTEST", "secret", None, None, "test"))
+            .endpoint_url(format!("http://{addr}"))
+            .retry_config(aws_sdk_bedrockagentcore::config::retry::RetryConfig::disabled())
+            .build();
+        (aws_sdk_bedrockagentcore::Client::from_conf(config), rx)
+    }
+
+    async fn requests(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
+        let mut seen = Vec::new();
+        if let Ok(Some(first)) = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+            seen.push(first);
+        }
+        // Anything more would arrive right behind the first.
+        while let Ok(Some(more)) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
+        {
+            seen.push(more);
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn dropping_the_guard_stops_the_session_once() {
+        let (client, mut rx) = fake().await;
+        drop(StopOnDrop::new(&client, "br", "sess"));
+        let seen = requests(&mut rx).await;
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].contains("/browsers/br/sessions/stop"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_stop_is_not_repeated_on_drop() {
+        let (client, mut rx) = fake().await;
+        StopOnDrop::new(&client, "br", "sess").stop().await;
+        assert_eq!(requests(&mut rx).await.len(), 1);
+    }
+
+    #[test]
+    fn dropping_the_guard_without_a_runtime_does_not_panic() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let client = rt.block_on(fake()).0;
+        let guard = StopOnDrop::new(&client, "br", "sess");
+        drop(rt);
+        drop(guard);
     }
 }
