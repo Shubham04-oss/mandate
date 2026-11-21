@@ -464,7 +464,7 @@ pub async fn request_approval(
     let pending: Option<Uuid> = sqlx::query_scalar(
         "select id from approvals where tenant_id = current_setting('mandate.tenant', true) \
          and agent = $1 and tool = $2 and args_hash = $3 and requested_by = $4 \
-         and approved_by is null and used_at is null and expires_at > $5 limit 1",
+         and approved_by is null and denied_by is null and used_at is null and expires_at > $5 limit 1",
     )
     .bind(agent.as_str())
     .bind(tool.as_str())
@@ -528,7 +528,7 @@ pub async fn approval_details(
 pub async fn approve(tx: &mut Tx, approval: Uuid, approver: &MemberId) -> Result<bool, StoreError> {
     let r = sqlx::query(
         "update approvals set approved_by = $2 from agents g \
-         where approvals.id = $1 and approvals.tenant_id = current_setting('mandate.tenant', true) and approvals.approved_by is null and approvals.used_at is null \
+         where approvals.id = $1 and approvals.tenant_id = current_setting('mandate.tenant', true) and approvals.approved_by is null and approvals.denied_by is null and approvals.used_at is null \
          and approvals.expires_at > now() \
          and g.tenant_id = approvals.tenant_id and g.tenant_id = current_setting('mandate.tenant', true) and g.id = approvals.agent \
          and (g.owner_member = $2 or exists ( \

@@ -1,5 +1,6 @@
 //! Stand-ins for interfaces other lanes own and have not merged yet. Each item names the lane
 //! and the interface it stands for; the lead replaces them at integration.
+use crate::api::approvals::Decision;
 use crate::ids::{MemberId, TenantId};
 use crate::store::{StoreError, Tx};
 use axum::Json;
@@ -9,6 +10,7 @@ use http::StatusCode;
 use http::request::Parts;
 use serde_json::json;
 use std::sync::Mutex;
+use uuid::Uuid;
 
 /// ponytail: lane B's cookie session (`api::session::Session`). Nothing in production inserts
 /// this extension, so until B's extractor replaces it every route here answers 401 (fails
@@ -83,9 +85,23 @@ pub enum Actor {
 /// The subset of lane F's `events::Event` this lane emits; ids only, as in F's envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    MemberCreated { member: MemberId, actor: Actor },
-    MemberUpdated { member: MemberId, actor: Actor },
-    MemberRemoved { member: MemberId, actor: Actor },
+    ApprovalDecided {
+        approval: Uuid,
+        decision: Decision,
+        by: MemberId,
+    },
+    MemberCreated {
+        member: MemberId,
+        actor: Actor,
+    },
+    MemberUpdated {
+        member: MemberId,
+        actor: Actor,
+    },
+    MemberRemoved {
+        member: MemberId,
+        actor: Actor,
+    },
 }
 
 static PUBLISHED: Mutex<Vec<(String, Event)>> = Mutex::new(Vec::new());
