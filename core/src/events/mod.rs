@@ -4,6 +4,7 @@ pub mod sign;
 
 
 use crate::ids::{AgentId, MemberId, TenantId};
+use crate::store::{StoreError, Tx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
@@ -204,6 +205,55 @@ impl Event {
             "data": env.data,
         }))?)
     }
+}
+
+impl Event {
+    /// The member and actor of a people-lifecycle event, which `publish` also records in
+    /// `lifecycle_log`; `None` for every other event.
+    fn lifecycle(&self) -> Option<(Option<&MemberId>, &Actor)> {
+        match self {
+            Event::MemberCreated { member, actor }
+            | Event::MemberUpdated { member, actor }
+            | Event::MemberRemoved { member, actor } => Some((Some(member), actor)),
+            Event::OrganizationCreated { actor } => Some((None, actor)),
+            _ => None,
+        }
+    }
+}
+
+/// Writes the event to the outbox (and a lifecycle event to `lifecycle_log`) in the caller's
+/// transaction, so it is published exactly when the change commits. The tenant is the
+/// transaction's; a transaction without one fails.
+pub async fn publish(tx: &mut Tx, event: Event) -> Result<(), StoreError> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "insert into outbox (tenant_id, id, type, data) \
+         values (nullif(current_setting('mandate.tenant', true), ''), $1, $2, $3)",
+    )
+    .bind(id)
+    .bind(event.event_type())
+    .bind(sqlx::types::Json(event.data()))
+    .execute(&mut **tx)
+    .await?;
+    if let Some((member, actor)) = event.lifecycle() {
+        let (kind, actor_member) = match actor {
+            Actor::Member(m) => ("member", Some(m.as_str())),
+            Actor::Directory => ("directory", None),
+            Actor::System => ("system", None),
+        };
+        sqlx::query(
+            "insert into lifecycle_log (tenant_id, event_id, type, member, actor_kind, actor_member) \
+             values (nullif(current_setting('mandate.tenant', true), ''), $1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(event.event_type())
+        .bind(member.map(MemberId::as_str))
+        .bind(kind)
+        .bind(actor_member)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 /// The wire form, for the checked-in JSON Schema only.
