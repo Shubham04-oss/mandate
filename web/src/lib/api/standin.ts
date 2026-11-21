@@ -280,12 +280,17 @@ const activity: Activity[] = [
 const sessionKey = "mandate.standin.session";
 const store = () =>
 	typeof window === "undefined" ? null : window.sessionStorage;
-const signedIn = () => store()?.getItem(sessionKey) === "1";
-const setSignedIn = (on: boolean) =>
-	on ? store()?.setItem(sessionKey, "1") : store()?.removeItem(sessionKey);
+// The session remembers which organization it signed in to, as the core's session does.
+const sessionOrg = (): Org | null => {
+	const id = store()?.getItem(sessionKey);
+	return id ? (orgs.find((o) => o.id === id) ?? northstar) : null;
+};
+const signedIn = () => sessionOrg() !== null;
+const setSession = (org: Org | null) =>
+	org ? store()?.setItem(sessionKey, org.id) : store()?.removeItem(sessionKey);
 
-const signIn = (org?: Org): Response => {
-	setSignedIn(true);
+const signIn = (org: Org = northstar): Response => {
+	setSession(org);
 	return json(200, {
 		status: "signed_in",
 		me: me(org),
@@ -433,7 +438,7 @@ const routes: [Method, RegExp, Handler][] = [
 					"Your organization doesn't use single sign-on. Sign in with your email instead.",
 				);
 			}
-			setSignedIn(true); // the identity provider would send them back signed in
+			setSession(northstar); // the identity provider would send them back signed in
 			return json(200, { redirect_url: "/" });
 		},
 	],
@@ -469,11 +474,18 @@ const routes: [Method, RegExp, Handler][] = [
 		"POST",
 		/^\/v1\/auth\/sign-out$/,
 		() => {
-			setSignedIn(false);
+			setSession(null);
 			return json(204);
 		},
 	],
-	["GET", /^\/v1\/me$/, () => (signedIn() ? json(200, me()) : signedOut())],
+	[
+		"GET",
+		/^\/v1\/me$/,
+		() => {
+			const org = sessionOrg();
+			return org ? json(200, me(org)) : signedOut();
+		},
+	],
 	[
 		"GET",
 		/^\/v1\/org\/members(?:\?.*)?$/,

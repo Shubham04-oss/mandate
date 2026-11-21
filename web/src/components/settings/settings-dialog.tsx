@@ -1,3 +1,4 @@
+import { getRouteApi } from "@tanstack/react-router";
 import { cn } from "cn";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import { ToolsSection } from "#/components/settings/tools-section.tsx";
@@ -7,13 +8,17 @@ import {
 	DialogDescription,
 	DialogTitle,
 } from "#/components/ui/dialog.tsx";
-import { sample } from "#/lib/sample.ts";
+
+const appRoute = getRouteApi("/_app");
 
 type Section = { id: string; label: string; icon: IconName; built?: boolean };
 
 // ponytail: only Tools is built; the other sections show the shape settings will take.
-const groups: { title: string; sections: Section[] }[] = [
+const groups = (
+	orgName: string,
+): { id: string; title: string; sections: Section[] }[] => [
 	{
+		id: "you",
 		title: "You",
 		sections: [
 			{ id: "account", label: "Account", icon: "user" },
@@ -22,7 +27,8 @@ const groups: { title: string; sections: Section[] }[] = [
 		],
 	},
 	{
-		title: sample.org.name,
+		id: "org",
+		title: orgName,
 		sections: [
 			{ id: "organization", label: "Organization", icon: "building" },
 			{ id: "people", label: "People", icon: "user" },
@@ -30,6 +36,7 @@ const groups: { title: string; sections: Section[] }[] = [
 		],
 	},
 	{
+		id: "connections",
 		title: "Connections",
 		sections: [{ id: "tools", label: "Tools", icon: "link", built: true }],
 	},
@@ -43,6 +50,7 @@ export function SettingsDialog({
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 }) {
+	const { me } = appRoute.useLoaderData();
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="h-[min(760px,calc(100dvh-2rem))] w-[min(1080px,calc(100%-2rem))] max-w-none rounded-3xl max-[720px]:h-dvh max-[720px]:w-full max-[720px]:max-w-full max-[720px]:rounded-none min-[721px]:flex-row">
@@ -53,12 +61,12 @@ export function SettingsDialog({
 					<div className="px-2.5 max-[720px]:hidden">
 						<DialogTitle>Settings</DialogTitle>
 						<DialogDescription className="text-[12px] text-muted-foreground">
-							{sample.org.name}
+							{me.org.name}
 						</DialogDescription>
 					</div>
-					{groups.map((group) => (
+					{groups(me.org.name).map((group) => (
 						<div
-							key={group.title}
+							key={group.id}
 							className="flex flex-col gap-0.5 max-[720px]:flex-row"
 						>
 							<span className="px-2.5 pb-1 font-semibold text-[11px] text-muted-foreground uppercase tracking-[0.04em] max-[720px]:hidden">
