@@ -53,6 +53,28 @@ impl BrowserBackend for Recorder {
     }
 }
 
+/// Fails every call with a detail the agent must never see.
+struct Failing;
+
+#[async_trait]
+impl BrowserBackend for Failing {
+    async fn read_page(&self, _: &Url, _: &[String]) -> Result<Page, ToolError> {
+        Err(ToolError::Backend(
+            "SECRET https://x.test/?token=abc".into(),
+        ))
+    }
+    async fn fill_and_submit(
+        &self,
+        _: &Url,
+        _: &BTreeMap<String, String>,
+        _: &[String],
+    ) -> Result<Page, ToolError> {
+        Err(ToolError::Backend(
+            "SECRET https://x.test/?token=abc".into(),
+        ))
+    }
+}
+
 fn key() -> SigningKey {
     SigningKey::from_bytes(&[7; 32])
 }
@@ -84,7 +106,7 @@ fn tenant() -> TenantId {
     TenantId::parse(&format!("t-{}", Uuid::new_v4().simple())).unwrap()
 }
 
-fn app(store: Store, backend: Arc<Recorder>) -> axum::Router {
+fn app(store: Store, backend: Arc<dyn BrowserBackend>) -> axum::Router {
     let catalog = Catalog::new(vec![
         Arc::new(ReadPage::new(backend.clone(), vec!["docs.test".into()])),
         Arc::new(SubmitForm::new(backend)),
@@ -352,4 +374,27 @@ async fn submit_form_returns_needs_approval_then_runs_after_approve() {
     assert_eq!(out["result"]["isError"], false, "{out}");
     assert_eq!(out["result"]["structuredContent"]["title"], "submitted");
     assert_eq!(backend.0.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn backend_error_detail_does_not_reach_the_agent() {
+    let s = app_store().await;
+    let t = tenant();
+    seed(&s, &t, &["web.read_page"]).await;
+    let app = app(s, Arc::new(Failing));
+
+    let out = call(
+        &app,
+        &t,
+        "web.read_page",
+        json!({ "url": "https://docs.test/a" }),
+    )
+    .await;
+    assert_eq!(out["result"]["isError"], true, "{out}");
+    assert_eq!(
+        out["result"]["content"][0]["text"],
+        "the tool failed; see audit"
+    );
+    assert!(!out.to_string().contains("SECRET"), "{out}");
 }

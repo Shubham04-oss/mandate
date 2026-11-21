@@ -4,7 +4,7 @@ use crate::gate::{Outcome, authorize, list};
 use crate::ids::ToolId;
 use crate::policy::{Decision, Effect, Policy};
 use crate::store::Store;
-use crate::tools::Catalog;
+use crate::tools::{Catalog, ToolError};
 use axum::extract::{Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -112,7 +112,14 @@ impl ServerHandler for Mcp {
         let result = match authorize(&s.store, &s.policy, &who, &id, effect, &args, now).await {
             Outcome::Run => match tool.call(&who, args).await {
                 Ok(v) => CallToolResult::structured(v),
-                Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
+                Err(e @ ToolError::InvalidArgs(_)) => {
+                    CallToolResult::error(vec![ContentBlock::text(e.to_string())])
+                }
+                // The agent is untrusted: backend detail goes to the operator log only.
+                Err(ToolError::Backend(detail)) => {
+                    tracing::warn!(tool = %id, %detail, "tool backend failed");
+                    CallToolResult::error(vec![ContentBlock::text("the tool failed; see audit")])
+                }
             },
             Outcome::Ask { approval } => CallToolResult::structured(
                 json!({ "status": "needs_approval", "approval": approval.to_string() }),

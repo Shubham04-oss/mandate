@@ -13,14 +13,18 @@ use chromiumoxide::cdp::browser_protocol::fetch::{
 };
 use chromiumoxide::cdp::browser_protocol::network::{ErrorReason, ResourceType};
 use chromiumoxide::cdp::browser_protocol::page::EventLoadEventFired;
-use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
+use chromiumoxide::cdp::browser_protocol::target::{
+    CloseTargetParams, CreateTargetParams, EventAttachedToTarget, EventTargetCreated,
+};
 use futures::StreamExt;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 use url::Url;
 
 const SESSION_TIMEOUT_SECS: i32 = 300;
-const OVERALL_TIMEOUT: Duration = Duration::from_secs(90);
+// Start plus drive, then a bounded stop: the call ends before the 60 s MCP handler timeout.
+const OVERALL_TIMEOUT: Duration = Duration::from_secs(50);
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const NAV_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn backend(e: impl std::fmt::Display) -> ToolError {
@@ -99,33 +103,34 @@ impl AgentCoreBrowser {
         fields: Option<&BTreeMap<String, String>>,
         hosts: &[String],
     ) -> Result<Page, ToolError> {
-        let started = self
+        let timed_out = || backend("browser call timed out");
+        let deadline = tokio::time::Instant::now() + OVERALL_TIMEOUT;
+        let start = self
             .client
             .start_browser_session()
             .browser_identifier(&self.browser_id)
             .session_timeout_seconds(SESSION_TIMEOUT_SECS)
-            .send()
+            .send();
+        let started = tokio::time::timeout_at(deadline, start)
             .await
+            .map_err(|_| timed_out())?
             .map_err(backend)?;
-        let result =
-            tokio::time::timeout(OVERALL_TIMEOUT, self.drive(&started, url, fields, hosts))
-                .await
-                .unwrap_or_else(|_| Err(backend("browser call timed out")));
+        let result = tokio::time::timeout_at(deadline, self.drive(&started, url, fields, hosts))
+            .await
+            .unwrap_or_else(|_| Err(timed_out()));
         // Always stop: a leaked session bills until its timeout.
         let stop = self
             .client
             .stop_browser_session()
             .browser_identifier(&self.browser_id)
             .session_id(started.session_id())
-            .send()
-            .await;
-        match (result, stop) {
-            (Ok(p), Err(e)) => {
-                eprintln!("stop_browser_session failed: {e}");
-                Ok(p)
-            }
-            (r, _) => r,
+            .send();
+        match tokio::time::timeout(STOP_TIMEOUT, stop).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "stop_browser_session failed"),
+            Err(_) => tracing::warn!("stop_browser_session timed out"),
         }
+        result
     }
 
     async fn drive(
@@ -157,62 +162,110 @@ impl AgentCoreBrowser {
                 .await
                 .map_err(backend)?;
             block_other_hosts(&page, hosts).await?;
-            page.goto(url.as_str()).await.map_err(backend)?;
-            let landed = final_url(&page, hosts).await?;
-            if let Some(fields) = fields {
-                // The approval covers the approved origin, not wherever a redirect led.
-                if landed.origin() != url.origin() {
-                    return Err(backend("page redirected to a different origin"));
-                }
-                // Listen before submitting, so the load cannot finish before we wait for it.
-                let mut loaded = page
-                    .event_listener::<EventLoadEventFired>()
-                    .await
-                    .map_err(backend)?;
-                let script = format!(
-                    "({SUBMIT_JS})({})",
-                    serde_json::to_string(fields).map_err(backend)?
-                );
-                let outcome: String = page
-                    .evaluate(script)
-                    .await
-                    .map_err(backend)?
-                    .into_value()
-                    .map_err(backend)?;
-                match outcome.as_str() {
-                    "submitted" => {}
-                    "cross_origin" => return Err(backend("form posts to a different origin")),
-                    _ => return Err(backend("form field not found on page")),
-                }
-                // ponytail: a form that submits without navigating times out here and we read the page as is.
-                let _ = tokio::time::timeout(NAV_TIMEOUT, loaded.next()).await;
-                final_url(&page, hosts).await?;
+            let other_target = watch_other_targets(&browser, &page).await?;
+            tokio::select! {
+                r = visit(&page, url, fields, hosts, live_view_url) => r,
+                () = other_target => Err(backend("page opened another window")),
             }
-            let title: String = page
-                .evaluate("document.title")
-                .await
-                .map_err(backend)?
-                .into_value()
-                .map_err(backend)?;
-            let text: String = page
-                .evaluate("document.body.innerText")
-                .await
-                .map_err(backend)?
-                .into_value()
-                .map_err(backend)?;
-            // Page script can navigate between the check above and the reads.
-            final_url(&page, hosts).await?;
-            Ok(Page {
-                title,
-                text,
-                live_view_url,
-            })
         }
         .await;
         let _ = browser.close().await;
         pump.abort();
         out
     }
+}
+
+/// Navigates, optionally submits, and reads the page; every URL the page ends on is checked.
+async fn visit(
+    page: &chromiumoxide::Page,
+    url: &Url,
+    fields: Option<&BTreeMap<String, String>>,
+    hosts: &[String],
+    live_view_url: Option<String>,
+) -> Result<Page, ToolError> {
+    page.goto(url.as_str()).await.map_err(backend)?;
+    let landed = final_url(page, hosts).await?;
+    if let Some(fields) = fields {
+        // The approval covers the approved origin, not wherever a redirect led.
+        if landed.origin() != url.origin() {
+            return Err(backend("page redirected to a different origin"));
+        }
+        // Listen before submitting, so the load cannot finish before we wait for it.
+        let mut loaded = page
+            .event_listener::<EventLoadEventFired>()
+            .await
+            .map_err(backend)?;
+        let script = format!(
+            "({SUBMIT_JS})({})",
+            serde_json::to_string(fields).map_err(backend)?
+        );
+        let outcome: String = page
+            .evaluate(script)
+            .await
+            .map_err(backend)?
+            .into_value()
+            .map_err(backend)?;
+        match outcome.as_str() {
+            "submitted" => {}
+            "cross_origin" => return Err(backend("form posts to a different origin")),
+            _ => return Err(backend("form field not found on page")),
+        }
+        // ponytail: a form that submits without navigating times out here and we read the page as is.
+        let _ = tokio::time::timeout(NAV_TIMEOUT, loaded.next()).await;
+        final_url(page, hosts).await?;
+    }
+    let title: String = page
+        .evaluate("document.title")
+        .await
+        .map_err(backend)?
+        .into_value()
+        .map_err(backend)?;
+    let text: String = page
+        .evaluate("document.body.innerText")
+        .await
+        .map_err(backend)?
+        .into_value()
+        .map_err(backend)?;
+    // Page script can navigate between the check above and the reads.
+    final_url(page, hosts).await?;
+    Ok(Page {
+        title,
+        text,
+        live_view_url,
+    })
+}
+
+/// Resolves once any target other than `page` appears (popup, new tab, out-of-process frame,
+/// worker), after closing it. chromiumoxide enables target discovery on connect, so targets that
+/// existed before `page` were reported before these listeners and are not counted.
+async fn watch_other_targets(
+    browser: &Browser,
+    page: &chromiumoxide::Page,
+) -> Result<impl std::future::Future<Output = ()>, ToolError> {
+    let created = browser
+        .event_listener::<EventTargetCreated>()
+        .await
+        .map_err(backend)?
+        .map(|e| e.target_info.target_id.clone());
+    // Children of the page (frames, workers) arrive through chromiumoxide's own auto-attach.
+    let attached = page
+        .event_listener::<EventAttachedToTarget>()
+        .await
+        .map_err(backend)?
+        .map(|e| e.target_info.target_id.clone());
+    let mine = page.target_id().clone();
+    let mut others = futures::stream::select(created, attached);
+    Ok(async move {
+        while let Some(id) = others.next().await {
+            if id != mine {
+                // ponytail: closing races the new target's first request; page-script egress is likewise unblocked in v1.
+                let _ = browser.execute(CloseTargetParams::new(id)).await;
+                return;
+            }
+        }
+        // The CDP connection ended; the call fails on its own.
+        futures::future::pending::<()>().await
+    })
 }
 
 fn allowed(url: &Url, hosts: &[String]) -> bool {
