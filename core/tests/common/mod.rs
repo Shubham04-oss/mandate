@@ -1,8 +1,15 @@
 //! Shared by the live tests: need DATABASE_URL (a superuser).
 use mandate::store::Store;
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, PgConnection, PgPool};
 
 const APP_PASSWORD: &str = "mandate_app_test";
+
+/// A superuser pool, for seeding what the app role may not write (agents, grants).
+pub async fn admin_pool() -> PgPool {
+    PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL"))
+        .await
+        .unwrap()
+}
 
 /// Migrates as the superuser, applies the production grants of `core/sql/app_role.sql` to a
 /// non-superuser `mandate_app`, and returns a store connected as it, so RLS and the exact

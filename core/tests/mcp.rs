@@ -2,7 +2,7 @@
 mod common;
 use async_trait::async_trait;
 use axum::body::Body;
-use common::app_store;
+use common::{admin_pool, app_store};
 use ed25519_dalek::SigningKey;
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -161,8 +161,8 @@ async fn call(app: &axum::Router, t: &TenantId, name: &str, args: Value) -> Valu
 }
 
 /// Seeds agent `bot` owned by `ann`, with a live non-standing grant on each given tool.
-async fn seed(s: &Store, t: &TenantId, grants: &[&str]) {
-    let mut tx = s.begin(t).await.unwrap();
+async fn seed(t: &TenantId, grants: &[&str]) {
+    let mut tx = admin_pool().await.begin().await.unwrap();
     sqlx::query("insert into agents (tenant_id, id, kind, owner_member) values ($1, 'bot', 'personal', 'ann')")
         .bind(t.as_str())
         .execute(&mut *tx)
@@ -248,7 +248,7 @@ async fn assertion_exchange_is_503_without_workos() {
 async fn list_shows_only_granted_tools() {
     let s = app_store().await;
     let t = tenant();
-    seed(&s, &t, &["web.read_page"]).await;
+    seed(&t, &["web.read_page"]).await;
     let backend = Arc::new(Recorder::default());
     let app = app(s, backend.clone());
 
@@ -297,7 +297,7 @@ async fn list_shows_only_granted_tools() {
 async fn unknown_tool_and_huge_args_are_refused() {
     let s = app_store().await;
     let t = tenant();
-    seed(&s, &t, &["web.read_page", "web.submit_form"]).await;
+    seed(&t, &["web.read_page", "web.submit_form"]).await;
     let backend = Arc::new(Recorder::default());
     let app = app(s.clone(), backend.clone());
 
@@ -325,7 +325,7 @@ async fn unknown_tool_and_huge_args_are_refused() {
 async fn submit_form_returns_needs_approval_then_runs_after_approve() {
     let s = app_store().await;
     let t = tenant();
-    seed(&s, &t, &["web.submit_form"]).await;
+    seed(&t, &["web.submit_form"]).await;
     let backend = Arc::new(Recorder::default());
     let app = app(s.clone(), backend.clone());
     let args = json!({ "url": "https://example.com/f", "fields": { "q": "x" } });
@@ -360,7 +360,7 @@ async fn submit_form_returns_needs_approval_then_runs_after_approve() {
 async fn backend_error_detail_does_not_reach_the_agent() {
     let s = app_store().await;
     let t = tenant();
-    seed(&s, &t, &["web.read_page"]).await;
+    seed(&t, &["web.read_page"]).await;
     let app = app(s, Arc::new(Failing));
 
     let out = call(
@@ -380,7 +380,7 @@ async fn backend_error_detail_does_not_reach_the_agent() {
 async fn invalid_args_are_refused_before_the_gate() {
     let s = app_store().await;
     let t = tenant();
-    seed(&s, &t, &["web.read_page", "web.submit_form"]).await;
+    seed(&t, &["web.read_page", "web.submit_form"]).await;
     let backend = Arc::new(Recorder::default());
     let app = app(s.clone(), backend.clone());
 
@@ -410,4 +410,36 @@ async fn invalid_args_are_refused_before_the_gate() {
         .await
         .unwrap();
     assert_eq!(n, 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn nul_in_args_is_invalid() {
+    let s = app_store().await;
+    let t = tenant();
+    seed(&t, &["web.read_page", "web.submit_form"]).await;
+    let backend = Arc::new(Recorder::default());
+    let app = app(s.clone(), backend.clone());
+
+    for (name, args) in [
+        (
+            "web.read_page",
+            json!({ "url": "https://docs.test/a\u{0}b" }),
+        ),
+        (
+            "web.submit_form",
+            json!({ "url": "https://example.com/f", "fields": { "q": "a\u{0}" } }),
+        ),
+        (
+            "web.submit_form",
+            json!({ "url": "https://example.com/f", "fields": { "q\u{0}": "a" } }),
+        ),
+    ] {
+        let out = call(&app, &t, name, args.clone()).await;
+        assert_eq!(out["error"]["code"], -32602, "{name} {args}: {out}");
+    }
+
+    assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    // No gate call: nothing audited.
+    assert_eq!(audit_count(&s, &t).await, 0);
 }

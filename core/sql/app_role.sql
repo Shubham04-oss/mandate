@@ -12,8 +12,11 @@ revoke all on all tables in schema public from :"role";
 revoke all on all sequences in schema public from :"role";
 grant usage on schema public to :"role";
 
--- Tenant tables (RLS forced). The core is the only writer of grants, agents and approvals.
-grant select, insert, update, delete on members, teams, team_members, agents, grants, approvals to :"role";
+-- Tenant tables (RLS forced), each with only what the core does to it.
+grant select, insert, update, delete on members, teams, team_members, approvals to :"role";
+-- Agents and grants are created by admins, not the app: it only disables agents and revokes grants.
+grant select, update on agents to :"role";
+grant select, delete on grants to :"role";
 -- Append-only: the app can never rewrite or erase history.
 grant select, insert on audit to :"role";
 grant usage on sequence audit_id_seq to :"role";
