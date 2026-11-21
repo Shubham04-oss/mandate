@@ -82,7 +82,14 @@ pub async fn limit(State(s): State<Arc<ApiState>>, req: Request, next: Next) -> 
     };
     let now = OffsetDateTime::now_utc();
     let mut keys = vec![(format!("ip:{ip}"), PER_IP)];
-    if let Some(subject) = subject(&bytes) {
+    // An invitation's token is in its path, not its body.
+    let invite = parts
+        .uri
+        .path()
+        .strip_prefix("/v1/auth/invite/")
+        .and_then(|rest| rest.split('/').next())
+        .map(|token| format!("invite:{token}"));
+    if let Some(subject) = subject(&bytes).or(invite) {
         keys.push((subject, PER_SUBJECT));
     }
     let mut wait = None;

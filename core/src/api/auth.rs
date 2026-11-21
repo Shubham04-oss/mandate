@@ -8,7 +8,7 @@ use crate::ids::{MemberId, TenantId};
 use crate::store::{self, StoreError, Tx};
 use async_trait::async_trait;
 use axum::Router;
-use axum::extract::{RawQuery, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -389,6 +389,10 @@ pub(crate) fn routes(state: &Arc<ApiState>) -> Router<Arc<ApiState>> {
         .route("/v1/auth/choose-org", post(choose_org))
         .route("/v1/auth/sso/start", post(sso_start))
         .route("/v1/auth/sso/callback", get(sso_callback))
+        .route("/v1/auth/password/forgot", post(forgot))
+        .route("/v1/auth/password/reset", post(reset))
+        .route("/v1/auth/invite/{token}", get(invite))
+        .route("/v1/auth/invite/{token}/accept", post(invite_accept))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit,
@@ -862,6 +866,135 @@ fn step_error(step: &Step) -> ApiError {
         ),
         Step::Sso { .. } | Step::Methods { .. } => no_access(),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reset {
+    token: Opaque,
+    password: Password,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Accept {
+    #[serde(default)]
+    password: Option<Password>,
+    #[serde(default)]
+    name: Option<Name>,
+    #[serde(default)]
+    code: Option<Code>,
+}
+
+/// Always 202: whether the email has an account is not the caller's to learn.
+async fn forgot(State(s): State<Arc<ApiState>>, Input(b): Input<EmailOnly>) -> StatusCode {
+    quietly(
+        "password reset",
+        s.auth.create_password_reset(b.email.as_str()).await,
+    );
+    StatusCode::ACCEPTED
+}
+
+async fn reset(
+    State(s): State<Arc<ApiState>>,
+    Input(b): Input<Reset>,
+) -> Result<StatusCode, ApiError> {
+    match s
+        .auth
+        .confirm_password_reset(&b.token.0, &b.password.0)
+        .await
+    {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(AuthError::NotFound) => Err(AuthError::CodeInvalid.into()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// A pending invitation, or 404 for anything else (unknown, used, revoked, malformed).
+async fn pending_invitation(s: &ApiState, token: &str) -> Result<Invitation, ApiError> {
+    let ok = !token.is_empty()
+        && token.len() <= 512
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if !ok {
+        return Err(AuthError::NotFound.into());
+    }
+    match s.auth.invitation(token).await? {
+        i if i.pending && i.org.is_some() => Ok(i),
+        _ => Err(AuthError::NotFound.into()),
+    }
+}
+
+async fn invite(
+    State(s): State<Arc<ApiState>>,
+    Path(token): Path<String>,
+) -> Result<axum::Json<Value>, ApiError> {
+    let inv = pending_invitation(&s, &token).await?;
+    let org_id = inv.org.as_deref().unwrap_or_default();
+    let org = s.auth.organization(org_id).await?;
+    let inviter = match &inv.inviter {
+        Some(id) => Some(s.auth.user(id).await?),
+        None => None,
+    };
+    let mut summary = (0, 0);
+    let mut inviter_id = inviter.as_ref().map(|u| slug(&u.id));
+    if let Some(tenant) = s.store.tenant_for_org(org_id).await? {
+        let mut tx = s.store.begin(&tenant).await?;
+        summary = sqlx::query_as(
+            "select (select count(*) from members where tenant_id = current_setting('mandate.tenant', true)), \
+                    (select count(*) from agents where tenant_id = current_setting('mandate.tenant', true) and not disabled)",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if let Some(u) = &inviter
+            && let Some(m) = store::member_for_workos_user(&mut tx, &u.id).await?
+        {
+            inviter_id = Some(m.to_string());
+        }
+        tx.commit().await?;
+    }
+    let inviter = inviter.map(|u| {
+        json!({
+            "id": inviter_id,
+            "name": u.name.unwrap_or_else(|| u.email.clone()),
+            "email": u.email,
+            "avatar_url": u.avatar_url,
+        })
+    });
+    Ok(axum::Json(json!({
+        "org": org_json(&slug(&org.id), &org.name, summary),
+        "inviter": inviter,
+        "email": inv.email,
+    })))
+}
+
+/// A new account (`password`, `name`) or an existing one (`code` from `code/start`) accepts the
+/// invitation through WorkOS; then the normal outcome.
+async fn invite_accept(
+    State(s): State<Arc<ApiState>>,
+    Path(token): Path<String>,
+    Input(b): Input<Accept>,
+) -> Result<Response, ApiError> {
+    let inv = pending_invitation(&s, &token).await?;
+    let r = match (b.password, b.name, b.code) {
+        (Some(password), Some(name), None) => {
+            match s.auth.create_user(&inv.email, &password.0, &name.0).await {
+                Ok(_) | Err(AuthError::Conflict) => {}
+                Err(e) => return Err(e.into()),
+            }
+            s.auth
+                .authenticate_with_password(&inv.email, &password.0, Some(&token))
+                .await
+        }
+        (None, None, Some(code)) => {
+            s.auth
+                .authenticate_with_magic_auth(&inv.email, &code.0, Some(&token))
+                .await
+        }
+        _ => return Err(ApiError::invalid_input()),
+    };
+    outcome(&s, r).await
 }
 
 /// An org as the web app sees it; its id is the tenant id the org has (or will have).

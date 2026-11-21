@@ -999,6 +999,18 @@ impl Harness {
             .await
             .unwrap()
     }
+
+    async fn get(&self, uri: &str, cookie: Option<&str>) -> axum::response::Response {
+        let mut r = Request::get(uri).header("cf-connecting-ip", &self.ip);
+        if let Some(c) = cookie {
+            r = r.header(header::COOKIE, format!("mandate_session={c}"));
+        }
+        self.app
+            .clone()
+            .oneshot(r.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
 }
 
 fn auth_state(store: Store, auth: Arc<dyn AuthProvider>) -> Arc<ApiState> {
@@ -1329,7 +1341,8 @@ async fn code_verify_signs_in() {
     assert_eq!(v["me"]["is_admin"], false);
 }
 
-/// Captures the log lines written while the guard lives (this test's thread only).
+/// Every log line of this test binary, through one global subscriber: thread-scoped
+/// subscribers can miss events while other tests run in parallel.
 #[derive(Clone, Default)]
 struct Logs(Arc<Mutex<Vec<u8>>>);
 
@@ -1350,21 +1363,25 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
     }
 }
 
+static LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
+
 impl Logs {
-    fn capture() -> (Logs, tracing::subscriber::DefaultGuard) {
-        let logs = Logs::default();
-        let sub = tracing_subscriber::fmt()
-            .json()
-            .with_writer(logs.clone())
-            .finish();
-        (logs.clone(), tracing::subscriber::set_default(sub))
+    fn get() -> &'static Logs {
+        LOGS.get_or_init(|| {
+            let logs = Logs::default();
+            let sub = tracing_subscriber::fmt()
+                .json()
+                .with_writer(logs.clone())
+                .finish();
+            tracing::subscriber::set_global_default(sub).unwrap();
+            logs
+        })
     }
 
-    /// `(type, member, actor)` of every event published so far.
-    fn events(&self) -> Vec<(String, Option<String>, String)> {
+    /// `(type, member, actor)` of every event published about or by `id`.
+    fn events(&self, id: &str) -> Vec<(String, Option<String>, String)> {
         let bytes = self.0.lock().unwrap().clone();
-        String::from_utf8(bytes)
-            .unwrap()
+        String::from_utf8_lossy(&bytes)
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(|v| v["fields"]["message"] == "event published")
@@ -1377,6 +1394,7 @@ impl Logs {
                     text("actor").unwrap(),
                 )
             })
+            .filter(|(_, member, actor)| member.as_deref() == Some(id) || actor == id)
             .collect()
     }
 }
@@ -1532,7 +1550,7 @@ async fn resend_is_202() {
 #[ignore]
 async fn sign_up_records_org_and_member_created() {
     let h = Harness::new().await;
-    let (logs, _guard) = Logs::capture();
+    let logs = Logs::get();
     let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
     let v = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
     let r = h
@@ -1546,7 +1564,7 @@ async fn sign_up_records_org_and_member_created() {
         .unwrap()
         .to_owned();
     assert_eq!(
-        logs.events(),
+        logs.events(&member),
         vec![
             ("organization.created.v1".into(), None, member.clone()),
             ("member.created.v1".into(), Some(member.clone()), member),
@@ -1558,7 +1576,7 @@ async fn sign_up_records_org_and_member_created() {
 #[ignore]
 async fn first_sign_in_records_member_created() {
     let h = Harness::new().await;
-    let (logs, _guard) = Logs::capture();
+    let logs = Logs::get();
     let u = h.user("member");
     let body = json!({ "email": u.email, "password": u.password });
     let r = h.post("/v1/auth/password", body.clone()).await;
@@ -1567,12 +1585,16 @@ async fn first_sign_in_records_member_created() {
         .unwrap()
         .to_owned();
     assert_eq!(
-        logs.events(),
-        vec![("member.created.v1".into(), Some(member), "system".into())]
+        logs.events(&member),
+        vec![(
+            "member.created.v1".into(),
+            Some(member.clone()),
+            "system".into()
+        )]
     );
     // The second sign-in creates nobody.
     h.post("/v1/auth/password", body).await;
-    assert_eq!(logs.events().len(), 1);
+    assert_eq!(logs.events(&member).len(), 1);
 }
 
 /// Signs `u` in by password and returns the session cookie.
@@ -2011,5 +2033,178 @@ async fn sso_callback_bad_state_redirects_with_error() {
     assert_eq!(
         r.headers()[header::LOCATION],
         format!("{WEB}/sign-in?error=invalid_credentials")
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn forgot_is_202_always() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let known = h
+        .post("/v1/auth/password/forgot", json!({ "email": u.email }))
+        .await;
+    let unknown = h
+        .post(
+            "/v1/auth/password/forgot",
+            json!({ "email": format!("nobody-{}@acme.test", Uuid::new_v4().simple()) }),
+        )
+        .await;
+    assert_eq!(known.status(), StatusCode::ACCEPTED);
+    assert_eq!(unknown.status(), StatusCode::ACCEPTED);
+    let k = known.into_body().collect().await.unwrap().to_bytes();
+    let n = unknown.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(k, n);
+    assert!(h.fake.called(&format!("reset {}", u.email)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn reset_with_valid_token_is_204() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let r = h
+        .post(
+            "/v1/auth/password/reset",
+            json!({ "token": "nope", "password": "new password 1" }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "code_invalid");
+    let token = format!("reset_{}", u.id);
+    let r = h
+        .post(
+            "/v1/auth/password/reset",
+            json!({ "token": token, "password": "new password 1" }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": u.email, "password": "new password 1" }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+}
+
+/// An invitation to a new org from `inviter`, for `email`.
+fn invite_to(h: &Harness, inviter: &FakeUser, email: &str) -> String {
+    let token = format!("inv_{}", Uuid::new_v4().simple());
+    let org = inviter.memberships[0].org.clone();
+    h.fake.invitations.lock().unwrap().insert(
+        token.clone(),
+        Invitation {
+            email: email.into(),
+            org: Some(org),
+            inviter: Some(inviter.id.clone()),
+            pending: true,
+        },
+    );
+    token
+}
+
+#[tokio::test]
+#[ignore]
+async fn invite_shows_org_and_inviter() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    // The inviter has signed in, so the org is a tenant with one member.
+    signed_in(&h, &inviter).await;
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let token = invite_to(&h, &inviter, &email);
+    let r = h.get(&format!("/v1/auth/invite/{token}"), None).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    let tenant = tenant_of(&inviter.memberships[0].org);
+    assert_eq!(v["email"], email.as_str());
+    assert_eq!(v["org"]["id"], tenant.as_str());
+    assert_eq!(v["org"]["name"], "Acme");
+    assert_eq!(v["org"]["summary"]["people"], 1);
+    assert_eq!(v["inviter"]["name"], "Ann Lee");
+    assert_eq!(v["inviter"]["email"], inviter.email.as_str());
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    let member = mandate::store::member_for_workos_user(&mut tx, &inviter.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v["inviter"]["id"], member.as_str());
+    // Unknown, used up, or malformed: 404.
+    h.fake
+        .invitations
+        .lock()
+        .unwrap()
+        .get_mut(&token)
+        .unwrap()
+        .pending = false;
+    for t in [token.as_str(), "inv_unknown", "bad%20token"] {
+        let r = h.get(&format!("/v1/auth/invite/{t}"), None).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "{t}");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn invite_accept_with_password() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let token = invite_to(&h, &inviter, &email);
+    let r = h
+        .post(
+            &format!("/v1/auth/invite/{token}/accept"),
+            json!({ "password": "a long passphrase", "name": "Bo Chen" }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(session_cookie(&r).is_some());
+    let v = body_json(r).await;
+    assert_eq!(v["status"], "signed_in", "{v}");
+    assert_eq!(
+        v["me"]["org"]["id"],
+        tenant_of(&inviter.memberships[0].org).as_str()
+    );
+    assert_eq!(v["me"]["person"]["name"], "Bo Chen");
+    assert_eq!(v["me"]["is_admin"], false);
+    assert!(
+        h.fake
+            .called(&format!("password {email} Some(\"{token}\")"))
+    );
+    // Mixed or empty bodies are refused.
+    for bad in [
+        json!({}),
+        json!({ "password": "a long passphrase", "code": GOOD_CODE }),
+    ] {
+        let r = h
+            .post(&format!("/v1/auth/invite/{token}/accept"), bad)
+            .await;
+        assert_eq!(body_json(r).await["error"]["code"], "invalid_input");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn invite_accept_with_code() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    // An existing WorkOS user with no org yet.
+    let invitee = h.user("member");
+    h.fake.update(&invitee.id, |u| u.memberships.clear());
+    let token = invite_to(&h, &inviter, &invitee.email);
+    let r = h
+        .post("/v1/auth/code/start", json!({ "email": invitee.email }))
+        .await;
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let r = h
+        .post(
+            &format!("/v1/auth/invite/{token}/accept"),
+            json!({ "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    assert_eq!(v["status"], "signed_in", "{v}");
+    assert_eq!(
+        v["me"]["org"]["id"],
+        tenant_of(&inviter.memberships[0].org).as_str()
     );
 }
