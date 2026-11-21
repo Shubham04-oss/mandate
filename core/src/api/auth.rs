@@ -8,10 +8,10 @@ use crate::ids::{MemberId, TenantId};
 use crate::store::{self, StoreError, Tx};
 use async_trait::async_trait;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{RawQuery, State};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use http::{HeaderMap, StatusCode, header};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -279,6 +279,10 @@ impl Email {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    fn domain(&self) -> &str {
+        self.0.rsplit_once('@').map_or("", |(_, d)| d)
+    }
 }
 
 impl<'de> Deserialize<'de> for Email {
@@ -382,6 +386,9 @@ pub(crate) fn routes(state: &Arc<ApiState>) -> Router<Arc<ApiState>> {
         .route("/v1/auth/mfa/verify", post(mfa_verify))
         .route("/v1/auth/mfa/setup", post(mfa_setup))
         .route("/v1/auth/mfa/enable", post(mfa_enable))
+        .route("/v1/auth/choose-org", post(choose_org))
+        .route("/v1/auth/sso/start", post(sso_start))
+        .route("/v1/auth/sso/callback", get(sso_callback))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit,
@@ -729,6 +736,132 @@ async fn mfa_enable(
     .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChooseOrg {
+    pending: Opaque,
+    org: TenantId,
+}
+
+/// Only an org WorkOS offered for this step; WorkOS checks the membership again.
+async fn choose_org(
+    State(s): State<Arc<ApiState>>,
+    Input(b): Input<ChooseOrg>,
+) -> Result<Response, ApiError> {
+    let p = find_pending(&s, &b.pending.0, &["choose_org"]).await?;
+    let org = p.data["orgs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| o["id"].as_str())
+        .find(|id| slug(id) == b.org.as_str())
+        .ok_or_else(no_access)?
+        .to_owned();
+    let token = p.workos_token.ok_or_else(pending_expired)?;
+    let r = s
+        .auth
+        .authenticate_with_organization_selection(&token, &org)
+        .await;
+    settle(&s, &b.pending.0, r).await
+}
+
+async fn sso_start(
+    State(s): State<Arc<ApiState>>,
+    Input(b): Input<EmailOnly>,
+) -> Result<Response, ApiError> {
+    let domain = b.email.domain().to_lowercase();
+    let connection = s
+        .auth
+        .sso_connection(&domain)
+        .await?
+        .ok_or(AuthError::NotFound)?;
+    let (_, url, cookie) = sso_redirect(&s, &connection, None).await?;
+    let mut r = axum::Json(json!({ "redirect_url": url })).into_response();
+    r.headers_mut().insert(header::SET_COOKIE, cookie);
+    Ok(r)
+}
+
+fn redirect(to: &str, cookies: &[http::HeaderValue]) -> Response {
+    let mut r = StatusCode::FOUND.into_response();
+    if let Ok(v) = http::HeaderValue::from_str(to) {
+        r.headers_mut().insert(header::LOCATION, v);
+    }
+    for c in cookies {
+        r.headers_mut().append(header::SET_COOKIE, c.clone());
+    }
+    r
+}
+
+/// WorkOS sends the browser back here: the state must match this browser's cookie and an
+/// unused SSO step. Lands on the web app either way, signed in or with an error code.
+async fn sso_callback(
+    State(s): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let clear = session::clear_sso_cookie();
+    match sso_finish(&s, &headers, query.as_deref().unwrap_or_default()).await {
+        Ok(signed_in) => match session::set_cookie(&signed_in.token) {
+            Ok(c) => redirect(&format!("{}/", s.web_origin), &[c, clear]),
+            Err(e) => redirect(
+                &format!("{}/sign-in?error={}", s.web_origin, e.code()),
+                &[clear],
+            ),
+        },
+        Err(e) => redirect(
+            &format!("{}/sign-in?error={}", s.web_origin, e.code()),
+            &[clear],
+        ),
+    }
+}
+
+async fn sso_finish(s: &ApiState, headers: &HeaderMap, query: &str) -> Result<SignedIn, ApiError> {
+    let param = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+            .filter(|v| !v.is_empty() && v.len() <= 512)
+    };
+    let (Some(code), Some(state)) = (param("code"), param("state")) else {
+        return Err(ApiError::forbidden());
+    };
+    if session::named_cookie(headers, session::SSO_COOKIE) != Some(state.as_str()) {
+        return Err(ApiError::forbidden());
+    }
+    find_pending(s, &state, &["sso"])
+        .await
+        .map_err(|_| ApiError::forbidden())?;
+    // Single use, whatever happens next.
+    drop_pending(s, &state).await?;
+    match s.auth.authenticate_with_code(&code).await {
+        Ok(a) => finish(s, a).await,
+        Err(AuthError::Step(step)) => Err(step_error(&step)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// A step the SSO landing cannot run: tells the sign-in page which one.
+fn step_error(step: &Step) -> ApiError {
+    match step {
+        Step::Mfa { .. } | Step::MfaSetup { .. } => ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "mfa_required",
+            "Two-step verification is required.",
+        ),
+        Step::ChooseOrg { .. } => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "org_required",
+            "Choose an organization.",
+        ),
+        Step::VerifyEmail { .. } => ApiError::new(
+            StatusCode::FORBIDDEN,
+            "email_unverified",
+            "Please verify your email.",
+        ),
+        Step::Sso { .. } | Step::Methods { .. } => no_access(),
+    }
 }
 
 /// An org as the web app sees it; its id is the tenant id the org has (or will have).

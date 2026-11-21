@@ -1785,3 +1785,231 @@ async fn mfa_enable_with_valid_code_signs_in() {
     let profile = session::profile(&mut tx, &cookie).await.unwrap().unwrap();
     assert_eq!(profile["mfa_enabled"], true);
 }
+
+#[tokio::test]
+#[ignore]
+async fn choose_org_signs_into_that_org() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let beta = OrgRef {
+        id: format!("org_{}", Uuid::new_v4().simple()),
+        name: "Beta".into(),
+    };
+    h.fake.orgs.lock().unwrap().push(beta.clone());
+    h.fake.update(&u.id, |u| {
+        u.memberships.push(Membership {
+            org: beta.id.clone(),
+            org_name: "Beta".into(),
+            role: "admin".into(),
+            active: true,
+        })
+    });
+    let pending = pending_for(&h, &u, "choose_org").await;
+    // An org that was not offered is refused, and WorkOS is not asked.
+    let r = h
+        .post(
+            "/v1/auth/choose-org",
+            json!({ "pending": pending, "org": "org_other" }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "no_access");
+    let beta_tenant = tenant_of(&beta.id);
+    let r = h
+        .post(
+            "/v1/auth/choose-org",
+            json!({ "pending": pending, "org": beta_tenant }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let cookie = session_cookie(&r).unwrap();
+    let v = body_json(r).await;
+    assert_eq!(v["me"]["org"]["id"], beta_tenant.as_str());
+    assert_eq!(v["me"]["org"]["name"], "Beta");
+    assert_eq!(v["me"]["is_admin"], true);
+    assert_eq!(v["me"]["orgs"].as_array().unwrap().len(), 2);
+    assert!(cookie.starts_with(&format!("{beta_tenant}.")));
+    assert!(h.fake.called(&format!("select-org {}", beta.id)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn sso_start_returns_redirect() {
+    let h = Harness::new().await;
+    h.fake
+        .sso
+        .lock()
+        .unwrap()
+        .insert("bigcorp.test".into(), "conn_big".into());
+    let r = h
+        .post("/v1/auth/sso/start", json!({ "email": "Ann@BigCorp.test" }))
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let cookie = r.headers()[header::SET_COOKIE].to_str().unwrap().to_owned();
+    let v = body_json(r).await;
+    let url = v["redirect_url"].as_str().unwrap();
+    assert!(url.contains("connection=conn_big"), "{url}");
+    let state = url
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    assert_eq!(state.len(), 43);
+    assert!(
+        cookie.starts_with(&format!("mandate_sso={state};")),
+        "{cookie}"
+    );
+    for want in ["HttpOnly", "Secure", "SameSite=Lax"] {
+        assert!(
+            cookie.split("; ").any(|a| a == want),
+            "{want} missing from {cookie}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn sso_start_404_without_sso() {
+    let h = Harness::new().await;
+    let r = h
+        .post("/v1/auth/sso/start", json!({ "email": "ann@nosso.test" }))
+        .await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert!(r.headers().get(header::SET_COOKIE).is_none());
+    assert_eq!(body_json(r).await["error"]["code"], "not_found");
+}
+
+/// Starts SSO for a user of `bigcorp.test` and returns the state.
+async fn sso_state(h: &Harness, u: &FakeUser, code: &str) -> String {
+    h.fake
+        .sso
+        .lock()
+        .unwrap()
+        .insert("acme.test".into(), "conn_acme".into());
+    h.fake
+        .sso_codes
+        .lock()
+        .unwrap()
+        .insert(code.into(), u.id.clone());
+    let v = body_json(
+        h.post("/v1/auth/sso/start", json!({ "email": u.email }))
+            .await,
+    )
+    .await;
+    let url = v["redirect_url"].as_str().unwrap().to_owned();
+    url.split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn callback(query: &str, sso_cookie: Option<&str>) -> Request<Body> {
+    let mut r = Request::get(format!("/v1/auth/sso/callback?{query}"));
+    if let Some(c) = sso_cookie {
+        r = r.header(header::COOKIE, format!("mandate_sso={c}"));
+    }
+    r.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn sso_callback_sets_cookie_and_redirects() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let state = sso_state(&h, &u, "code_ok").await;
+    let r = h
+        .app
+        .clone()
+        .oneshot(callback(
+            &format!("code=code_ok&state={state}"),
+            Some(&state),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FOUND);
+    assert_eq!(r.headers()[header::LOCATION], format!("{WEB}/"));
+    let cookie = session_cookie(&r).unwrap();
+    let tenant = tenant_of(&u.memberships[0].org);
+    assert!(cookie.starts_with(&format!("{tenant}.")));
+    let cleared = r
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .any(|v| v.to_str().unwrap().starts_with("mandate_sso=;"));
+    assert!(cleared);
+}
+
+#[tokio::test]
+#[ignore]
+async fn sso_callback_bad_state_redirects_with_error() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let state = sso_state(&h, &u, "code_ok").await;
+    let error_landing = format!("{WEB}/sign-in?error=forbidden");
+    for (query, cookie) in [
+        // No cookie: the state was not started in this browser.
+        (format!("code=code_ok&state={state}"), None),
+        // The cookie and the state disagree.
+        (format!("code=code_ok&state={state}"), Some("other")),
+        // A state never issued, even if the browser echoes it.
+        ("code=code_ok&state=forged".to_owned(), Some("forged")),
+        // Missing code or state.
+        (format!("state={state}"), Some(state.as_str())),
+        ("code=code_ok".to_owned(), Some(state.as_str())),
+    ] {
+        let r = h
+            .app
+            .clone()
+            .oneshot(callback(&query, cookie))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FOUND, "{query}");
+        assert_eq!(
+            r.headers()[header::LOCATION],
+            error_landing,
+            "{query} {cookie:?}"
+        );
+        assert!(session_cookie(&r).is_none());
+    }
+    assert!(
+        !h.fake.called("code"),
+        "WorkOS is never asked with a bad state"
+    );
+    // A good state works once; replayed, it is refused.
+    let r = h
+        .app
+        .clone()
+        .oneshot(callback(
+            &format!("code=code_ok&state={state}"),
+            Some(&state),
+        ))
+        .await
+        .unwrap();
+    assert!(session_cookie(&r).is_some());
+    let r = h
+        .app
+        .clone()
+        .oneshot(callback(
+            &format!("code=code_ok&state={state}"),
+            Some(&state),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.headers()[header::LOCATION], error_landing);
+    // A code WorkOS rejects lands with that error.
+    let state = sso_state(&h, &u, "code_ok2").await;
+    let r = h
+        .app
+        .clone()
+        .oneshot(callback(&format!("code=bad&state={state}"), Some(&state)))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.headers()[header::LOCATION],
+        format!("{WEB}/sign-in?error=invalid_credentials")
+    );
+}
