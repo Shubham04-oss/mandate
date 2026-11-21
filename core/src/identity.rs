@@ -1,5 +1,6 @@
 //! WorkOS proves who a person is; Mandate exchanges that for its own short-lived assertion and
 //! mirrors the customer's directory, so a person removed there loses access on the next sync.
+use crate::api::stubs::{self, Actor, Event};
 use crate::assertion::{Assertion, TTL_SECS, sign};
 use crate::ids::{AgentId, IdError, MemberId, SpaceId, TeamId, TenantId};
 use crate::mcp::AppState;
@@ -668,6 +669,15 @@ pub async fn ensure_personal_operator(
     Ok(id)
 }
 
+async fn member_exists(tx: &mut store::Tx, member: &MemberId) -> Result<bool, StoreError> {
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from members where tenant_id = current_setting('mandate.tenant', true) and id = $1)",
+    )
+    .bind(member.as_str())
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
 /// Which table a directory name belongs to.
 #[derive(Clone, Copy)]
 enum Named {
@@ -719,6 +729,7 @@ async fn apply(
             workos_user,
             name,
         } => {
+            let existed = member_exists(&mut tx, &id).await?;
             store::upsert_member(
                 &mut tx,
                 &id,
@@ -729,8 +740,23 @@ async fn apply(
             .await?;
             set_name(&mut tx, Named::Member, id.as_str(), name.as_deref()).await?;
             ensure_personal_operator(&mut tx, &id).await?;
+            let actor = Actor::Directory;
+            let event = if existed {
+                Event::MemberUpdated { member: id, actor }
+            } else {
+                Event::MemberCreated { member: id, actor }
+            };
+            stubs::publish(&mut tx, event).await?;
         }
-        Change::RemoveMember(id) => store::remove_member(&mut tx, &id).await?,
+        Change::RemoveMember(id) => {
+            // Always removes (fail closed), but records only someone who was a member.
+            let existed = member_exists(&mut tx, &id).await?;
+            store::remove_member(&mut tx, &id).await?;
+            if existed {
+                let actor = Actor::Directory;
+                stubs::publish(&mut tx, Event::MemberRemoved { member: id, actor }).await?;
+            }
+        }
         Change::Team { id, group, name } => {
             store::upsert_team(&mut tx, &id, &group).await?;
             set_name(&mut tx, Named::Team, id.as_str(), name.as_deref()).await?;
@@ -746,6 +772,7 @@ async fn apply(
             workos_user,
             name,
         } => {
+            let existed = member_exists(&mut tx, &member).await?;
             store::upsert_member(
                 &mut tx,
                 &member,
@@ -759,6 +786,10 @@ async fn apply(
             store::upsert_team(&mut tx, &team, &group).await?;
             set_name(&mut tx, Named::Team, team.as_str(), team_name.as_deref()).await?;
             store::set_team_member(&mut tx, &team, &member, true).await?;
+            if !existed {
+                let actor = Actor::Directory;
+                stubs::publish(&mut tx, Event::MemberCreated { member, actor }).await?;
+            }
         }
         Change::Leave { team, member } => {
             store::set_team_member(&mut tx, &team, &member, false).await?

@@ -4,6 +4,7 @@
 mod common;
 use common::app_store;
 use futures::stream::{self, BoxStream, StreamExt};
+use mandate::api::stubs::{Actor, Event, published};
 use mandate::identity::{
     EventSource, IdentityError, UserLookup, personal_operator_id, sync_directory,
 };
@@ -277,5 +278,141 @@ async fn removed_member_operator_is_disabled() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+fn m(id: &str) -> MemberId {
+    MemberId::parse(id).unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn directory_add_emits_member_created() {
+    let _turn = SYNC.lock().await;
+    let s = app_store().await;
+    let o = org();
+    reset_cursor().await;
+    let mut join = json!({
+        "directory_id": "directory_01",
+        "user": user("directory_user_CY", &o, "active", "Cy", "Ng"),
+        "group": group("directory_group_ENG", &o, "Engineering"),
+    });
+    join["user"]["organization_id"] = json!(o);
+    sync(
+        &s,
+        vec![
+            event(
+                1,
+                "dsync.user.created",
+                user("directory_user_ANN", &o, "active", "Ann", "Lee"),
+            ),
+            event(2, "dsync.group.user_added", join),
+        ],
+    )
+    .await;
+    let t = tenant_of(&s, &o).await;
+    assert_eq!(
+        published(&t),
+        [
+            Event::MemberCreated {
+                member: m("directory_user_ann"),
+                actor: Actor::Directory
+            },
+            Event::MemberCreated {
+                member: m("directory_user_cy"),
+                actor: Actor::Directory
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn directory_change_emits_member_updated() {
+    let _turn = SYNC.lock().await;
+    let s = app_store().await;
+    let o = org();
+    reset_cursor().await;
+    sync(
+        &s,
+        vec![
+            event(
+                1,
+                "dsync.user.created",
+                user("directory_user_ANN", &o, "active", "Ann", "Lee"),
+            ),
+            event(
+                2,
+                "dsync.user.updated",
+                user("directory_user_ANN", &o, "active", "Ann", "Park"),
+            ),
+        ],
+    )
+    .await;
+    let t = tenant_of(&s, &o).await;
+    let ann = m("directory_user_ann");
+    assert_eq!(
+        published(&t),
+        [
+            Event::MemberCreated {
+                member: ann.clone(),
+                actor: Actor::Directory
+            },
+            Event::MemberUpdated {
+                member: ann,
+                actor: Actor::Directory
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn directory_removal_emits_member_removed_with_directory_actor() {
+    let _turn = SYNC.lock().await;
+    let s = app_store().await;
+    let o = org();
+    reset_cursor().await;
+    sync(
+        &s,
+        vec![
+            event(
+                1,
+                "dsync.user.created",
+                user("directory_user_ANN", &o, "active", "Ann", "Lee"),
+            ),
+            event(
+                2,
+                "dsync.user.deleted",
+                user("directory_user_ANN", &o, "inactive", "Ann", "Lee"),
+            ),
+            // Removing someone who is not a member (again, or never) records nothing.
+            event(
+                3,
+                "dsync.user.updated",
+                user("directory_user_ANN", &o, "suspended", "Ann", "Lee"),
+            ),
+            event(
+                4,
+                "dsync.user.deleted",
+                user("directory_user_ZED", &o, "inactive", "Zed", "Q"),
+            ),
+        ],
+    )
+    .await;
+    let t = tenant_of(&s, &o).await;
+    let ann = m("directory_user_ann");
+    assert_eq!(
+        published(&t),
+        [
+            Event::MemberCreated {
+                member: ann.clone(),
+                actor: Actor::Directory
+            },
+            Event::MemberRemoved {
+                member: ann,
+                actor: Actor::Directory
+            },
+        ]
     );
 }
