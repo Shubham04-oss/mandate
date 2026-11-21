@@ -30,7 +30,11 @@ mock_provider "aws" {
     defaults = { arn = "arn:aws:kms:ap-south-1:000000000000:key/mock" }
   }
 }
-mock_provider "awscc" {}
+mock_provider "awscc" {
+  mock_resource "awscc_eventsv2_event_bus" {
+    defaults = { event_bus_arn = "arn:aws:events:ap-south-1:000000000000:event-busv2/mandate-dev/abcdefghij0123456789abcde" }
+  }
+}
 mock_provider "cloudflare" {
   mock_data "cloudflare_ip_ranges" {
     defaults = {
@@ -100,6 +104,14 @@ override_resource {
 override_resource {
   target = aws_security_group.endpoints
   values = { id = "sg-endpoints" }
+}
+override_resource {
+  target = aws_sqs_queue.consumer["agent-resume"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-agent-resume.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.dead_letter["agent-resume"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-agent-resume-dlq.fifo" }
 }
 
 variables {
@@ -319,5 +331,54 @@ run "the_database_admits_only_the_tasks" {
       aws_security_group.core.id, aws_security_group.eve.id, aws_security_group.migrate.id,
     ])
     error_message = "Postgres from the core, eve and migrate only"
+  }
+}
+
+run "each_consumer_has_a_fifo_queue_with_a_dead_letter_queue" {
+  command = apply
+
+  assert {
+    condition     = keys(aws_sqs_queue.consumer) == ["agent-resume"] && alltrue([for q in aws_sqs_queue.consumer : q.fifo_queue && q.sqs_managed_sse_enabled])
+    error_message = "one encrypted FIFO queue per consumer, starting with agent-resume"
+  }
+  assert {
+    condition     = alltrue([for k, q in aws_sqs_queue.consumer : jsondecode(q.redrive_policy).deadLetterTargetArn == aws_sqs_queue.dead_letter[k].arn])
+    error_message = "every consumer queue redrives to its own dead-letter queue"
+  }
+  assert {
+    condition     = alltrue([for s in awscc_eventsv2_subscriber.consumer : s.type == "FIFO" && strcontains(s.invoke_configuration.sqs_parameters.message_group_id, "tenant")])
+    error_message = "FIFO delivery grouped by tenant, so each organization's events stay in order"
+  }
+  assert {
+    condition     = jsondecode(awscc_eventsv2_subscriber.consumer["agent-resume"].filter_configuration.filters[0].pattern).type == ["approval.decided.v1"]
+    error_message = "agent-resume receives approval.decided.v1 only"
+  }
+}
+
+run "the_core_may_publish_and_consume_and_nothing_more" {
+  command = apply
+
+  assert {
+    condition = jsondecode(aws_iam_role_policy.core_events.policy).Statement == [
+      {
+        Effect   = "Allow"
+        Action   = "events:PutEvents"
+        Resource = awscc_eventsv2_event_bus.main.event_bus_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]
+        Resource = [aws_sqs_queue.consumer["agent-resume"].arn]
+      },
+    ]
+    error_message = "the core publishes to its bus and reads its consumer queues; nothing else"
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role.subscriber.assume_role_policy).Statement[0].Principal.Service == "events.amazonaws.com"
+    error_message = "only EventBridge assumes the delivery role"
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role_policy.subscriber.policy).Statement[0].Resource == concat(values(aws_sqs_queue.consumer)[*].arn, values(aws_sqs_queue.dead_letter)[*].arn)
+    error_message = "the delivery role sends only to the consumer queues and their dead letters"
   }
 }

@@ -46,6 +46,9 @@ locals {
     MANDATE_READ_HOSTS = var.read_hosts
     MANDATE_WEB_ORIGIN = "https://app.${var.domain}"
     MANDATE_EVE_URL    = "http://eve.${local.internal}:3000"
+    MANDATE_EVENT_BUS  = awscc_eventsv2_event_bus.main.event_bus_arn
+    # One MANDATE_QUEUE_<NAME> per consumer (lane F's consumer kit).
+    MANDATE_QUEUE_AGENT_RESUME = aws_sqs_queue.consumer["agent-resume"].url
   }
   eve_environment = {
     PORT                   = "3000"
