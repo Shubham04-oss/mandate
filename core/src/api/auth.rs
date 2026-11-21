@@ -906,6 +906,8 @@ async fn reset(
         .confirm_password_reset(&b.token.0, &b.password.0)
         .await
     {
+        // ponytail: Mandate sessions outlive a reset (7 days at most); ending them needs the
+        // user's tenants from WorkOS.
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(AuthError::NotFound) => Err(AuthError::CodeInvalid.into()),
         Err(e) => Err(e.into()),
@@ -1221,20 +1223,13 @@ async fn insert_member(tx: &mut Tx, user: &AuthUser) -> Result<Option<MemberId>,
     Ok(created.map(|_| id))
 }
 
-/// The member's personal operator, created if they have none; a disabled one stays disabled.
+/// The member's personal operator, `op-<member>`, created if they have none; a disabled one
+/// stays disabled. The app role cannot insert agents: a narrow database function does it.
 async fn ensure_personal_agent(tx: &mut Tx, member: &MemberId) -> Result<(), StoreError> {
-    let id: String = format!("op-{member}").chars().take(64).collect();
-    sqlx::query(
-        "insert into agents (tenant_id, id, kind, owner_member) \
-         select current_setting('mandate.tenant'), $1, 'personal', $2 \
-         where not exists (select 1 from agents where tenant_id = current_setting('mandate.tenant', true) \
-           and kind = 'personal' and owner_member = $2) \
-         on conflict do nothing",
-    )
-    .bind(id)
-    .bind(member.as_str())
-    .execute(&mut **tx)
-    .await?;
+    sqlx::query("select ensure_personal_agent($1)")
+        .bind(member.as_str())
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 

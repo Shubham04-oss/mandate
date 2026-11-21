@@ -2309,3 +2309,60 @@ async fn removed_member_session_is_gone() {
     let r = h.get("/v1/me", Some(&cookie)).await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+#[ignore]
+async fn personal_operator_only_through_the_narrow_function() {
+    let store = app_store().await;
+    let (a, b) = (tenant(), tenant());
+    let ann = member("ann");
+    add_member(&store, &a, &ann, false).await;
+    let ensure = |t: TenantId, m: &'static str| {
+        let store = store.clone();
+        async move {
+            let mut tx = store.begin(&t).await.unwrap();
+            sqlx::query("select ensure_personal_agent($1)")
+                .bind(m)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    let operators = |t: TenantId| async move {
+        let rows: Vec<(String, String, bool)> = sqlx::query_as(
+            "select id, kind, disabled from agents where tenant_id = $1 order by id",
+        )
+        .bind(t.as_str())
+        .fetch_all(&common::admin_pool().await)
+        .await
+        .unwrap();
+        rows
+    };
+    // Not a member of the transaction's tenant: nothing, here or there.
+    ensure(b.clone(), "ann").await;
+    ensure(a.clone(), "bob").await;
+    assert!(operators(b.clone()).await.is_empty());
+    assert!(operators(a.clone()).await.is_empty());
+    // A member gets exactly one `op-<member>`, however often it runs.
+    ensure(a.clone(), "ann").await;
+    ensure(a.clone(), "ann").await;
+    assert_eq!(
+        operators(a.clone()).await,
+        vec![("op-ann".into(), "personal".into(), false)]
+    );
+    // A disabled operator stays disabled.
+    let mut tx = store.begin(&a).await.unwrap();
+    sqlx::query(
+        "update agents set disabled = true where tenant_id = current_setting('mandate.tenant')",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    ensure(a.clone(), "ann").await;
+    assert_eq!(
+        operators(a).await,
+        vec![("op-ann".into(), "personal".into(), true)]
+    );
+}

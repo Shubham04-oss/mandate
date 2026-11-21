@@ -16,8 +16,6 @@ grant usage on schema public to :"role";
 grant select, insert, update, delete on members, teams, team_members, approvals to :"role";
 -- Agents and grants are created by admins, not the app: it only disables agents and revokes grants.
 grant select, update on agents to :"role";
--- One exception: sign-in creates each member's personal operator (first sign-in, sign-up).
-grant insert on agents to :"role";
 grant select, delete on grants to :"role";
 -- Append-only: the app can never rewrite or erase history.
 grant select, insert on audit to :"role";
@@ -34,3 +32,5 @@ grant select, insert, update, delete on sessions to :"role";
 grant select, insert, delete on auth_pending to :"role";
 -- Sign-in rate counters (RLS-free, hashes only): upserted per attempt, old windows dropped.
 grant select, insert, update, delete on rate_limits to :"role";
+-- Sign-in gives a member their personal operator only through this narrow function.
+grant execute on function ensure_personal_agent(text) to :"role";
