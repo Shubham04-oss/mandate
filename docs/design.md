@@ -129,6 +129,11 @@ It holds no credentials and decides nothing about access:
   the model only sees allowed tools, but the core checks again on every execution.
 - It reaches tools only through the core's MCP server, with a short-lived run token the core issued.
 - Its workflow state lives in Aurora under its own schema.
+- It is never reachable from the internet. Only the core talks to it, over the private network, and
+  its route auth accepts only the core's signed assertion. eve has no per-session access list and no
+  tenant separation in its store, so the core alone maps a conversation to a session id, and only
+  within the caller's tenant. Per-tenant eve deployments are an enterprise option (same image, own
+  schema).
 - A bug in eve can break a conversation; it cannot widen access or leak a credential.
 
 ### 8.3 Data
@@ -184,7 +189,7 @@ in-process. SpiceDB was considered and dropped to remove a server and its datast
 ### 9.6 Client: web app first
 A PWA plus Slack and Teams. A Tauri desktop app later for local computer use and presence.
 
-## 10. Proposed answers awaiting the owner
+## 10. Decided by the owner (2026-11-21)
 
 1. **What brokering may reveal.** The owner approves the question and by default sees the final
    answer before it is sent. "Allow for an hour" grants one requester access to one source through
