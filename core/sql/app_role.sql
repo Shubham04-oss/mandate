@@ -32,3 +32,6 @@ grant update (sent_at) on outbox to :"role";
 grant usage on sequence outbox_seq_seq to :"role";
 -- Append-only: who joined and left is never rewritten.
 grant select, insert on lifecycle_log to :"role";
+-- RLS-free consumer bookkeeping: the core only records; `on conflict do nothing` needs no SELECT.
+grant insert on events_inbox, events_quarantine to :"role";
+grant usage on sequence events_quarantine_id_seq to :"role";

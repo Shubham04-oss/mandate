@@ -1,7 +1,12 @@
 //! Core events: a versioned envelope, written to the outbox in the caller's transaction and
 //! signed when it is sent. `data` carries ids only, never text, arguments, emails or tokens.
+pub mod consume;
+pub mod publisher;
+pub mod run;
 pub mod sign;
 
+pub use consume::{Consumer, Handler, HandlerError, consumer};
+pub use run::start;
 
 use crate::ids::{AgentId, MemberId, TenantId};
 use crate::store::{StoreError, Tx};

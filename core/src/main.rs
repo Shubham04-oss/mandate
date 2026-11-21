@@ -145,6 +145,8 @@ async fn serve() -> Result<()> {
     let store = Store::connect(&env("DATABASE_URL")?).await?;
 
     let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    // No consumers yet; lane D registers the approval resume here.
+    let events = mandate::events::start(&store, &aws, vec![]).await?;
     let backend: Arc<dyn BrowserBackend> = Arc::new(AgentCoreBrowser::new(&aws, browser_id));
     let hosts = read_hosts(&std::env::var("MANDATE_READ_HOSTS").unwrap_or_default());
     let catalog = Catalog::new(vec![
@@ -186,6 +188,8 @@ async fn serve() -> Result<()> {
     if let Some(sync) = sync {
         sync.abort();
     }
+    // Unsent rows stay in the outbox and unhandled messages in their queue.
+    events.iter().for_each(|t| t.abort());
     served?;
     tracing::info!("stopped");
     Ok(())

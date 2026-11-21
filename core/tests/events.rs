@@ -253,3 +253,236 @@ async fn app_role_cannot_edit_lifecycle_log() {
         assert_eq!(code.as_deref(), Some("42501"), "{sql}: {err}");
     }
 }
+
+#[tokio::test]
+#[ignore]
+async fn publisher_sends_in_order_per_tenant() {
+    let _one = PUBLISHER.lock().await;
+    let store = app_store().await;
+    let signer = Signer::new(Source::core(), key());
+    let (a, b) = (tenant(), tenant());
+    // Interleaved across tenants and transactions.
+    for (t, n) in [(&a, 1), (&b, 101), (&a, 2), (&b, 102), (&a, 3)] {
+        publish_one(&store, t, started(n)).await;
+    }
+    let sink = Recording::default();
+    drain(&store, &signer, &sink).await;
+
+    let keys = keys_for(&signer);
+    let sent = sink.0.lock().unwrap().clone();
+    for (t, want) in [(&a, vec![1u128, 2, 3]), (&b, vec![101, 102])] {
+        let got: Vec<u128> = sent
+            .iter()
+            .filter(|s| &s.envelope.tenant == t)
+            .map(|s| {
+                // What went out verifies, and is exactly the stored event.
+                let raw = serde_json::to_vec(s).unwrap();
+                let env = keys.verify(&raw, OffsetDateTime::now_utc()).unwrap();
+                match Event::from_envelope(&env).unwrap() {
+                    Event::ConversationStarted { conversation } => conversation.as_u128(),
+                    other => panic!("{other:?}"),
+                }
+            })
+            .collect();
+        assert_eq!(got, want);
+        assert_eq!(
+            count(
+                &store,
+                t,
+                "select count(*) from outbox where sent_at is null"
+            )
+            .await,
+            0
+        );
+    }
+    // Nothing left: a second round sends nothing again.
+    let again = Recording::default();
+    drain(&store, &signer, &again).await;
+    assert!(
+        again
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|s| s.envelope.tenant != a && s.envelope.tenant != b)
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn failed_send_keeps_rows_unsent() {
+    let _one = PUBLISHER.lock().await;
+    let store = app_store().await;
+    let signer = Signer::new(Source::core(), key());
+    let t = tenant();
+    publish_one(&store, &t, started(7)).await;
+    assert!(publish_pending(&store, &signer, &Failing).await.is_err());
+    assert_eq!(
+        count(
+            &store,
+            &t,
+            "select count(*) from outbox where sent_at is null"
+        )
+        .await,
+        1
+    );
+    let sink = Recording::default();
+    drain(&store, &signer, &sink).await;
+    assert_eq!(
+        sink.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.envelope.tenant == t)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn in_process_delivery_reaches_the_handler() {
+    let _one = PUBLISHER.lock().await;
+    let store = app_store().await;
+    let signer = Signer::new(Source::core(), key());
+    let t = tenant();
+    let h = Counting::default();
+    let sink = InProcessSink::new(
+        store.clone(),
+        keys_for(&signer),
+        vec![Arc::new(consumer(unique("inproc"), h.clone()))],
+    );
+    publish_one(&store, &t, started(5)).await;
+    drain(&store, &signer, &sink).await;
+    let seen = h.seen.lock().unwrap().clone();
+    let mine: Vec<_> = seen.iter().filter(|e| e.tenant == t).collect();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(Event::from_envelope(mine[0]).unwrap(), started(5));
+}
+
+#[tokio::test]
+#[ignore]
+async fn replayed_event_is_skipped() {
+    let store = app_store().await;
+    let signer = Signer::new(Source::core(), key());
+    let keys = keys_for(&signer);
+    let t = tenant();
+    let h = Counting::default();
+    let c = consumer(unique("replay"), h.clone());
+    let raw = signed(&signer, &t, &started(1));
+    let now = OffsetDateTime::now_utc();
+    assert_eq!(c.process(&store, &keys, &raw, now).await, Outcome::Handled);
+    assert_eq!(c.process(&store, &keys, &raw, now).await, Outcome::Skipped);
+    // The same event wrapped as an EventBridge delivery is still the same event.
+    let wrapped = serde_json::to_vec(&serde_json::json!({
+        "detail-type": "conversation.started.v1",
+        "detail": serde_json::from_slice::<serde_json::Value>(&raw).unwrap(),
+    }))
+    .unwrap();
+    assert_eq!(
+        c.process(&store, &keys, &wrapped, now).await,
+        Outcome::Skipped
+    );
+    // Concurrent duplicate deliveries: exactly one handles it.
+    let raw2 = signed(&signer, &t, &started(2));
+    let (x, y) = tokio::join!(
+        c.process(&store, &keys, &raw2, now),
+        c.process(&store, &keys, &raw2, now)
+    );
+    let mut got = [x, y];
+    got.sort_by_key(|o| *o == Outcome::Skipped);
+    assert_eq!(got, [Outcome::Handled, Outcome::Skipped]);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+    // Another consumer keeps its own inbox.
+    let other = consumer(unique("replay-other"), h.clone());
+    assert_eq!(
+        other.process(&store, &keys, &raw, now).await,
+        Outcome::Handled
+    );
+}
+
+async fn quarantined(name: &str) -> Vec<String> {
+    // The app role may only insert there; read as the superuser.
+    sqlx::query_scalar("select reason from events_quarantine where consumer = $1 order by id")
+        .bind(name)
+        .fetch_all(&common::admin_pool().await)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn bad_signature_is_quarantined() {
+    let store = app_store().await;
+    let signer = Signer::new(Source::core(), key());
+    let keys = keys_for(&signer);
+    let t = tenant();
+    let h = Counting::default();
+    let name = unique("forged");
+    let c = consumer(name, h.clone());
+    let now = OffsetDateTime::now_utc();
+
+    let good: serde_json::Value =
+        serde_json::from_slice(&signed(&signer, &t, &started(1))).unwrap();
+    let mut tampered = good.clone();
+    tampered["tenant"] = tenant().as_str().into();
+    let mut unsigned = good.clone();
+    unsigned.as_object_mut().unwrap().remove("signature");
+    let stranger = Signer::new(Source::core(), key());
+    let foreign: serde_json::Value =
+        serde_json::from_slice(&signed(&stranger, &t, &started(1))).unwrap();
+    for bad in [tampered, unsigned, foreign] {
+        let raw = serde_json::to_vec(&bad).unwrap();
+        assert_eq!(
+            c.process(&store, &keys, &raw, now).await,
+            Outcome::Quarantined
+        );
+    }
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        quarantined(name).await,
+        vec!["bad signature", "unsigned", "unknown key"]
+    );
+    // A forged copy marked nothing: the genuine event is still handled.
+    let raw = serde_json::to_vec(&good).unwrap();
+    assert_eq!(c.process(&store, &keys, &raw, now).await, Outcome::Handled);
+}
+
+#[tokio::test]
+#[ignore]
+async fn undecodable_message_is_quarantined() {
+    let store = app_store().await;
+    let signer = Signer::new(Source::core(), key());
+    let keys = keys_for(&signer);
+    let h = Counting::default();
+    let name = unique("garbage");
+    let c = consumer(name, h.clone());
+    let now = OffsetDateTime::now_utc();
+    for raw in [&b"not json"[..], b"{\"detail\": 5}", b"[]"] {
+        assert_eq!(
+            c.process(&store, &keys, raw, now).await,
+            Outcome::Quarantined
+        );
+    }
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(quarantined(name).await.len(), 3);
+}
+
+#[tokio::test]
+#[ignore]
+async fn handler_failure_retries() {
+    let store = app_store().await;
+    let signer = Signer::new(Source::core(), key());
+    let keys = keys_for(&signer);
+    let t = tenant();
+    let h = Counting::default();
+    h.fail.store(1, Ordering::SeqCst);
+    let c = consumer(unique("retry"), h.clone());
+    let raw = signed(&signer, &t, &started(1));
+    let now = OffsetDateTime::now_utc();
+    // The failed attempt rolled back its inbox row, so the redelivery is handled.
+    assert_eq!(c.process(&store, &keys, &raw, now).await, Outcome::Failed);
+    assert_eq!(c.process(&store, &keys, &raw, now).await, Outcome::Handled);
+    assert_eq!(c.process(&store, &keys, &raw, now).await, Outcome::Skipped);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+}
