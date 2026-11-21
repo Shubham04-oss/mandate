@@ -21,3 +21,9 @@ locals {
     managed_by = "opentofu"
   }
 }
+
+# Needs a version with auto-pause (min capacity 0); check `aws rds describe-db-engine-versions`.
+variable "aurora_engine_version" {
+  type    = string
+  default = "17.5"
+}
