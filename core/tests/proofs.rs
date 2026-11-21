@@ -37,11 +37,16 @@ fn platform() -> PolicySet {
     src.parse().unwrap()
 }
 
+/// With REQUIRE_PROOFS=1 (CI) a missing cvc5 fails the proof instead of skipping it.
 fn cvc5_missing() -> bool {
     let bin = std::env::var("CVC5").unwrap_or_else(|_| "cvc5".into());
     if Command::new(bin).arg("--version").output().is_ok() {
         return false;
     }
+    assert!(
+        std::env::var("REQUIRE_PROOFS").as_deref() != Ok("1"),
+        "cvc5 not on PATH and REQUIRE_PROOFS=1"
+    );
     eprintln!("cvc5 not on PATH; skipping policy proof (see docs/policy-proofs.md)");
     true
 }
@@ -51,12 +56,19 @@ async fn counterexamples(policies: &PolicySet, property: &str, actions: &[&str])
     let schema = schema();
     let compiled_schema = CompiledSchema::new(&schema).unwrap();
     let property: PolicySet = property.parse().unwrap();
+    let envs: Vec<_> = schema
+        .request_envs()
+        .filter(|env| actions.contains(&env.action().id().unescaped()))
+        .collect();
+    for a in actions {
+        assert!(
+            envs.iter().any(|env| env.action().id().unescaped() == *a),
+            "action {a} matches no request environment in the schema"
+        );
+    }
     let mut symcc = CedarSymCompiler::new(LocalSolver::cvc5().unwrap()).unwrap();
     let mut found = Vec::new();
-    for env in schema.request_envs() {
-        if !actions.iter().any(|a| env.action().id().unescaped() == *a) {
-            continue;
-        }
+    for env in envs {
         let allowed = CompiledPolicySet::compile(policies, &env, &compiled_schema).unwrap();
         let wanted = CompiledPolicySet::compile(&property, &env, &compiled_schema).unwrap();
         if let Some(cex) = symcc
@@ -122,4 +134,16 @@ async fn removing_the_forbid_breaks_proof_one() {
     .await;
     assert!(!cex.is_empty(), "proof 1 held without the forbid");
     eprintln!("expected counterexample:\n{}", cex.join("\n"));
+}
+
+// A renamed or misspelled action must fail the proof, not pass it vacuously. Needs no solver.
+#[tokio::test]
+#[should_panic(expected = "matches no request environment")]
+async fn an_unknown_action_fails_the_proof() {
+    counterexamples(
+        &platform(),
+        NOTHING_WITHOUT_GRANT,
+        &["invoke", "invoke_renamed"],
+    )
+    .await;
 }
