@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod agents;
 pub mod approvals;
+pub mod grants;
 pub mod org;
 pub mod stubs;
 
@@ -14,6 +15,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .merge(approvals::routes())
         .merge(activity::routes())
         .merge(agents::routes())
+        .merge(grants::routes())
         .merge(org::routes())
         .with_state(state)
 }

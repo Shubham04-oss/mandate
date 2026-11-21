@@ -90,6 +90,12 @@ pub enum Event {
         decision: Decision,
         by: MemberId,
     },
+    GrantCreated {
+        grant: Uuid,
+    },
+    GrantRevoked {
+        grant: Uuid,
+    },
     MemberCreated {
         member: MemberId,
         actor: Actor,

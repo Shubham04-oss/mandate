@@ -388,7 +388,7 @@ async fn approval_details_show_the_exact_args_to_the_tenant_only() {
 
 #[tokio::test]
 #[ignore]
-async fn app_role_cannot_insert_agents_or_grants() {
+async fn app_role_cannot_insert_team_agents_or_rewrite_grants() {
     let s = app_store().await;
     let t = tenant();
     let refused = |q: &'static str| {
@@ -403,11 +403,10 @@ async fn app_role_cannot_insert_agents_or_grants() {
                 .to_string()
         }
     };
-    let err = refused(
-        "insert into grants (tenant_id, principal_kind, principal_id, tool, standing, expires_at, granted_by) \
-         values ($1, 'agent', 'bot', 'mail.send', true, now() + interval '1 hour', 'admin')",
-    )
-    .await;
+    // Grants are created (by admins, through the API) and revoked, never rewritten.
+    let err =
+        refused("update grants set expires_at = now() + interval '1 year' where tenant_id = $1")
+            .await;
     assert!(err.contains("permission denied"), "{err}");
     // The only agent the app may create is a personal operator of an existing member.
     for q in [
