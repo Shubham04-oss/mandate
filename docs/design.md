@@ -115,9 +115,11 @@ Owns every decision and every credential path. Modes of one binary (`mandate ser
   passes that assertion back on every tool call and approval; the core rejects anything without a
   valid one. The web app signs in through the core (OIDC with the org's identity provider). So a
   broken eve cannot forge who asked, who approved, or which tenant a run belongs to.
-- **Authentication: WorkOS** (official Rust SDK, `workos` crate). People sign in through AuthKit;
-  enterprise SSO is set up by the customer's IT in WorkOS's admin portal. A WorkOS organization is a
-  tenant. Directory sync (SCIM) feeds members, teams and team membership, pulled from the WorkOS
+- **Authentication: WorkOS** (official Rust SDK, `workos` crate). People sign in on our own screens,
+  built on AuthKit's headless User Management API: the browser sends what they type to the core,
+  which calls WorkOS, so the web app holds no WorkOS key and decides nothing. Enterprise SSO is
+  set up by the customer's IT in WorkOS's admin portal. A WorkOS organization is a tenant.
+  Directory sync (SCIM) feeds members, teams and team membership, pulled from the WorkOS
   Events API (no inbound webhook endpoint); a user removed from the directory loses their grants and
   pending approvals at once. The core verifies WorkOS access tokens against WorkOS's published keys,
   then mints its own assertion: WorkOS proves the person, Mandate decides access. Slack and Teams
