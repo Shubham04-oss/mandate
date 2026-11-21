@@ -297,24 +297,33 @@ pub async fn delete_team(tx: &mut Tx, team: &TeamId) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Leaving also drops the unspent approvals the member asked for or gave on the team's agents.
 pub async fn set_team_member(
     tx: &mut Tx,
     team: &TeamId,
     member: &MemberId,
     present: bool,
 ) -> Result<(), StoreError> {
-    let q = if present {
-        "insert into team_members (tenant_id, team_id, member_id) \
-         values (current_setting('mandate.tenant'), $1, $2) on conflict do nothing"
+    let qs: &[&str] = if present {
+        &["insert into team_members (tenant_id, team_id, member_id) \
+           values (current_setting('mandate.tenant'), $1, $2) on conflict do nothing"]
     } else {
-        "delete from team_members where tenant_id = current_setting('mandate.tenant', true) \
-         and team_id = $1 and member_id = $2"
+        &[
+            "delete from team_members where tenant_id = current_setting('mandate.tenant', true) \
+             and team_id = $1 and member_id = $2",
+            "delete from approvals where tenant_id = current_setting('mandate.tenant', true) \
+             and used_at is null and (requested_by = $2 or approved_by = $2) \
+             and agent in (select id from agents where tenant_id = current_setting('mandate.tenant', true) \
+               and owner_team = $1)",
+        ]
     };
-    sqlx::query(q)
-        .bind(team.as_str())
-        .bind(member.as_str())
-        .execute(&mut **tx)
-        .await?;
+    for &q in qs {
+        sqlx::query(q)
+            .bind(team.as_str())
+            .bind(member.as_str())
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
 }
 
@@ -406,7 +415,8 @@ pub async fn live_grant(
 }
 
 /// Single use, and only by the member who asked: the UPDATE spends the row atomically, so
-/// concurrent callers cannot both win. Returns the spent approval and who gave it.
+/// concurrent callers cannot both win. The approver must still be allowed to use the agent
+/// (the `may_use_agent` rule). Returns the spent approval and who gave it.
 pub async fn consume_approval(
     tx: &mut Tx,
     agent: &AgentId,
@@ -417,9 +427,14 @@ pub async fn consume_approval(
 ) -> Result<Option<(Uuid, MemberId)>, StoreError> {
     let r: Option<(Uuid, String)> = sqlx::query_as(
         "update approvals set used_at = $4 where tenant_id = current_setting('mandate.tenant', true) and id = ( \
-           select id from approvals where agent = $1 and tool = $2 and args_hash = $3 and tenant_id = current_setting('mandate.tenant', true) \
-           and requested_by = $5 and approved_by is not null and used_at is null and expires_at > $4 \
-           limit 1 for update skip locked) \
+           select a.id from approvals a where a.agent = $1 and a.tool = $2 and a.args_hash = $3 and a.tenant_id = current_setting('mandate.tenant', true) \
+           and a.requested_by = $5 and a.approved_by is not null and a.used_at is null and a.expires_at > $4 \
+           and exists (select 1 from agents g where g.id = a.agent and not g.disabled \
+             and g.tenant_id = current_setting('mandate.tenant', true) \
+             and (g.owner_member = a.approved_by or exists (select 1 from team_members tm \
+               where tm.tenant_id = current_setting('mandate.tenant', true) \
+               and tm.team_id = g.owner_team and tm.member_id = a.approved_by))) \
+           limit 1 for update of a skip locked) \
          returning id, approved_by",
     )
     .bind(agent.as_str())

@@ -405,3 +405,70 @@ async fn app_role_cannot_insert_agents_or_grants() {
         assert!(err.to_string().contains("permission denied"), "{q}: {err}");
     }
 }
+
+#[tokio::test]
+#[ignore]
+async fn leaving_a_team_drops_your_unspent_approvals() {
+    let s = app_store().await;
+    let t = tenant();
+    let now = OffsetDateTime::now_utc();
+    for (id, team) in [("opsbot", "ops"), ("devbot", "dev")] {
+        seed(
+            &t,
+            "insert into agents (tenant_id, id, kind, owner_team) values ($1, $2, 'team', $3)",
+            &[id, team],
+        )
+        .await;
+    }
+    let mut tx = s.begin(&t).await.unwrap();
+    exec(
+        &mut tx,
+        &t,
+        "insert into team_members (tenant_id, team_id, member_id) values ($1, 'ops', 'ann'), ($1, 'ops', 'bob'), ($1, 'dev', 'ann')",
+        &[],
+    )
+    .await;
+    // (agent, requested_by, approved_by, spent)
+    let rows = [
+        ("opsbot", "ann", None, false),        // she asked: dropped
+        ("opsbot", "bob", Some("ann"), false), // she approved: dropped
+        ("opsbot", "bob", None, false),        // not hers: stays
+        ("opsbot", "ann", Some("bob"), true),  // spent, history: stays
+        ("devbot", "ann", None, false),        // another team's agent: stays
+    ];
+    let mut ids = Vec::new();
+    for (i, (a, req, appr, spent)) in rows.iter().enumerate() {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "insert into approvals (tenant_id, id, agent, tool, args, args_hash, requested_by, approved_by, expires_at, used_at) \
+             values ($1, $2, $3, 'mail.send', '{}', $4, $5, $6, $7, $8)",
+        )
+        .bind(t.as_str())
+        .bind(id)
+        .bind(*a)
+        .bind(vec![i as u8; 32])
+        .bind(*req)
+        .bind(*appr)
+        .bind(now + Duration::hours(1))
+        .bind(spent.then_some(now))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    store::set_team_member(&mut tx, &store_team("ops"), &member("ann"), false)
+        .await
+        .unwrap();
+    let mut left: Vec<Uuid> = sqlx::query_scalar("select id from approvals")
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+    left.sort();
+    let mut want = vec![ids[2], ids[3], ids[4]];
+    want.sort();
+    assert_eq!(left, want);
+}
+
+fn store_team(s: &str) -> mandate::ids::TeamId {
+    mandate::ids::TeamId::parse(s).unwrap()
+}

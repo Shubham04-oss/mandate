@@ -412,3 +412,51 @@ async fn approval_covers_only_its_exact_args() {
         Outcome::Run
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn approval_dies_with_approver_membership() {
+    let s = app_store().await;
+    let t = tenant();
+    seed_team(&t, "mail.send").await;
+    let (p, w, tl, now) = (
+        policy(),
+        as_member(&t, "ann"),
+        tool("mail.send"),
+        OffsetDateTime::now_utc(),
+    );
+    let args = json!({"to": "a@b.c"});
+    let ask = || async {
+        match authorize(&s, &p, &w, &tl, Effect::External, &args, now).await {
+            Outcome::Ask { approval } => approval,
+            o => panic!("expected ask, got {o:?}"),
+        }
+    };
+    let ops = mandate::ids::TeamId::parse("ops").unwrap();
+    let bob = MemberId::parse("bob").unwrap();
+    let set_bob = |present| {
+        let (s, t, ops, bob) = (&s, &t, &ops, &bob);
+        async move {
+            let mut tx = s.begin(t).await.unwrap();
+            store::set_team_member(&mut tx, ops, bob, present)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+
+    // Bob approves, then leaves the team: his approval no longer lets Ann run.
+    approve_as(&s, &t, ask().await, "bob").await;
+    set_bob(false).await;
+    ask().await;
+
+    // Even if his membership goes some other way, spending checks he is still allowed.
+    set_bob(true).await;
+    approve_as(&s, &t, ask().await, "bob").await;
+    sqlx::query("delete from team_members where tenant_id = $1 and member_id = 'bob'")
+        .bind(t.as_str())
+        .execute(&admin_pool().await)
+        .await
+        .unwrap();
+    ask().await;
+}
