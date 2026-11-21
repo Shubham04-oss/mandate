@@ -1,7 +1,7 @@
 //! WorkOS proves who a person is; Mandate exchanges that for its own short-lived assertion and
 //! mirrors the customer's directory, so a person removed there loses access on the next sync.
 use crate::assertion::{Assertion, TTL_SECS, sign};
-use crate::ids::{AgentId, MemberId, SpaceId, TeamId, TenantId};
+use crate::ids::{AgentId, IdError, MemberId, SpaceId, TeamId, TenantId};
 use crate::mcp::AppState;
 use crate::store::{self, Store, StoreError};
 use async_trait::async_trait;
@@ -14,6 +14,7 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -395,12 +396,40 @@ struct DirUser {
     state: String,
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+}
+
+impl DirUser {
+    /// `None` when the directory gives no name, so a stored one is kept.
+    fn name(&self) -> Option<String> {
+        let parts = [&self.first_name, &self.last_name];
+        display_name(
+            &parts
+                .iter()
+                .filter_map(|p| p.as_deref())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
 }
 
 #[derive(Deserialize)]
 struct DirGroup {
     id: String,
     organization_id: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+const MAX_NAME_CHARS: usize = 200;
+
+/// Trimmed and capped; `None` if empty. Names are shown, never used for access.
+fn display_name(s: &str) -> Option<String> {
+    let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!s.is_empty()).then(|| s.chars().take(MAX_NAME_CHARS).collect())
 }
 
 #[derive(Deserialize)]
@@ -416,20 +445,24 @@ enum Change {
         directory_user: String,
         email: Option<String>,
         workos_user: Option<String>,
+        name: Option<String>,
     },
     RemoveMember(MemberId),
     Team {
         id: TeamId,
         group: String,
+        name: Option<String>,
     },
     RemoveTeam(TeamId),
     Join {
         team: TeamId,
         group: String,
+        team_name: Option<String>,
         member: MemberId,
         directory_user: String,
         email: Option<String>,
         workos_user: Option<String>,
+        name: Option<String>,
     },
     Leave {
         team: TeamId,
@@ -538,6 +571,7 @@ async fn prepare(
                 let workos_user = link(users, u.email.as_deref(), &u.organization_id, e).await;
                 Change::Member {
                     id,
+                    name: u.name(),
                     directory_user: u.id,
                     email: u.email,
                     workos_user,
@@ -551,7 +585,11 @@ async fn prepare(
             let change = if kind == "dsync.group.deleted" {
                 Change::RemoveTeam(id)
             } else {
-                Change::Team { id, group: g.id }
+                Change::Team {
+                    id,
+                    name: g.name.as_deref().and_then(display_name),
+                    group: g.id,
+                }
             };
             (g.organization_id, change)
         }
@@ -571,8 +609,10 @@ async fn prepare(
             } else if user.state == "active" {
                 Change::Join {
                     team,
+                    team_name: group.name.as_deref().and_then(display_name),
                     group: group.id,
                     member,
+                    name: user.name(),
                     workos_user: link(users, user.email.as_deref(), &org, e).await,
                     directory_user: user.id,
                     email: user.email,
@@ -597,6 +637,68 @@ async fn prepare(
     Ok(Some((tenant, change)))
 }
 
+const OPERATOR_NAME: &str = "Personal agent";
+
+/// A member's personal operator id, derived from the member's so sync and sign-in agree.
+pub fn personal_operator_id(member: &MemberId) -> Result<AgentId, IdError> {
+    let hash = Sha256::digest(member.as_str().as_bytes());
+    let hex: String = hash.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    AgentId::parse(&format!("op-{hex}"))
+}
+
+/// Creates the member's personal operator, or re-enables it for a member who is back. Never
+/// takes over an agent with the same id that is not this member's personal one.
+pub async fn ensure_personal_operator(
+    tx: &mut store::Tx,
+    member: &MemberId,
+) -> Result<AgentId, StoreError> {
+    let id = personal_operator_id(member)?;
+    sqlx::query(
+        "insert into agents (tenant_id, id, kind, owner_member, name) \
+         values (current_setting('mandate.tenant'), $1, 'personal', $2, $3) \
+         on conflict (tenant_id, id) do update set disabled = false \
+         where agents.tenant_id = current_setting('mandate.tenant', true) \
+         and agents.kind = 'personal' and agents.owner_member = excluded.owner_member",
+    )
+    .bind(id.as_str())
+    .bind(member.as_str())
+    .bind(OPERATOR_NAME)
+    .execute(&mut **tx)
+    .await?;
+    Ok(id)
+}
+
+/// Which table a directory name belongs to.
+#[derive(Clone, Copy)]
+enum Named {
+    Member,
+    Team,
+}
+
+/// `None` keeps the stored name: an event without one must not erase it.
+async fn set_name(
+    tx: &mut store::Tx,
+    what: Named,
+    id: &str,
+    name: Option<&str>,
+) -> Result<(), StoreError> {
+    let Some(name) = name else { return Ok(()) };
+    let q = match what {
+        Named::Member => {
+            "update members set name = $2 where tenant_id = current_setting('mandate.tenant', true) and id = $1"
+        }
+        Named::Team => {
+            "update teams set name = $2 where tenant_id = current_setting('mandate.tenant', true) and id = $1"
+        }
+    };
+    sqlx::query(q)
+        .bind(id)
+        .bind(name)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// One event, one transaction: the change and the cursor commit together or not at all.
 /// False if another runner already passed this event.
 async fn apply(
@@ -615,6 +717,7 @@ async fn apply(
             directory_user,
             email,
             workos_user,
+            name,
         } => {
             store::upsert_member(
                 &mut tx,
@@ -623,18 +726,25 @@ async fn apply(
                 email.as_deref(),
                 workos_user.as_deref(),
             )
-            .await?
+            .await?;
+            set_name(&mut tx, Named::Member, id.as_str(), name.as_deref()).await?;
+            ensure_personal_operator(&mut tx, &id).await?;
         }
         Change::RemoveMember(id) => store::remove_member(&mut tx, &id).await?,
-        Change::Team { id, group } => store::upsert_team(&mut tx, &id, &group).await?,
+        Change::Team { id, group, name } => {
+            store::upsert_team(&mut tx, &id, &group).await?;
+            set_name(&mut tx, Named::Team, id.as_str(), name.as_deref()).await?;
+        }
         Change::RemoveTeam(id) => store::delete_team(&mut tx, &id).await?,
         Change::Join {
             team,
             group,
+            team_name,
             member,
             directory_user,
             email,
             workos_user,
+            name,
         } => {
             store::upsert_member(
                 &mut tx,
@@ -644,7 +754,10 @@ async fn apply(
                 workos_user.as_deref(),
             )
             .await?;
+            set_name(&mut tx, Named::Member, member.as_str(), name.as_deref()).await?;
+            ensure_personal_operator(&mut tx, &member).await?;
             store::upsert_team(&mut tx, &team, &group).await?;
+            set_name(&mut tx, Named::Team, team.as_str(), team_name.as_deref()).await?;
             store::set_team_member(&mut tx, &team, &member, true).await?;
         }
         Change::Leave { team, member } => {

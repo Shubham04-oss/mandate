@@ -14,8 +14,14 @@ grant usage on schema public to :"role";
 
 -- Tenant tables (RLS forced), each with only what the core does to it.
 grant select, insert, update, delete on members, teams, team_members, approvals to :"role";
--- Agents and grants are created by admins, not the app: it only disables agents and revokes grants.
-grant select, update on agents to :"role";
+-- Grants are created by admins, not the app: it only revokes them.
+-- Agents: the app disables them and creates each member's personal operator (directory sync,
+-- first sign-in); the restrictive policy keeps app-made agents to exactly that.
+grant select, insert, update on agents to :"role";
+drop policy if exists app_creates_only_personal_operators on agents;
+create policy app_creates_only_personal_operators on agents as restrictive for insert to :"role"
+  with check (kind = 'personal' and exists (select 1 from members m
+    where m.tenant_id = agents.tenant_id and m.id = agents.owner_member));
 grant select, delete on grants to :"role";
 -- Append-only: the app can never rewrite or erase history.
 grant select, insert on audit to :"role";

@@ -391,18 +391,31 @@ async fn approval_details_show_the_exact_args_to_the_tenant_only() {
 async fn app_role_cannot_insert_agents_or_grants() {
     let s = app_store().await;
     let t = tenant();
-    for q in [
-        "insert into agents (tenant_id, id, kind, owner_member) values ($1, 'bot', 'personal', 'ann')",
+    let refused = |q: &'static str| {
+        let (s, t) = (s.clone(), t.clone());
+        async move {
+            let mut tx = s.begin(&t).await.unwrap();
+            sqlx::query(q)
+                .bind(t.as_str())
+                .execute(&mut *tx)
+                .await
+                .unwrap_err()
+                .to_string()
+        }
+    };
+    let err = refused(
         "insert into grants (tenant_id, principal_kind, principal_id, tool, standing, expires_at, granted_by) \
          values ($1, 'agent', 'bot', 'mail.send', true, now() + interval '1 hour', 'admin')",
+    )
+    .await;
+    assert!(err.contains("permission denied"), "{err}");
+    // The only agent the app may create is a personal operator of an existing member.
+    for q in [
+        "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'bot', 'team', 'eng')",
+        "insert into agents (tenant_id, id, kind, owner_member) values ($1, 'bot', 'personal', 'ann')",
     ] {
-        let mut tx = s.begin(&t).await.unwrap();
-        let err = sqlx::query(q)
-            .bind(t.as_str())
-            .execute(&mut *tx)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("permission denied"), "{q}: {err}");
+        let err = refused(q).await;
+        assert!(err.contains("row-level security"), "{q}: {err}");
     }
 }
 
