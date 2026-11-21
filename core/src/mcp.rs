@@ -169,6 +169,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         Arc::new(NeverSessionManager::default()),
         config,
     );
+    let api = crate::api::router(state.clone());
     let exchange = axum::Router::new()
         .route("/v1/assertions", axum::routing::post(exchange))
         .with_state(state.clone());
@@ -176,6 +177,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .nest_service("/mcp", mcp)
         .layer(middleware::from_fn_with_state(state, bearer))
         .merge(exchange)
+        .merge(api)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

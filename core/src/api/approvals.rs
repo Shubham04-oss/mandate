@@ -1,10 +1,18 @@
 //! The approvals inbox. A decision is one conditional UPDATE, so of two people deciding at once
 //! exactly one wins and the other gets 409.
-use crate::api::stubs::{self, Event};
+use crate::api::agents::{AGENT_COLS, AGENT_JOINS, agent_view};
+use crate::api::org::{PAGE, bounded, person, ts};
+use crate::api::stubs::{self, ApiError, Event, Session};
 use crate::ids::{AgentId, MemberId, ToolId};
+use crate::mcp::AppState;
 use crate::store::{StoreError, Tx};
+use axum::Json;
+use axum::extract::{Path, Query, State as Ax};
+use axum::routing::{get, post};
+use serde::Deserialize;
 use serde_json::Value;
 use sqlx::Row;
+use std::sync::Arc;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -187,4 +195,192 @@ pub async fn load(
         decided_at: at,
         conversation: r.try_get("conversation")?,
     }))
+}
+
+pub fn routes() -> axum::Router<Arc<AppState>> {
+    axum::Router::new()
+        .route("/v1/approvals", get(list))
+        .route("/v1/approvals/{id}/approve", post(approve))
+        .route("/v1/approvals/{id}/deny", post(deny))
+}
+
+/// Everything the `Approval` shape needs, for the approvals `a` the caller may see.
+fn view_sql(filter: &str) -> String {
+    format!(
+        "select a.id, a.agent, a.tool, a.args, a.requested_by, a.requested_at, a.expires_at, \
+         a.approved_by, a.denied_by, a.used_at, coalesce(a.approved_at, a.denied_at) as decided_at, \
+         rm.name as rm_name, rm.email as rm_email, dm.name as dm_name, dm.email as dm_email, \
+         {MAY_DECIDE} as may_decide, {AGENT_COLS} \
+         from approvals a \
+         left join agents g on g.tenant_id = a.tenant_id and g.id = a.agent {AGENT_JOINS} \
+         left join members rm on rm.tenant_id = a.tenant_id and rm.id = a.requested_by \
+         left join members dm on dm.tenant_id = a.tenant_id and dm.id = coalesce(a.approved_by, a.denied_by) \
+         where a.tenant_id = current_setting('mandate.tenant', true) \
+         and (a.requested_by = $2 or {MAY_DECIDE}) and {filter}"
+    )
+}
+
+fn view(s: &AppState, r: &sqlx::postgres::PgRow, now: OffsetDateTime) -> Result<Value, ApiError> {
+    let row = |e: sqlx::Error| ApiError::from(StoreError::from(e));
+    let state = state_of(r, now).map_err(row)?;
+    let agent: String = r.try_get("agent").map_err(row)?;
+    let tool: String = r.try_get("tool").map_err(row)?;
+    let args = r
+        .try_get::<sqlx::types::Json<Value>, _>("args")
+        .map_err(row)?
+        .0;
+    // The effect of these exact args, as the gate judged them; `null` for a tool no longer served.
+    let effect = ToolId::parse(&tool)
+        .ok()
+        .and_then(|t| s.catalog.get(&t))
+        .map(|t| t.effect(&args));
+    let requested_by: String = r.try_get("requested_by").map_err(row)?;
+    let decided_by: Option<String> = r
+        .try_get::<Option<String>, _>("approved_by")
+        .map_err(row)?
+        .or(r.try_get("denied_by").map_err(row)?);
+    let decided_at: Option<OffsetDateTime> = r.try_get("decided_at").map_err(row)?;
+    let id: Uuid = r.try_get("id").map_err(row)?;
+    Ok(serde_json::json!({
+        "id": id.to_string(),
+        "agent": agent_view(r, &agent).map_err(row)?,
+        "tool": tool,
+        "args": args,
+        "effect": effect,
+        "requested_by": person(&requested_by, r.try_get("rm_name").map_err(row)?, r.try_get("rm_email").map_err(row)?),
+        "requested_at": ts(r.try_get("requested_at").map_err(row)?),
+        "expires_at": ts(r.try_get("expires_at").map_err(row)?),
+        "state": state.as_str(),
+        "decided_by": decided_by.map(|d| -> Result<Value, ApiError> {
+            Ok(person(&d, r.try_get("dm_name").map_err(row)?, r.try_get("dm_email").map_err(row)?))
+        }).transpose()?,
+        "decided_at": decided_at.map(ts),
+        "can_decide": state == State::Pending && r.try_get::<bool, _>("may_decide").map_err(row)?,
+    }))
+}
+
+async fn view_one(
+    tx: &mut Tx,
+    s: &AppState,
+    session: &Session,
+    approval: Uuid,
+    now: OffsetDateTime,
+) -> Result<Option<Value>, ApiError> {
+    let r = sqlx::query(sqlx::AssertSqlSafe(view_sql("a.id = $1")))
+        .bind(approval)
+        .bind(session.member.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StoreError::from)?;
+    r.map(|r| view(s, &r, now)).transpose()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListQuery {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+/// `<requested_at as unix nanoseconds>.<id>`: the position of the last item shown.
+fn parse_cursor(c: &str) -> Result<(OffsetDateTime, Uuid), ApiError> {
+    let bad = || ApiError::InvalidInput("invalid cursor");
+    let (t, id) = c.split_once('.').ok_or_else(bad)?;
+    let t = t.parse::<i128>().map_err(|_| bad())?;
+    Ok((
+        OffsetDateTime::from_unix_timestamp_nanos(t).map_err(|_| bad())?,
+        Uuid::parse_str(id).map_err(|_| bad())?,
+    ))
+}
+
+/// `GET /v1/approvals`: what the caller may decide plus the caller's own requests, newest first.
+async fn list(
+    Ax(s): Ax<Arc<AppState>>,
+    session: Session,
+    q: Result<Query<ListQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Query(q) = q.map_err(|_| ApiError::InvalidInput("invalid query"))?;
+    let now = OffsetDateTime::now_utc();
+    let state = match q.state.as_deref() {
+        None | Some("pending") => format!("({PENDING} and a.expires_at > $1)"),
+        Some("decided") => format!("not ({PENDING} and a.expires_at > $1)"),
+        Some(_) => return Err(ApiError::InvalidInput("state must be pending or decided")),
+    };
+    let cursor = bounded(q.cursor, 128)?
+        .map(|c| parse_cursor(&c))
+        .transpose()?;
+    let filter = format!(
+        "{state} and ($3::timestamptz is null or (a.requested_at, a.id) < ($3, $4)) \
+         order by a.requested_at desc, a.id desc limit {}",
+        PAGE + 1
+    );
+    let mut tx = s.store.begin(&session.tenant).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(view_sql(&filter)))
+        .bind(now)
+        .bind(session.member.as_str())
+        .bind(cursor.map(|c| c.0))
+        .bind(cursor.map(|c| c.1))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::from)?;
+    tx.commit().await.map_err(StoreError::from)?;
+    let more = rows.len() as i64 > PAGE;
+    let rows = &rows[..rows.len().min(PAGE as usize)];
+    let next = match rows.last() {
+        Some(r) if more => {
+            let at: OffsetDateTime = r.try_get("requested_at").map_err(StoreError::from)?;
+            let id: Uuid = r.try_get("id").map_err(StoreError::from)?;
+            Value::String(format!("{}.{id}", at.unix_timestamp_nanos()))
+        }
+        _ => Value::Null,
+    };
+    let items = rows
+        .iter()
+        .map(|r| view(&s, r, now))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(serde_json::json!({ "items": items, "next": next })))
+}
+
+async fn approve(
+    Ax(s): Ax<Arc<AppState>>,
+    session: Session,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    decide(&s, &session, &id, Decision::Approve).await
+}
+
+async fn deny(
+    Ax(s): Ax<Arc<AppState>>,
+    session: Session,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    decide(&s, &session, &id, Decision::Deny).await
+}
+
+async fn decide(
+    s: &AppState,
+    session: &Session,
+    id: &str,
+    d: Decision,
+) -> Result<Json<Value>, ApiError> {
+    let id = Uuid::parse_str(id).map_err(|_| ApiError::NotFound)?;
+    let now = OffsetDateTime::now_utc();
+    let mut tx = s.store.begin(&session.tenant).await?;
+    match decide_approval(&mut tx, id, &session.member, d, now).await {
+        Ok(_) => {}
+        Err(DecideError::NotFound) => return Err(ApiError::NotFound),
+        Err(DecideError::Forbidden) => return Err(ApiError::Forbidden),
+        Err(DecideError::AlreadyDecided) => {
+            return Err(ApiError::Conflict("this request was already decided"));
+        }
+        Err(DecideError::Expired) => return Err(ApiError::Conflict("this request has expired")),
+        Err(DecideError::Store(e)) => return Err(e.into()),
+    }
+    let v = view_one(&mut tx, s, session, id, now)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    tx.commit().await.map_err(StoreError::from)?;
+    Ok(Json(v))
 }
