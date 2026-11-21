@@ -1,18 +1,116 @@
-# Plan-time checks against mock providers: no AWS or Cloudflare account or credentials involved.
+# Checks against mock providers (a mocked apply, so computed values are concrete): no AWS or
+# Cloudflare account or credentials involved.
 # One file, because mock providers cannot be shared between test files.
 mock_provider "aws" {
   mock_data "aws_availability_zones" {
     defaults = { names = ["ap-south-1a", "ap-south-1b"] }
+  }
+  mock_data "aws_caller_identity" {
+    defaults = { account_id = "000000000000" }
+  }
+  mock_resource "aws_iam_role" {
+    defaults = { arn = "arn:aws:iam::000000000000:role/mock" }
+  }
+  mock_resource "aws_acm_certificate" {
+    defaults = { arn = "arn:aws:acm:ap-south-1:000000000000:certificate/mock" }
+  }
+  mock_resource "aws_service_discovery_service" {
+    defaults = { arn = "arn:aws:servicediscovery:ap-south-1:000000000000:service/srv-mock" }
+  }
+  mock_resource "aws_lb_target_group" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:targetgroup/mock/0" }
+  }
+  mock_resource "aws_lb_listener" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:listener/app/mock/0/0" }
+  }
+  mock_resource "aws_lb" {
+    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:loadbalancer/app/mock/0" }
   }
   mock_resource "aws_kms_key" {
     defaults = { arn = "arn:aws:kms:ap-south-1:000000000000:key/mock" }
   }
 }
 mock_provider "awscc" {}
-mock_provider "cloudflare" {}
+mock_provider "cloudflare" {
+  mock_data "cloudflare_ip_ranges" {
+    defaults = {
+      ipv4_cidrs = ["173.245.48.0/20", "103.21.244.0/22"]
+      ipv6_cidrs = ["2400:cb00::/32"]
+    }
+  }
+}
+
+# Mocks give every instance of a type the same values; distinct ids let the checks tell them apart.
+override_resource {
+  target = aws_secretsmanager_secret.this["core/database-url"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/database-url" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["core/workos-api-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/workos-api-key" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["core/workos-client-id"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/workos-client-id" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["core/assertion-private-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/assertion-private-key" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["core/event-signing-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/event-signing-key" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["migrate/database-url"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/migrate/database-url" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["eve/database-url"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/database-url" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["eve/ai-gateway-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/ai-gateway-key" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["eve/assertion-public-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/assertion-public-key" }
+}
+override_resource {
+  target = aws_security_group.alb
+  values = { id = "sg-alb" }
+}
+override_resource {
+  target = aws_security_group.core
+  values = { id = "sg-core" }
+}
+override_resource {
+  target = aws_security_group.eve
+  values = { id = "sg-eve" }
+}
+override_resource {
+  target = aws_security_group.migrate
+  values = { id = "sg-migrate" }
+}
+override_resource {
+  target = aws_security_group.db
+  values = { id = "sg-db" }
+}
+override_resource {
+  target = aws_security_group.endpoints
+  values = { id = "sg-endpoints" }
+}
+
+variables {
+  domain             = "example.test"
+  cloudflare_zone_id = "0123456789abcdef0123456789abcdef"
+  ai_gateway_url     = "https://gateway.example.test"
+  model_default      = "model"
+}
 
 run "private_subnets_have_no_public_ips_and_route_through_nat" {
-  command = plan
+  command = apply
 
   assert {
     condition     = alltrue([for s in aws_subnet.private : !s.map_public_ip_on_launch])
@@ -29,7 +127,7 @@ run "private_subnets_have_no_public_ips_and_route_through_nat" {
 }
 
 run "default_security_group_allows_nothing" {
-  command = plan
+  command = apply
 
   assert {
     condition     = length(aws_default_security_group.locked.ingress) == 0 && length(aws_default_security_group.locked.egress) == 0
@@ -38,7 +136,7 @@ run "default_security_group_allows_nothing" {
 }
 
 run "endpoints_cover_what_tasks_need_without_nat" {
-  command = plan
+  command = apply
 
   assert {
     condition     = toset(keys(aws_vpc_endpoint.interface)) == toset(["ecr.api", "ecr.dkr", "logs", "secretsmanager"])
@@ -51,7 +149,7 @@ run "endpoints_cover_what_tasks_need_without_nat" {
 }
 
 run "aurora_scales_to_zero_and_never_holds_a_password_in_state" {
-  command = plan
+  command = apply
 
   assert {
     condition     = aws_rds_cluster.main.serverlessv2_scaling_configuration[0].min_capacity == 0
@@ -76,7 +174,7 @@ run "aurora_scales_to_zero_and_never_holds_a_password_in_state" {
 }
 
 run "database_takes_no_traffic_from_addresses" {
-  command = plan
+  command = apply
 
   assert {
     condition     = length(aws_security_group.db.ingress) == 0
@@ -85,7 +183,7 @@ run "database_takes_no_traffic_from_addresses" {
 }
 
 run "secrets_are_containers_under_the_cmk" {
-  command = plan
+  command = apply
 
   assert {
     condition = toset(keys(aws_secretsmanager_secret.this)) == toset([
@@ -98,5 +196,128 @@ run "secrets_are_containers_under_the_cmk" {
   assert {
     condition     = aws_kms_key.main.enable_key_rotation
     error_message = "the CMK rotates"
+  }
+}
+
+run "only_cloudflare_reaches_the_load_balancer" {
+  command = apply
+
+  assert {
+    condition     = toset([for r in aws_vpc_security_group_ingress_rule.alb_from_cloudflare : r.cidr_ipv4]) == toset(["173.245.48.0/20", "103.21.244.0/22"])
+    error_message = "the ALB admits Cloudflare's ranges and nothing else"
+  }
+  assert {
+    condition     = alltrue([for r in aws_vpc_security_group_ingress_rule.alb_from_cloudflare : r.from_port == 443 && r.to_port == 443])
+    error_message = "HTTPS only"
+  }
+  assert {
+    condition     = aws_lb.api.drop_invalid_header_fields
+    error_message = "drop malformed headers at the edge"
+  }
+}
+
+run "the_edge_forwards_the_web_api_only" {
+  command = apply
+
+  assert {
+    condition     = aws_lb_listener.https.default_action[0].type == "fixed-response" && aws_lb_listener.https.default_action[0].fixed_response[0].status_code == "404"
+    error_message = "anything not listed is a 404 at the load balancer (the MCP server stays private)"
+  }
+  assert {
+    condition     = toset(flatten([for c in aws_lb_listener_rule.api.condition : [for p in c.path_pattern : p.values]])) == toset(["/v1/*", "/healthz"])
+    error_message = "forward only the web API and the health check"
+  }
+  assert {
+    condition     = toset(flatten([for c in aws_lb_listener_rule.api.condition : [for h in c.host_header : h.values]])) == toset(["api.example.test"])
+    error_message = "only the API host"
+  }
+}
+
+run "eve_is_private_and_reachable_only_from_the_core" {
+  command = apply
+
+  assert {
+    condition     = aws_vpc_security_group_ingress_rule.eve_from_core.referenced_security_group_id == aws_security_group.core.id
+    error_message = "eve admits the core only"
+  }
+  assert {
+    condition     = length(aws_ecs_service.eve.load_balancer) == 0 && !aws_ecs_service.eve.network_configuration[0].assign_public_ip
+    error_message = "eve has no load balancer and no public IP"
+  }
+  assert {
+    condition     = aws_ecs_task_definition.eve.task_role_arn == null
+    error_message = "eve holds no AWS credentials at all"
+  }
+}
+
+run "each_task_reads_only_its_own_secrets" {
+  command = apply
+
+  assert {
+    condition = toset([for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.valueFrom]) == toset([
+      for k, s in aws_secretsmanager_secret.this : s.arn if startswith(k, "core/")
+    ])
+    error_message = "the core gets exactly the core secrets"
+  }
+  assert {
+    condition = toset([for s in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].secrets : s.valueFrom]) == toset([
+      for k, s in aws_secretsmanager_secret.this : s.arn if startswith(k, "eve/")
+    ])
+    error_message = "eve gets exactly the eve secrets"
+  }
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["eve"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+      ])) == toset([
+      for k, s in aws_secretsmanager_secret.this : s.arn if startswith(k, "eve/")
+    ])
+    error_message = "eve's execution role can read only eve's secrets"
+  }
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["migrate"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ])) == toset([aws_secretsmanager_secret.this["migrate/database-url"].arn])
+    error_message = "the migrate task reads only the migration URL"
+  }
+  assert {
+    condition     = !strcontains(aws_ecs_task_definition.core.container_definitions, "MANDATE_ENV")
+    error_message = "dev-assert stays disabled in the deployed core"
+  }
+}
+
+run "services_take_no_public_ip_and_images_are_immutable" {
+  command = apply
+
+  assert {
+    condition     = !aws_ecs_service.core.network_configuration[0].assign_public_ip
+    error_message = "the core is reached through the ALB only"
+  }
+  assert {
+    condition     = alltrue([for r in aws_ecr_repository.this : r.image_tag_mutability == "IMMUTABLE"])
+    error_message = "a deployed tag always names the same image"
+  }
+}
+
+run "api_is_proxied_and_auth_is_rate_limited_at_the_edge" {
+  command = apply
+
+  assert {
+    condition     = cloudflare_dns_record.api.proxied
+    error_message = "the API is proxied by Cloudflare"
+  }
+  assert {
+    condition     = cloudflare_ruleset.auth_rate_limit.phase == "http_ratelimit" && strcontains(cloudflare_ruleset.auth_rate_limit.rules[0].expression, "/v1/auth/")
+    error_message = "WAF rate limit on /v1/auth/*"
+  }
+}
+
+run "the_database_admits_only_the_tasks" {
+  command = apply
+
+  assert {
+    condition = toset([for r in aws_vpc_security_group_ingress_rule.db : r.referenced_security_group_id]) == toset([
+      aws_security_group.core.id, aws_security_group.eve.id, aws_security_group.migrate.id,
+    ])
+    error_message = "Postgres from the core, eve and migrate only"
   }
 }
