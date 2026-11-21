@@ -1,5 +1,6 @@
 //! Core events: a versioned envelope, written to the outbox in the caller's transaction and
 //! signed when it is sent. `data` carries ids only, never text, arguments, emails or tokens.
+pub mod sign;
 
 
 use crate::ids::{AgentId, MemberId, TenantId};
