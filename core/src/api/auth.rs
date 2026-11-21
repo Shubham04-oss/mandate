@@ -12,7 +12,7 @@ use axum::extract::State;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use http::{StatusCode, header};
+use http::{HeaderMap, StatusCode, header};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use std::fmt;
@@ -379,6 +379,9 @@ pub(crate) fn routes(state: &Arc<ApiState>) -> Router<Arc<ApiState>> {
         .route("/v1/auth/sign-up", post(sign_up))
         .route("/v1/auth/verify-email", post(verify_email))
         .route("/v1/auth/verify-email/resend", post(resend))
+        .route("/v1/auth/mfa/verify", post(mfa_verify))
+        .route("/v1/auth/mfa/setup", post(mfa_setup))
+        .route("/v1/auth/mfa/enable", post(mfa_enable))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit,
@@ -592,6 +595,140 @@ async fn resend(
         );
     }
     Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MfaSetup {
+    #[serde(default)]
+    pending: Option<Opaque>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MfaEnable {
+    #[serde(default)]
+    pending: Option<Opaque>,
+    challenge: Opaque,
+    code: Code,
+}
+
+async fn mfa_verify(
+    State(s): State<Arc<ApiState>>,
+    Input(b): Input<PendingCode>,
+) -> Result<Response, ApiError> {
+    let p = find_pending(&s, &b.pending.0, &["mfa"]).await?;
+    let (Some(token), Some(challenge)) = (p.workos_token, p.data["challenge"].as_str()) else {
+        return Err(pending_expired());
+    };
+    let r = s
+        .auth
+        .authenticate_with_totp(&token, challenge, &b.code.0)
+        .await;
+    settle(&s, &b.pending.0, r).await
+}
+
+fn qr_svg(uri: &str) -> Result<String, ApiError> {
+    let code = qrcode::QrCode::new(uri.as_bytes()).map_err(|_| ApiError::internal())?;
+    Ok(code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(200, 200)
+        .build())
+}
+
+/// Enrolls a TOTP factor, either to finish a sign-in that requires two-step (`pending`) or
+/// for the signed-in member. `challenge` is our own step id, never WorkOS's.
+async fn mfa_setup(
+    State(s): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Input(b): Input<MfaSetup>,
+) -> Result<Response, ApiError> {
+    let now = OffsetDateTime::now_utc();
+    let (mut tx, user, token, member, tenant) = match &b.pending {
+        Some(pending) => {
+            let p = find_pending(&s, &pending.0, &["mfa_setup"]).await?;
+            let user = p.data["user"]
+                .as_str()
+                .ok_or_else(pending_expired)?
+                .to_owned();
+            let tx = s.store.begin_untenanted().await?;
+            (tx, user, p.workos_token, None, None)
+        }
+        None => {
+            let me = session::current(&s, &headers).await?;
+            let mut tx = s.store.begin(&me.tenant).await?;
+            let user: Option<String> = sqlx::query_scalar(
+                "select workos_user_id from members where tenant_id = current_setting('mandate.tenant', true) and id = $1",
+            )
+            .bind(me.member.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+            let user = user.ok_or_else(ApiError::signed_out)?;
+            (tx, user, None, Some(me.member), Some(me.tenant))
+        }
+    };
+    let e = s.auth.enroll_auth_factor(&user).await?;
+    let challenge = session::create_pending(
+        &mut tx,
+        NewPending {
+            kind: "mfa_enable",
+            workos_token: token.as_deref(),
+            email: None,
+            data: json!({ "challenge": e.challenge, "member": member }),
+            tenant: tenant.as_ref(),
+        },
+        now,
+    )
+    .await?;
+    if let Some(pending) = &b.pending {
+        session::delete_pending(&mut tx, &pending.0).await?;
+    }
+    tx.commit().await?;
+    let body = json!({ "qr_svg": qr_svg(&e.uri.0)?, "secret": e.secret.0, "challenge": challenge });
+    Ok(axum::Json(body).into_response())
+}
+
+/// With `pending`, finishes the sign-in; without, turns two-step on for the signed-in member.
+async fn mfa_enable(
+    State(s): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Input(b): Input<MfaEnable>,
+) -> Result<Response, ApiError> {
+    if b.pending.is_some() {
+        let p = find_pending(&s, &b.challenge.0, &["mfa_enable"]).await?;
+        let (Some(token), Some(challenge)) = (p.workos_token, p.data["challenge"].as_str()) else {
+            return Err(pending_expired());
+        };
+        let r = s
+            .auth
+            .authenticate_with_totp(&token, challenge, &b.code.0)
+            .await;
+        return settle(&s, &b.challenge.0, r).await;
+    }
+    let me = session::current(&s, &headers).await?;
+    let now = OffsetDateTime::now_utc();
+    let mut tx = s.store.begin(&me.tenant).await?;
+    let p = session::pending(&mut tx, &b.challenge.0, &["mfa_enable"], now).await?;
+    tx.commit().await?;
+    let p = p.ok_or_else(pending_expired)?;
+    let challenge = match (p.data["member"].as_str(), p.data["challenge"].as_str()) {
+        (Some(m), Some(c)) if m == me.member.as_str() && p.workos_token.is_none() => c,
+        _ => return Err(pending_expired()),
+    };
+    if !s.auth.verify_challenge(challenge, &b.code.0).await? {
+        return Err(AuthError::CodeInvalid.into());
+    }
+    let mut tx = s.store.begin(&me.tenant).await?;
+    session::delete_pending(&mut tx, &b.challenge.0).await?;
+    sqlx::query(
+        "update sessions set profile = jsonb_set(profile, '{mfa_enabled}', 'true') \
+         where tenant_id = current_setting('mandate.tenant', true) and member = $1",
+    )
+    .bind(me.member.as_str())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// An org as the web app sees it; its id is the tenant id the org has (or will have).

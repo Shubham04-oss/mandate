@@ -1574,3 +1574,214 @@ async fn first_sign_in_records_member_created() {
     h.post("/v1/auth/password", body).await;
     assert_eq!(logs.events().len(), 1);
 }
+
+/// Signs `u` in by password and returns the session cookie.
+async fn signed_in(h: &Harness, u: &FakeUser) -> String {
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": u.email, "password": u.password }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    session_cookie(&r).unwrap()
+}
+
+fn with_cookie(mut r: Request<Body>, cookie: &str) -> Request<Body> {
+    r.headers_mut().insert(
+        header::COOKIE,
+        http::HeaderValue::from_str(&format!("mandate_session={cookie}")).unwrap(),
+    );
+    r
+}
+
+async fn pending_for(h: &Harness, u: &FakeUser, want: &str) -> String {
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": u.email, "password": u.password }),
+        )
+        .await;
+    let v = body_json(r).await;
+    assert_eq!(v["next"], want, "{v}");
+    v["pending"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+#[ignore]
+async fn mfa_verify_signs_in() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    h.fake.update(&u.id, |u| u.totp = true);
+    let pending = pending_for(&h, &u, "mfa").await;
+    let r = h
+        .post(
+            "/v1/auth/mfa/verify",
+            json!({ "pending": pending, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(session_cookie(&r).is_some());
+    let v = body_json(r).await;
+    assert_eq!(v["status"], "signed_in");
+    assert_eq!(v["me"]["mfa_enabled"], true);
+    // WorkOS got its own challenge for the user's factor, kept server-side.
+    assert!(h.fake.called(&format!("totp chal_factor_{}", u.id)));
+    let r = h
+        .post(
+            "/v1/auth/mfa/verify",
+            json!({ "pending": pending, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "pending_expired");
+}
+
+#[tokio::test]
+#[ignore]
+async fn bad_totp_is_code_invalid() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    h.fake.update(&u.id, |u| u.totp = true);
+    let pending = pending_for(&h, &u, "mfa").await;
+    let r = h
+        .post(
+            "/v1/auth/mfa/verify",
+            json!({ "pending": pending, "code": "111111" }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert!(session_cookie(&r).is_none());
+    assert_eq!(body_json(r).await["error"]["code"], "code_invalid");
+    // The step survives a typo.
+    let r = h
+        .post(
+            "/v1/auth/mfa/verify",
+            json!({ "pending": pending, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore]
+async fn mfa_setup_returns_qr_and_secret() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    h.fake.force(AuthError::Step(Step::MfaSetup {
+        token: Secret(format!("pat_{}", u.id)),
+        user: u.id.clone(),
+    }));
+    let pending = pending_for(&h, &u, "mfa_setup").await;
+    let r = h
+        .post("/v1/auth/mfa/setup", json!({ "pending": pending }))
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let v = body_json(r).await;
+    assert!(
+        v["qr_svg"].as_str().is_some_and(|s| s.contains("<svg")),
+        "{v}"
+    );
+    assert_eq!(v["secret"], "FAKESECRETFAKESE");
+    let challenge = v["challenge"].as_str().unwrap();
+    assert_eq!(challenge.len(), 43, "our own id, not WorkOS's challenge");
+    assert!(!v.to_string().contains("chal_"), "{v}");
+    // The setup step is used up.
+    let r = h
+        .post("/v1/auth/mfa/setup", json!({ "pending": pending }))
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "pending_expired");
+
+    // Signed in, without a step.
+    let other = h.user("member");
+    let cookie = signed_in(&h, &other).await;
+    let r = h
+        .app
+        .clone()
+        .oneshot(with_cookie(
+            auth_post("/v1/auth/mfa/setup", &h.ip, json!({})),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(h.fake.called(&format!("enroll {}", other.id)));
+    // Neither a step nor a session: refused.
+    let r = h.post("/v1/auth/mfa/setup", json!({})).await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[ignore]
+async fn mfa_enable_with_valid_code_signs_in() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    h.fake.force(AuthError::Step(Step::MfaSetup {
+        token: Secret(format!("pat_{}", u.id)),
+        user: u.id.clone(),
+    }));
+    let pending = pending_for(&h, &u, "mfa_setup").await;
+    let v = body_json(
+        h.post("/v1/auth/mfa/setup", json!({ "pending": pending }))
+            .await,
+    )
+    .await;
+    let challenge = v["challenge"].as_str().unwrap().to_owned();
+    let r = h
+        .post(
+            "/v1/auth/mfa/enable",
+            json!({ "pending": pending, "challenge": challenge, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(session_cookie(&r).is_some());
+    assert_eq!(body_json(r).await["me"]["mfa_enabled"], true);
+
+    // Signed in: 204, and `me` now says two-step is on.
+    let other = h.user("member");
+    let cookie = signed_in(&h, &other).await;
+    let send = |uri: &str, body: Value, cookie: Option<&str>| {
+        let r = auth_post(uri, &h.ip, body);
+        let r = match cookie {
+            Some(c) => with_cookie(r, c),
+            None => r,
+        };
+        h.app.clone().oneshot(r)
+    };
+    let v = body_json(
+        send("/v1/auth/mfa/setup", json!({}), Some(&cookie))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let challenge = v["challenge"].as_str().unwrap().to_owned();
+    // Without the session, a signed-in challenge is invisible.
+    let r = send(
+        "/v1/auth/mfa/enable",
+        json!({ "pending": "x", "challenge": challenge, "code": GOOD_CODE }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(body_json(r).await["error"]["code"], "pending_expired");
+    let r = send(
+        "/v1/auth/mfa/enable",
+        json!({ "challenge": challenge, "code": "111111" }),
+        Some(&cookie),
+    )
+    .await
+    .unwrap();
+    assert_eq!(body_json(r).await["error"]["code"], "code_invalid");
+    let r = send(
+        "/v1/auth/mfa/enable",
+        json!({ "challenge": challenge, "code": GOOD_CODE }),
+        Some(&cookie),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert!(h.fake.has_totp(&other.id).await.unwrap());
+    let tenant = tenant_of(&other.memberships[0].org);
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    let profile = session::profile(&mut tx, &cookie).await.unwrap().unwrap();
+    assert_eq!(profile["mfa_enabled"], true);
+}
