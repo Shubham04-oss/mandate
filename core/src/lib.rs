@@ -1,3 +1,4 @@
+pub mod api;
 pub mod assertion;
 pub mod gate;
 pub mod identity;

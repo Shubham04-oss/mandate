@@ -25,3 +25,10 @@ grant usage on sequence audit_id_seq to :"role";
 grant select, insert on tenants to :"role";
 grant select, insert, update on directory_cursor to :"role";
 grant select, insert on directory_dead_letters to :"role";
+
+-- Web sessions (RLS forced): created at sign-in, touched per request, deleted at sign-out.
+grant select, insert, update, delete on sessions to :"role";
+-- Pending sign-in steps (RLS forced): stored, read and used up, never edited.
+grant select, insert, delete on auth_pending to :"role";
+-- Sign-in rate counters (RLS-free, hashes only): upserted per attempt, old windows dropped.
+grant select, insert, update, delete on rate_limits to :"role";
