@@ -1,13 +1,16 @@
 import {
+	getRouteApi,
 	Link,
 	useMatches,
 	useNavigate,
+	useRouter,
 	useSearch,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { PersonAvatar } from "#/components/auth/parts.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import { SettingsDialog } from "#/components/settings/settings-dialog.tsx";
-import { Avatar, AvatarGroup, AvatarImage } from "#/components/ui/avatar.tsx";
+import { AvatarGroup } from "#/components/ui/avatar.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import {
 	DropdownMenu,
@@ -24,7 +27,8 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "#/components/ui/tooltip.tsx";
-import { sample } from "#/lib/sample.ts";
+import { describeApproval } from "#/lib/activity.ts";
+import { type Approval, api, type Me, type Person } from "#/lib/api/index.ts";
 
 declare module "@tanstack/react-router" {
 	interface StaticDataRouteOption {
@@ -32,6 +36,8 @@ declare module "@tanstack/react-router" {
 		title?: string;
 	}
 }
+
+const appRoute = getRouteApi("/_app");
 
 type RailItem = {
 	label: string;
@@ -42,13 +48,16 @@ type RailItem = {
 };
 
 // ponytail: only Home exists; the rest become links as their pages are built.
-const railItems: RailItem[] = [
+const places = (waiting: number): RailItem[] => [
 	{ label: "Home", icon: "home", to: "/" },
-	{ label: "Approvals", icon: "shield-check", count: sample.needsYou.length },
+	{ label: "Approvals", icon: "shield-check", count: waiting },
 	{ label: "Your agent", icon: "bot" },
 	{ label: "Teams", icon: "user" },
 	{ label: "Activity", icon: "activity" },
 ];
+
+/** Requests the person can decide now. Their own requests are listed too but aren't theirs to decide. */
+const decidable = (pending: Approval[]) => pending.filter((a) => a.can_decide);
 
 function RailButton({ item }: { item: RailItem }) {
 	const label = item.count
@@ -101,20 +110,24 @@ function RailButton({ item }: { item: RailItem }) {
 	);
 }
 
-/** "3 need you", hanging from the canvas's top edge on every page. */
-function NeedsTab() {
-	const waiting = sample.needsYou;
+/** "3 need you", hanging from the canvas's top edge on every page. Gone when nothing waits. */
+function NeedsTab({ waiting }: { waiting: Approval[] }) {
+	if (waiting.length === 0) return null;
+	const askers = [
+		...new Map(
+			waiting.map((a) => [a.requested_by.id, a.requested_by]),
+		).values(),
+	].slice(0, 3);
 	return (
 		// ponytail: opens the approvals page once it exists
 		<button
 			type="button"
+			title={waiting.map(describeApproval).join("\n")}
 			className="tab-cut group absolute top-0 right-7 z-10 inline-flex h-10 cursor-pointer items-center gap-2 border-0 pr-3.5 pl-2.5 font-semibold text-[12px] text-foreground"
 		>
 			<AvatarGroup className="-space-x-1.5 *:data-[slot=avatar]:ring-background">
-				{waiting.map((item) => (
-					<Avatar key={item.id} className="size-5">
-						<AvatarImage src={item.avatar} alt="" />
-					</Avatar>
+				{askers.map((person) => (
+					<PersonAvatar key={person.id} person={person} className="size-5" />
 				))}
 			</AvatarGroup>
 			{waiting.length} need you
@@ -127,11 +140,57 @@ function NeedsTab() {
 	);
 }
 
+/** Signs out on the core, then leaves the app. */
+function useSignOut() {
+	const navigate = useNavigate();
+	const router = useRouter();
+	return async () => {
+		try {
+			await api.auth.signOut();
+		} finally {
+			// whatever the core said, this browser is done with the session
+			await router.invalidate();
+			await navigate({ to: "/sign-in" });
+		}
+	};
+}
+
+function AccountItems({
+	person,
+	onSettings,
+}: {
+	person: Person;
+	onSettings: () => void;
+}) {
+	const signOut = useSignOut();
+	return (
+		<DropdownMenuGroup>
+			<DropdownMenuItem onClick={onSettings}>
+				<Icon name="settings" strokeWidth={1.8} />
+				Settings
+			</DropdownMenuItem>
+			<DropdownMenuItem onClick={signOut}>
+				<PersonAvatar person={person} className="size-5" />
+				<span className="flex-1">{person.name}</span>
+				<span className="text-[12px] text-muted-foreground">Sign out</span>
+			</DropdownMenuItem>
+		</DropdownMenuGroup>
+	);
+}
+
 /**
  * Below the split width the rail is gone and the same places open from the header instead, so the
  * canvas keeps the whole width of a phone.
  */
-function HeaderMenu({ onSettings }: { onSettings: () => void }) {
+function HeaderMenu({
+	me,
+	items,
+	onSettings,
+}: {
+	me: Me;
+	items: RailItem[];
+	onSettings: () => void;
+}) {
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger
@@ -147,7 +206,7 @@ function HeaderMenu({ onSettings }: { onSettings: () => void }) {
 					aria-hidden="true"
 					className="grid size-6 place-items-center rounded-[7px] bg-selected font-bold text-[11px]"
 				>
-					{sample.org.initial}
+					{me.org.name[0]}
 				</span>
 				<Icon
 					name="menu"
@@ -158,8 +217,8 @@ function HeaderMenu({ onSettings }: { onSettings: () => void }) {
 			</DropdownMenuTrigger>
 			<DropdownMenuContent align="start" sideOffset={6} className="w-60">
 				<DropdownMenuGroup>
-					<DropdownMenuLabel>{sample.org.name}</DropdownMenuLabel>
-					{railItems.map((item) =>
+					<DropdownMenuLabel>{me.org.name}</DropdownMenuLabel>
+					{items.map((item) =>
 						item.to ? (
 							<DropdownMenuItem
 								key={item.label}
@@ -184,19 +243,39 @@ function HeaderMenu({ onSettings }: { onSettings: () => void }) {
 					)}
 				</DropdownMenuGroup>
 				<DropdownMenuSeparator />
+				<AccountItems person={me.person} onSettings={onSettings} />
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
+/** The person's picture at the foot of the rail, opening their account menu. */
+function RailAccount({ me, onSettings }: { me: Me; onSettings: () => void }) {
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger
+				render={
+					<button
+						type="button"
+						aria-label={`${me.person.name}, account`}
+						className="mt-1.5 cursor-pointer rounded-full border-0 bg-transparent p-0"
+					/>
+				}
+			>
+				<PersonAvatar person={me.person} className="size-[30px]" />
+			</DropdownMenuTrigger>
+			<DropdownMenuContent
+				side="right"
+				align="end"
+				sideOffset={8}
+				className="w-60"
+			>
 				<DropdownMenuGroup>
-					<DropdownMenuItem onClick={onSettings}>
-						<Icon name="settings" strokeWidth={1.8} />
-						Settings
-					</DropdownMenuItem>
-					<DropdownMenuItem render={<Link to="/sign-in" />}>
-						<Avatar className="size-5">
-							<AvatarImage src={sample.me.avatar} alt="" />
-						</Avatar>
-						<span className="flex-1">{sample.me.name}</span>
-						<span className="text-[12px] text-muted-foreground">Sign out</span>
-					</DropdownMenuItem>
+					<DropdownMenuLabel className="normal-case tracking-normal">
+						{me.person.email}
+					</DropdownMenuLabel>
 				</DropdownMenuGroup>
+				<AccountItems person={me.person} onSettings={onSettings} />
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
@@ -205,6 +284,13 @@ function HeaderMenu({ onSettings }: { onSettings: () => void }) {
 // The app frame: a collapsed rail and a header on the surround colour, the canvas below them.
 // The header is as tall as the rail is wide, so the frame reads evenly on both sides.
 export function AppShell({ children }: { children: ReactNode }) {
+	const { me, pending } = appRoute.useLoaderData();
+	const waiting = decidable(pending);
+	const items = places(waiting.length);
+	const title = useMatches({
+		select: (matches) =>
+			[...matches].reverse().find((m) => m.staticData.title)?.staticData.title,
+	});
 	// Settings is a pop-up kept in the address (?settings=tools), so it survives a reload and Back closes it.
 	const settings = useSearch({ strict: false, select: (s) => s.settings });
 	const navigate = useNavigate();
@@ -213,10 +299,6 @@ export function AppShell({ children }: { children: ReactNode }) {
 			to: ".",
 			search: (prev) => ({ ...prev, settings: open ? "tools" : undefined }),
 		});
-	const title = useMatches({
-		select: (matches) =>
-			[...matches].reverse().find((m) => m.staticData.title)?.staticData.title,
-	});
 
 	return (
 		<TooltipProvider>
@@ -227,11 +309,12 @@ export function AppShell({ children }: { children: ReactNode }) {
 				>
 					<span
 						aria-hidden="true"
+						title={me.org.name}
 						className="mb-2.5 grid size-7 place-items-center rounded-sm bg-selected font-bold text-[12px]"
 					>
-						{sample.org.initial}
+						{me.org.name[0]}
 					</span>
-					{railItems.map((item) => (
+					{items.map((item) => (
 						<RailButton key={item.label} item={item} />
 					))}
 					<span className="flex-1" />
@@ -242,23 +325,26 @@ export function AppShell({ children }: { children: ReactNode }) {
 							onClick: () => setSettings(true),
 						}}
 					/>
-					<Avatar className="mt-1.5 size-[30px]">
-						<AvatarImage src={sample.me.avatar} alt={sample.me.name} />
-					</Avatar>
+					<RailAccount me={me} onSettings={() => setSettings(true)} />
 				</nav>
 
 				<div className="flex min-w-0 flex-1 flex-col">
 					<header className="relative flex h-12 flex-none items-center justify-center bg-background">
 						<div className="absolute top-2 left-2 split:hidden">
-							<HeaderMenu onSettings={() => setSettings(true)} />
+							<HeaderMenu
+								me={me}
+								items={items}
+								onSettings={() => setSettings(true)}
+							/>
 						</div>
 						<h1 className="m-0 font-semibold text-[15px]">{title}</h1>
-						<Avatar className="absolute top-2.5 right-3 size-7 split:hidden">
-							<AvatarImage src={sample.me.avatar} alt={sample.me.name} />
-						</Avatar>
+						<PersonAvatar
+							person={me.person}
+							className="absolute top-2.5 right-3 size-7 split:hidden"
+						/>
 					</header>
 					<main className="relative mx-2 flex min-w-0 flex-1 flex-col rounded-t-[17px] bg-canvas split:ml-0">
-						<NeedsTab />
+						<NeedsTab waiting={waiting} />
 						{children}
 					</main>
 				</div>

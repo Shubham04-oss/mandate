@@ -1,16 +1,57 @@
-import { createFileRoute, Outlet } from "@tanstack/react-router";
+import {
+	createFileRoute,
+	type ErrorComponentProps,
+	Outlet,
+	redirect,
+	useRouter,
+} from "@tanstack/react-router";
 import { AppShell } from "#/components/app/app-shell.tsx";
+import { Button } from "#/components/ui/button.tsx";
+import { ApiError, api } from "#/lib/api/index.ts";
 
-// ponytail: no sign-in check yet; once the core issues sessions, this route sends signed-out
-// people to /sign-in.
 type AppSearch = { settings?: "tools" };
 
 export const Route = createFileRoute("/_app")({
+	// The session cookie belongs to the API host, so only the browser can load this data.
+	ssr: false,
 	validateSearch: (search: Record<string, unknown>): AppSearch =>
 		search.settings === "tools" ? { settings: "tools" } : {},
+	loader: async () => {
+		try {
+			const [me, pending] = await Promise.all([
+				api.me(),
+				api.approvals.list("pending"),
+			]);
+			return { me, pending: pending.items };
+		} catch (e) {
+			if (e instanceof ApiError && e.signedOut)
+				throw redirect({ to: "/sign-in" });
+			throw e;
+		}
+	},
+	errorComponent: AppUnavailable,
 	component: () => (
 		<AppShell>
 			<Outlet />
 		</AppShell>
 	),
 });
+
+function AppUnavailable({ error }: ErrorComponentProps) {
+	const router = useRouter();
+	return (
+		<div className="grid min-h-dvh place-items-center bg-background p-6 text-center text-foreground">
+			<div className="flex max-w-sm flex-col items-center gap-3">
+				<h1 className="m-0 font-semibold text-[17px]">
+					oryxa can't load right now
+				</h1>
+				<p className="m-0 text-[13px] text-muted-foreground leading-normal">
+					{error instanceof ApiError
+						? error.message
+						: "Something went wrong. Try again."}
+				</p>
+				<Button onClick={() => router.invalidate()}>Try again</Button>
+			</div>
+		</div>
+	);
+}

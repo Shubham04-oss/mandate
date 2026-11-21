@@ -2,7 +2,11 @@ import { cn } from "cn";
 import { type ComponentProps, type ReactNode, useState } from "react";
 import { TextLink } from "#/components/auth/auth-layout.tsx";
 import { GoogleMark, Icon } from "#/components/icons/icon.tsx";
-import { Avatar, AvatarGroup, AvatarImage } from "#/components/ui/avatar.tsx";
+import {
+	Avatar,
+	AvatarFallback,
+	AvatarImage,
+} from "#/components/ui/avatar.tsx";
 import { Badge } from "#/components/ui/badge.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import { Card } from "#/components/ui/card.tsx";
@@ -25,18 +29,23 @@ import {
 	ItemMedia,
 	ItemTitle,
 } from "#/components/ui/item.tsx";
+import type { Invitation, Org, Person } from "#/lib/api/index.ts";
 import { normalizeOtp, OTP_LENGTH } from "#/lib/otp.ts";
 import { checkPassword } from "#/lib/password.ts";
 
 export function GoogleButton({
 	children,
 	lastUsed,
+	disabled,
+	title,
 }: {
 	children: ReactNode;
 	lastUsed?: boolean;
+	disabled?: boolean;
+	title?: string;
 }) {
 	return (
-		<Button variant="secondary" size="lg">
+		<Button variant="secondary" size="lg" disabled={disabled} title={title}>
 			<GoogleMark />
 			{children}
 			{lastUsed && (
@@ -185,73 +194,78 @@ export function OrgMark({
 	);
 }
 
-type Invite = {
-	name: string;
-	initial: string;
-	summary: string;
-	faces: string[];
-	facesLine: string;
-	inviter: { name: string; avatar: string };
-};
-
-export function InviteCard({ org }: { org: Invite }) {
+export function InviteCard({ invitation }: { invitation: Invitation }) {
+	const { org, inviter } = invitation;
 	return (
 		<Card className="gap-3 p-4">
 			<div className="flex items-center gap-3">
-				<OrgMark initial={org.initial} brand="var(--sea-deep)" />
+				<OrgMark initial={org.name[0] ?? "?"} brand="var(--sea-deep)" />
 				<div>
 					<b className="block text-[15px]">{org.name}</b>
 					<small className="text-[12px] text-muted-foreground">
-						{org.summary}
+						{orgSummary(org)}
 					</small>
 				</div>
 			</div>
-			<div className="flex items-center gap-2.5 text-[12px] text-muted-foreground">
-				<AvatarGroup>
-					{org.faces.map((src) => (
-						<Avatar key={src} className="size-[22px]">
-							<AvatarImage src={src} alt="" />
-						</Avatar>
-					))}
-				</AvatarGroup>
-				<span>{org.facesLine}</span>
-			</div>
 			<div className="flex items-center gap-2.5 border-t pt-3 text-[12.5px] text-soft-foreground leading-[1.45]">
-				<Avatar className="size-7">
-					<AvatarImage src={org.inviter.avatar} alt="" />
-				</Avatar>
+				<PersonAvatar person={inviter} className="size-7" />
 				<span>
-					<b className="text-foreground">{org.inviter.name}</b> invited you to
-					join as a member.
+					<b className="text-foreground">{inviter.name}</b> invited{" "}
+					{invitation.email} to join as a member.
 				</span>
 			</div>
 		</Card>
 	);
 }
 
+export const orgSummary = (org: Org) =>
+	`${org.summary.people} ${org.summary.people === 1 ? "person" : "people"} · ${org.summary.agents} ${
+		org.summary.agents === 1 ? "agent" : "agents"
+	}`;
+
+/** A person's picture, or their initial when they have none. */
+export function PersonAvatar({
+	person,
+	className,
+}: {
+	person: Person;
+	className?: string;
+}) {
+	return (
+		<Avatar className={className}>
+			{person.avatar_url ? (
+				<AvatarImage src={person.avatar_url} alt="" />
+			) : null}
+			<AvatarFallback className="text-[11px]">
+				{person.name[0] ?? "?"}
+			</AvatarFallback>
+		</Avatar>
+	);
+}
+
 /** One organization to pick, on the screen shown when a person belongs to several. */
 export function OrgChoice({
-	name,
-	initial,
-	summary,
+	org,
+	disabled,
+	onSelect,
 }: {
-	name: string;
-	initial: string;
-	summary: string;
+	org: Org;
+	disabled?: boolean;
+	onSelect: () => void;
 }) {
 	return (
 		<Item
 			variant="raised"
 			size="sm"
 			className="p-3"
-			render={<button type="submit" name="organization" value={name} />}
+			render={<button type="button" disabled={disabled} onClick={onSelect} />}
 		>
 			<ItemMedia>
-				<OrgMark initial={initial} size={36} />
+				<OrgMark initial={org.name[0] ?? "?"} size={36} />
 			</ItemMedia>
 			<ItemContent className="gap-0.5">
-				<ItemTitle>{name}</ItemTitle>
-				<ItemDescription>{summary}</ItemDescription>
+				<ItemTitle>{org.name}</ItemTitle>
+				<ItemDescription>{orgSummary(org)}</ItemDescription>
 			</ItemContent>
 			<ItemActions>
 				<Icon name="chevron-right" className="text-muted-foreground" />
@@ -260,20 +274,17 @@ export function OrgChoice({
 	);
 }
 
-/** "Signed in as …  Use another account" */
+/** "Signing in as …  Use another account" */
 export function SignedInAs({
 	email,
-	avatar,
+	label = "Signing in as",
 }: {
 	email: string;
-	avatar: string;
+	label?: string;
 }) {
 	return (
 		<div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-			<Avatar className="size-5">
-				<AvatarImage src={avatar} alt="" />
-			</Avatar>
-			Signed in as {email}
+			{label} {email}
 			<TextLink to="/sign-in" className="ml-auto">
 				Use another account
 			</TextLink>

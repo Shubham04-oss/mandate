@@ -24,12 +24,16 @@ import {
 	ItemTitle,
 } from "#/components/ui/item.tsx";
 import { Kbd } from "#/components/ui/kbd.tsx";
+import { activityRow, handledToday } from "#/lib/activity.ts";
+import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
 import { sample } from "#/lib/sample.ts";
 
 export const Route = createFileRoute("/_app/")({
 	head: () => ({ meta: [{ title: `Home · ${brand.name}` }] }),
 	staticData: { title: "Home" },
+	ssr: false,
+	loader: async () => ({ activity: (await api.activity()).items }),
 	component: Home,
 });
 
@@ -37,6 +41,8 @@ export const Route = createFileRoute("/_app/")({
 const notWired = (e: FormEvent) => e.preventDefault();
 
 function Home() {
+	const { activity } = Route.useLoaderData();
+	const handled = handledToday(activity);
 	return (
 		<div className="home-grid">
 			<h2
@@ -49,13 +55,15 @@ function Home() {
 			<div data-area="below" className="flex flex-col gap-3.5">
 				<QuickActions />
 				<p className="m-0 text-center text-[12px] text-muted-foreground">
-					Your agent handled {sample.handledToday} requests since 9:00.{" "}
+					{handled === 0
+						? "Nothing handled yet today."
+						: `Agents handled ${handled} ${handled === 1 ? "action" : "actions"} today.`}{" "}
 					{/* ponytail: links to activity once that page exists */}
 					<span className="font-semibold text-foreground">See activity</span>
 				</p>
 			</div>
 			<WorkingNow />
-			<Recent />
+			<Recent rows={activity.slice(0, 3).map(activityRow)} />
 		</div>
 	);
 }
@@ -173,6 +181,11 @@ const marks: Record<string, ReactNode> = {
 			<Icon name="check" size={14} strokeWidth={2.4} />
 		</span>
 	),
+	approved: (
+		<span className="grid size-6 place-items-center rounded-full bg-ok text-ok-foreground">
+			<Icon name="shield-check" size={14} />
+		</span>
+	),
 	refused: (
 		<span className="grid size-6 place-items-center rounded-full bg-destructive/15 text-danger-foreground">
 			<Icon name="cross-circle" size={14} />
@@ -254,6 +267,8 @@ function SidePanel({
 	);
 }
 
+// ponytail: the contract has no endpoint for work in progress (live browser sessions, scheduled
+// runs), so this panel stays on sample data; noted for the lead.
 function WorkingNow() {
 	return (
 		<SidePanel
@@ -267,14 +282,14 @@ function WorkingNow() {
 	);
 }
 
-function Recent() {
+function Recent({ rows }: { rows: Row[] }) {
 	return (
 		<SidePanel
 			area="right"
 			scene="/scenes/harbour.webp"
 			title="Recent"
 			more="All"
-			rows={sample.recent}
+			rows={rows}
 		/>
 	);
 }

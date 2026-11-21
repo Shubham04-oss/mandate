@@ -4,6 +4,7 @@ import {
 	Aside,
 	AuthForm,
 	AuthLayout,
+	FormError,
 	Lead,
 	TextLink,
 	Title,
@@ -13,6 +14,7 @@ import {
 	PasswordInput,
 	StrengthMeter,
 } from "#/components/auth/parts.tsx";
+import { field, useSignIn } from "#/components/auth/use-sign-in.ts";
 import { Button } from "#/components/ui/button.tsx";
 import {
 	Field,
@@ -21,6 +23,7 @@ import {
 	FieldSeparator,
 } from "#/components/ui/field.tsx";
 import { Input } from "#/components/ui/input.tsx";
+import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
 import { checkPassword } from "#/lib/password.ts";
 
@@ -31,13 +34,27 @@ export const Route = createFileRoute("/sign-up")({
 
 function SignUp() {
 	const [password, setPassword] = useState("");
+	const { busy, error, run } = useSignIn();
+	const hint = checkPassword(password).hint;
+
 	return (
 		<AuthLayout scene="crows-nest">
-			<AuthForm label="Create an account">
+			<AuthForm
+				label="Create an account"
+				onSubmit={(data) => {
+					const email = field(data, "email");
+					run(() => api.auth.signUp(email, password, field(data, "name")), {
+						email,
+					});
+				}}
+			>
 				<Title>Create your account</Title>
 				<Lead>Your agent is ready as soon as you're in.</Lead>
-				<GoogleButton>Sign up with Google</GoogleButton>
+				<GoogleButton disabled title="Not available yet">
+					Sign up with Google
+				</GoogleButton>
 				<FieldSeparator>or with email</FieldSeparator>
+				<FormError message={error} />
 				<Field className="gap-1.5">
 					<FieldLabel htmlFor="name">Your name</FieldLabel>
 					<Input
@@ -68,14 +85,14 @@ function SignUp() {
 						onChange={(e) => setPassword(e.target.value)}
 					/>
 					<StrengthMeter password={password} />
-					{(checkPassword(password).hint || undefined) && (
+					{hint ? (
 						<FieldDescription id="password-hint" className="text-[11.5px]">
-							{checkPassword(password).hint || undefined}
+							{hint}
 						</FieldDescription>
-					)}
+					) : null}
 				</Field>
-				<Button type="submit" size="lg">
-					Create account
+				<Button type="submit" size="lg" disabled={busy}>
+					{busy ? "Creating…" : "Create account"}
 				</Button>
 				<Aside>
 					Already have an account? <TextLink to="/sign-in">Sign in</TextLink>

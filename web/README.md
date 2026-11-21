@@ -11,9 +11,85 @@ data.
   key.
 - `src/routes/preview.popups.tsx`: the team Platform, Kenji Sato, `maria@northwind.de`, and the
   "Q3 revenue figures" request.
+- `src/lib/api/standin.ts`: the stand-in API responses (below) reuse the same people and
+  organizations, plus made-up agents, approvals and activity.
 - `public/avatars/` and `public/sample/`: the avatar drawings and the QR code image.
 
 Replace each with data from the core as the screens are wired; none of it should ship.
+
+## Talking to the core
+
+Every call to the core goes through one module, `src/lib/api/index.ts`, built on the API contract in
+section 4 of `docs/superpowers/specs/2026-11-21-v1-remaining-design.md`: it sends
+`credentials: "include"`, adds `X-Mandate: 1` to every state-changing request, reads the
+`{ "error": { "code", "message" } }` format (with `Retry-After` on 429), and returns the sign-in
+outcomes as they are. Screens never call `fetch` themselves.
+
+The base URL comes from `VITE_MANDATE_API_URL`:
+
+- **Unset (the default):** the module answers every call with stand-in responses from
+  `src/lib/api/standin.ts`, shaped exactly like the contract. Nothing leaves the browser.
+- **Set:** the module calls the core at that address. Nothing else changes; the screens stay as
+  they are.
+
+Locally, both run on `localhost` so the session cookie works across them:
+
+```bash
+VITE_MANDATE_API_URL=http://localhost:8080 npm run dev
+```
+
+The web app is then on `http://localhost:3000` and the core on `http://localhost:8080`.
+
+### Trying the sign-in steps on stand-ins
+
+Any password signs in, except `wrong`. The part of the email before the @ picks the outcome:
+
+| Email starts with | Goes to |
+| --- | --- |
+| `mfa@` | Enter your code (two-step sign-in) |
+| `setup@` | Set up two-step sign-in |
+| `orgs@` | Choose an organization |
+| `verify@` | Check your inbox |
+| `sso@` | Leaves for the organization's sign-in (here, back to sign-in) |
+| `method@` | Sign in another way |
+| `noaccess@` | No access yet |
+| anything else | Home |
+
+The code `000000` is always wrong; any other six digits work. A reset or invitation token of
+`expired` has expired; any other token works (`/reset-password?token=x`, `/invite?token=x`). Only
+`@northstar.io` addresses have single sign-on.
+
+### Contract notes for the lead
+
+Where the contract and the screens don't line up yet. The contract is unchanged; each note says what
+the web app assumes for now.
+
+1. **Local addresses.** 4.1 puts the core on `127.0.0.1:8080` and 4.2 says `localhost` for both. A
+   session cookie set by `127.0.0.1` isn't sent from `localhost`, so the web app uses
+   `http://localhost:8080`. The core also needs to allow `http://localhost:3000` as an origin with
+   credentials.
+2. **Google sign-in.** The sign-in and sign-up screens have "Continue with Google", but 4.3 has no
+   Google endpoint. The buttons are disabled ("Not available yet"). The `methods` list in
+   `method_required` may also name Google.
+3. **Signed out.** No error code says "no session". The app treats any HTTP 401 as signed out and
+   goes to sign-in; the stand-ins send 401 with `forbidden`.
+4. **Timestamps.** The format isn't stated; the app assumes RFC 3339 strings.
+5. **`method_required`.** The method names aren't listed; the app assumes `sso`, `magic_code`,
+   `password` and `google`. The screen would also like the organization's name ("Northstar asks
+   its members…"), which the outcome doesn't carry.
+6. **SSO callback errors.** How the core reports a failed SSO sign-in back to the web app isn't
+   stated; the app assumes `/sign-in?error=<code>` with a contract error code.
+7. **Reset links.** The error for a used or expired reset token isn't stated; the app treats
+   `code_expired` and `not_found` as expired. "Link expired" can't resend without the email, so it
+   sends the person to "Reset your password" to enter it again.
+8. **Invitations.** The invite screen was drawn for someone already signed in; the contract accepts
+   while signed out (a code to the invited email, or a name and password), so the screen offers
+   both. The invitation has no member list, so the faces row on the card is gone.
+9. **Not in the contract yet.** These stay on sample data: "Working now" on Home (tasks in progress,
+   the live browser, scheduled runs), the ask box and quick actions (asking an agent from the web),
+   the Tools pop-up (connections), and activity entries for access that ended.
+10. **Approval `effect`.** The values aren't listed; the app shows a plain description built from
+    the tool name and arguments instead.
 
 # Getting Started
 

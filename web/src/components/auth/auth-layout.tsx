@@ -89,22 +89,50 @@ export function AuthLayout({ scene, sceneCard, children }: AuthLayoutProps) {
 
 const stack = "flex flex-col gap-3.5";
 
-// ponytail: forms are not wired yet. Each will post to the core, which calls WorkOS; the web app
-// holds no WorkOS key and makes no access decision.
-const notWired = (e: FormEvent) => e.preventDefault();
-
-/** A screen that takes input. */
+/** A screen that takes input. The handler gets the form's fields; the browser never posts it. */
 export function AuthForm({
 	label,
+	onSubmit,
 	children,
 }: {
 	label: string;
+	onSubmit?: (data: FormData) => void;
 	children: ReactNode;
 }) {
+	const submit = (e: FormEvent<HTMLFormElement>) => {
+		e.preventDefault();
+		onSubmit?.(new FormData(e.currentTarget));
+	};
 	return (
-		<form aria-label={label} className={stack} onSubmit={notWired} noValidate>
+		<form aria-label={label} className={stack} onSubmit={submit} noValidate>
 			{children}
 		</form>
+	);
+}
+
+/** What went wrong, said where the person is looking. */
+export function FormError({ message }: { message?: string | null }) {
+	if (!message) return null;
+	return (
+		<p
+			role="alert"
+			className="m-0 rounded-lg bg-destructive/12 px-3.5 py-2.5 text-[12.5px] text-danger-foreground leading-normal"
+		>
+			{message}
+		</p>
+	);
+}
+
+/** A quiet confirmation, such as "check your inbox". */
+export function FormNote({ children }: { children?: ReactNode }) {
+	if (!children) return null;
+	return (
+		<p
+			aria-live="polite"
+			className="m-0 rounded-lg bg-muted px-3.5 py-2.5 text-[12.5px] text-soft-foreground leading-normal"
+		>
+			{children}
+		</p>
 	);
 }
 
