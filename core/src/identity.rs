@@ -192,11 +192,12 @@ impl TokenVerifier {
                 return Ok(set);
             }
         }
-        let set = Arc::new(self.source.keys().await?);
-        *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Some((now, set.clone()));
+        // Before the fetch: a failing WorkOS must not be retried on every unknown kid either.
         if forced {
             *last_forced = Some(now);
         }
+        let set = Arc::new(self.source.keys().await?);
+        *self.keys.write().unwrap_or_else(|e| e.into_inner()) = Some((now, set.clone()));
         Ok(set)
     }
 
@@ -421,6 +422,7 @@ enum Change {
         member: MemberId,
         directory_user: String,
         email: Option<String>,
+        workos_user: Option<String>,
     },
     Leave {
         team: TeamId,
@@ -471,6 +473,23 @@ fn slug(s: &str) -> String {
         .collect()
 }
 
+/// The AuthKit user to link at sync. A lookup error means "no link" (first sign-in links
+/// instead), so a WorkOS outage cannot hold back removals in every tenant.
+async fn link(
+    users: &dyn UserLookup,
+    email: Option<&str>,
+    org: &str,
+    e: &EventSchema,
+) -> Option<String> {
+    match users.user_by_email(email?, org).await {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::warn!(id = %e.id, %error, "authkit user lookup failed; member left unlinked");
+            None
+        }
+    }
+}
+
 /// `None` for an event type Mandate does not act on; otherwise the org and its change.
 async fn prepare(
     store: &Store,
@@ -491,10 +510,7 @@ async fn prepare(
             let change = if kind == "dsync.user.deleted" || u.state != "active" {
                 Change::RemoveMember(id)
             } else {
-                let workos_user = match &u.email {
-                    Some(email) => users.user_by_email(email, &u.organization_id).await?,
-                    None => None,
-                };
+                let workos_user = link(users, u.email.as_deref(), &u.organization_id, e).await;
                 Change::Member {
                     id,
                     directory_user: u.id,
@@ -532,6 +548,7 @@ async fn prepare(
                     team,
                     group: group.id,
                     member,
+                    workos_user: link(users, user.email.as_deref(), &org, e).await,
                     directory_user: user.id,
                     email: user.email,
                 }
@@ -592,8 +609,16 @@ async fn apply(
             member,
             directory_user,
             email,
+            workos_user,
         } => {
-            store::upsert_member(&mut tx, &member, &directory_user, email.as_deref(), None).await?;
+            store::upsert_member(
+                &mut tx,
+                &member,
+                &directory_user,
+                email.as_deref(),
+                workos_user.as_deref(),
+            )
+            .await?;
             store::upsert_team(&mut tx, &team, &group).await?;
             store::set_team_member(&mut tx, &team, &member, true).await?;
         }

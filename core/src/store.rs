@@ -147,7 +147,9 @@ pub async fn set_directory_cursor(tx: &mut Tx, after: &str) -> Result<(), StoreE
     Ok(())
 }
 
-/// Keeps an existing AuthKit link when `workos_user` is `None`, and never links an AuthKit
+/// A missing email keeps the stored one. A changed email replaces the AuthKit link with
+/// `workos_user` (even `None`): a link made for the old address must not survive it. An
+/// unchanged email keeps an existing link when `workos_user` is `None`. Never links an AuthKit
 /// user that another member already holds.
 pub async fn upsert_member(
     tx: &mut Tx,
@@ -162,7 +164,9 @@ pub async fn upsert_member(
            case when exists (select 1 from members m where m.tenant_id = current_setting('mandate.tenant', true) \
              and m.workos_user_id = $4 and m.id <> $1) then null else $4 end \
          on conflict (tenant_id, id) do update set workos_directory_user_id = excluded.workos_directory_user_id, \
-           email = excluded.email, workos_user_id = coalesce(excluded.workos_user_id, members.workos_user_id)",
+           email = coalesce(excluded.email, members.email), \
+           workos_user_id = case when excluded.email is not null and lower(excluded.email) is distinct from lower(members.email) \
+             then excluded.workos_user_id else coalesce(excluded.workos_user_id, members.workos_user_id) end",
     )
     .bind(member.as_str())
     .bind(directory_user)

@@ -78,6 +78,7 @@ struct FakeKeys {
     fetches: AtomicUsize,
     slow: AtomicBool,
     release: tokio::sync::Notify,
+    fail: AtomicBool,
 }
 
 #[async_trait]
@@ -86,6 +87,9 @@ impl KeySource for FakeKeys {
         let n = self.fetches.fetch_add(1, Ordering::SeqCst);
         if self.slow.load(Ordering::SeqCst) {
             self.release.notified().await;
+        }
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(IdentityError::Upstream("outage".into()));
         }
         Ok(self.versions[n.min(self.versions.len() - 1)].clone())
     }
@@ -97,6 +101,7 @@ fn verifier(versions: Vec<JwkSet>) -> (Arc<FakeKeys>, TokenVerifier) {
         fetches: AtomicUsize::new(0),
         slow: AtomicBool::new(false),
         release: tokio::sync::Notify::new(),
+        fail: AtomicBool::new(false),
     });
     let v = TokenVerifier::with_source(keys.clone(), CLIENT_ID.into());
     (keys, v)
@@ -236,6 +241,24 @@ async fn unknown_kids_cannot_flood_or_stall_key_fetches() {
     assert!(quick.is_ok());
     keys.release.notify_one();
     assert!(stuck.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn a_failed_forced_refresh_also_cools_down() {
+    let (keys, v) = verifier(vec![jwks(&["k1"])]);
+    let tok = |kid: &str| rs256(kid, claims("user_ann", "org_1", NOW + 3600));
+    v.verify(&tok("k1"), NOW).await.unwrap();
+    keys.fail.store(true, Ordering::SeqCst);
+    for i in 0..50 {
+        assert!(v.verify(&tok(&format!("x{i}")), NOW + 1 + i).await.is_err());
+    }
+    assert_eq!(
+        keys.fetches.load(Ordering::SeqCst),
+        2,
+        "one attempt during the outage"
+    );
+    // The cached set still serves known kids.
+    v.verify(&tok("k1"), NOW + 51).await.unwrap();
 }
 
 // ---- live ----
@@ -385,6 +408,19 @@ impl UserLookup for FakeUsers {
             .iter()
             .find(|u| u.0 == user && u.3)
             .map(|u| u.1.clone()))
+    }
+}
+
+/// WorkOS user lookups all fail (an outage).
+struct DownUsers;
+
+#[async_trait]
+impl UserLookup for DownUsers {
+    async fn user_by_email(&self, _: &str, _: &str) -> Result<Option<String>, IdentityError> {
+        Err(IdentityError::Upstream("outage".into()))
+    }
+    async fn verified_email(&self, _: &str) -> Result<Option<String>, IdentityError> {
+        Err(IdentityError::Upstream("outage".into()))
     }
 }
 
@@ -882,4 +918,88 @@ async fn bad_events_are_dead_lettered_and_removals_keep_flowing() {
     .map(|r| (r.get(0), r.get(1)))
     .collect();
     assert_eq!(dead, [(eid(2), None), (eid(3), Some(o.clone()))]);
+}
+
+async fn member_row(s: &Store, t: &TenantId, id: &str) -> (Option<String>, Option<String>) {
+    let mut tx = s.begin(t).await.unwrap();
+    let r = sqlx::query("select email, workos_user_id from members where id = $1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    (r.get(0), r.get(1))
+}
+
+#[tokio::test]
+#[ignore]
+async fn email_changes_relink_and_lookup_outages_do_not_halt_sync() {
+    let _turn = SYNC.lock().await;
+    let s = app_store().await;
+    let o = org();
+    reset_cursor().await;
+    let ann = "directory_user_ann";
+    let old = "directory_user_ANN@example.com".to_owned();
+    let linked = FakeUsers(vec![authkit("user_ann", "directory_user_ANN", &o, true)]);
+    let n = std::cell::Cell::new(0);
+    let next = |data: Value| {
+        n.set(n.get() + 1);
+        source(vec![event(n.get(), "dsync.user.updated", data)])
+    };
+    let with_email = |email: Option<&str>| {
+        let mut u = user("directory_user_ANN", &o, "active");
+        match email {
+            Some(e) => u["email"] = json!(e),
+            None => drop(u.as_object_mut().unwrap().remove("email")),
+        }
+        u
+    };
+
+    sync_directory(&s, &next(with_email(Some(&old))), &linked)
+        .await
+        .unwrap();
+    let t = tenant_of(&s, &o).await;
+    assert_eq!(
+        member_row(&s, &t, ann).await,
+        (Some(old.clone()), Some("user_ann".into()))
+    );
+    // Same email, lookup finds nothing this time: the link stays.
+    sync_directory(&s, &next(with_email(Some(&old))), &nobody())
+        .await
+        .unwrap();
+    assert_eq!(
+        member_row(&s, &t, ann).await,
+        (Some(old.clone()), Some("user_ann".into()))
+    );
+    // An event without an email keeps the stored email and link.
+    sync_directory(&s, &next(with_email(None)), &nobody())
+        .await
+        .unwrap();
+    assert_eq!(
+        member_row(&s, &t, ann).await,
+        (Some(old.clone()), Some("user_ann".into()))
+    );
+    // The directory email changes to an address with no AuthKit user: the old link goes.
+    let new = "ann.new@example.com";
+    sync_directory(&s, &next(with_email(Some(new))), &linked)
+        .await
+        .unwrap();
+    assert_eq!(member_row(&s, &t, ann).await, (Some(new.into()), None));
+    // A lookup outage at sync: applied, unlinked, the run carries on.
+    let src = source(vec![
+        event(
+            10,
+            "dsync.user.created",
+            user("directory_user_BOB", &o, "active"),
+        ),
+        event(
+            11,
+            "dsync.user.deleted",
+            user("directory_user_ANN", &o, "inactive"),
+        ),
+    ]);
+    assert_eq!(sync_directory(&s, &src, &DownUsers).await.unwrap(), 2);
+    assert_eq!(
+        snapshot(&s, &t).await[0],
+        "directory_user_bob:directory_user_BOB:"
+    );
 }
