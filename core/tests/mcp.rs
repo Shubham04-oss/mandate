@@ -374,3 +374,40 @@ async fn backend_error_detail_does_not_reach_the_agent() {
     assert_eq!(out["result"]["content"][0]["text"], "the tool failed");
     assert!(!out.to_string().contains("SECRET"), "{out}");
 }
+
+#[tokio::test]
+#[ignore]
+async fn invalid_args_are_refused_before_the_gate() {
+    let s = app_store().await;
+    let t = tenant();
+    seed(&s, &t, &["web.read_page", "web.submit_form"]).await;
+    let backend = Arc::new(Recorder::default());
+    let app = app(s.clone(), backend.clone());
+
+    for (name, args) in [
+        ("web.read_page", json!({ "url": "http://docs.test/" })),
+        ("web.read_page", json!({})),
+        (
+            "web.submit_form",
+            json!({ "url": "https://example.com/f", "fields": { "q": 1 } }),
+        ),
+        ("web.submit_form", json!({ "url": "https://example.com/f" })),
+        (
+            "web.submit_form",
+            json!({ "url": "https://127.0.0.1/", "fields": {} }),
+        ),
+    ] {
+        let out = call(&app, &t, name, args.clone()).await;
+        assert!(out["error"].is_object(), "{name} {args}: {out}");
+    }
+
+    assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    // No gate call: nothing audited, no approval asked for.
+    assert_eq!(audit_count(&s, &t).await, 0);
+    let mut tx = s.begin(&t).await.unwrap();
+    let n: i64 = sqlx::query_scalar("select count(*) from approvals")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}

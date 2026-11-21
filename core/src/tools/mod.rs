@@ -24,6 +24,8 @@ pub trait Tool: Send + Sync {
     /// Per call, so a tool can be `Read` for some args and `External` for others.
     fn effect(&self, args: &serde_json::Value) -> Effect;
     fn input_schema(&self) -> serde_json::Value;
+    /// Checked before the gate, so malformed args never reach a decision, audit or approval.
+    fn validate(&self, args: &serde_json::Value) -> Result<(), ToolError>;
     async fn call(
         &self,
         who: &Assertion,

@@ -80,6 +80,16 @@ fn parse_url(args: &Value) -> Result<Url, ToolError> {
     Ok(url)
 }
 
+fn parse_fields(args: &Value) -> Result<BTreeMap<String, String>, ToolError> {
+    let bad = || ToolError::InvalidArgs("fields must be an object of strings".into());
+    args.get("fields")
+        .and_then(Value::as_object)
+        .ok_or_else(bad)?
+        .iter()
+        .map(|(k, v)| Ok((k.clone(), v.as_str().ok_or_else(bad)?.to_owned())))
+        .collect()
+}
+
 /// The one host of an already checked URL.
 fn own_host(url: &Url) -> Vec<String> {
     url.host_str().map(str::to_owned).into_iter().collect()
@@ -157,6 +167,9 @@ impl Tool for ReadPage {
             "additionalProperties": false
         })
     }
+    fn validate(&self, args: &Value) -> Result<(), ToolError> {
+        parse_url(args).map(drop)
+    }
     async fn call(&self, _: &Assertion, args: Value) -> Result<Value, ToolError> {
         let url = parse_url(&args)?;
         // Same split as `effect`: a Read call may only reach the read allowlist.
@@ -191,16 +204,13 @@ impl Tool for SubmitForm {
             "additionalProperties": false
         })
     }
+    fn validate(&self, args: &Value) -> Result<(), ToolError> {
+        parse_url(args)?;
+        parse_fields(args).map(drop)
+    }
     async fn call(&self, _: &Assertion, args: Value) -> Result<Value, ToolError> {
         let url = parse_url(&args)?;
-        let bad = || ToolError::InvalidArgs("fields must be an object of strings".into());
-        let fields = args
-            .get("fields")
-            .and_then(Value::as_object)
-            .ok_or_else(bad)?
-            .iter()
-            .map(|(k, v)| Ok((k.clone(), v.as_str().ok_or_else(bad)?.to_owned())))
-            .collect::<Result<BTreeMap<_, _>, ToolError>>()?;
+        let fields = parse_fields(&args)?;
         Ok(to_json(
             self.backend
                 .fill_and_submit(&url, &fields, &own_host(&url))

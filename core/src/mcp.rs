@@ -110,6 +110,8 @@ impl ServerHandler for Mcp {
         let unknown = || ErrorData::invalid_params("unknown tool", None);
         let id = ToolId::parse(&req.name).map_err(|_| unknown())?;
         let tool = s.catalog.get(&id).ok_or_else(unknown)?;
+        tool.validate(&args)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
         // The effect of these exact args: the same tool can be Read for one call and External for another.
         let effect = tool.effect(&args);
         let now = OffsetDateTime::now_utc();
