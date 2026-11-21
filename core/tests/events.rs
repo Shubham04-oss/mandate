@@ -486,3 +486,77 @@ async fn handler_failure_retries() {
     assert_eq!(c.process(&store, &keys, &raw, now).await, Outcome::Skipped);
     assert_eq!(h.calls.load(Ordering::SeqCst), 1);
 }
+
+/// The dev bus and its test queue; `None` (skipped) without them or without AWS credentials.
+async fn live_bus() -> Option<(aws_config::SdkConfig, String, String)> {
+    let (Ok(bus), Ok(queue)) = (
+        std::env::var("MANDATE_EVENT_BUS"),
+        std::env::var("MANDATE_QUEUE_TEST"),
+    ) else {
+        println!("skipped: MANDATE_EVENT_BUS or MANDATE_QUEUE_TEST not set");
+        return None;
+    };
+    let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    if cfg.credentials_provider().is_none() {
+        println!("skipped: no AWS credentials");
+        return None;
+    }
+    Some((cfg, bus, queue))
+}
+
+#[tokio::test]
+#[ignore]
+async fn bus_round_trip() {
+    let Some((cfg, bus, queue)) = live_bus().await else {
+        return;
+    };
+    let store = app_store().await;
+    let signer = Signer::new(Source::core(), key());
+    let t = tenant();
+    let env = Envelope {
+        id: Uuid::new_v4(),
+        source: Source::core(),
+        r#type: EventType::parse("conversation.started.v1").unwrap(),
+        tenant: t.clone(),
+        occurred_at: OffsetDateTime::now_utc(),
+        data: started(9).data(),
+    };
+    mandate::events::publisher::BusSink::new(&cfg, bus)
+        .send(&[signer.sign(env.clone()).unwrap()])
+        .await
+        .unwrap();
+
+    let sqs = aws_sdk_sqs::Client::new(&cfg);
+    let h = Counting::default();
+    let c = consumer("test", h.clone());
+    let keys = keys_for(&signer);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while !h.seen.lock().unwrap().iter().any(|e| e.id == env.id) {
+        assert!(std::time::Instant::now() < deadline, "event did not arrive");
+        let r = sqs
+            .receive_message()
+            .queue_url(&queue)
+            .wait_time_seconds(10)
+            .send()
+            .await
+            .unwrap();
+        for m in r.messages.unwrap_or_default() {
+            // Messages signed by an earlier run's key are quarantined, which is right.
+            c.process(
+                &store,
+                &keys,
+                m.body().unwrap_or_default().as_bytes(),
+                OffsetDateTime::now_utc(),
+            )
+            .await;
+            sqs.delete_message()
+                .queue_url(&queue)
+                .receipt_handle(m.receipt_handle().unwrap_or_default())
+                .send()
+                .await
+                .unwrap();
+        }
+    }
+    let seen = h.seen.lock().unwrap().clone();
+    assert_eq!(seen.iter().find(|e| e.id == env.id), Some(&env));
+}
