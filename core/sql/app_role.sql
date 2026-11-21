@@ -16,6 +16,8 @@ grant usage on schema public to :"role";
 grant select, insert, update, delete on members, teams, team_members, approvals to :"role";
 -- Agents and grants are created by admins, not the app: it only disables agents and revokes grants.
 grant select, update on agents to :"role";
+-- One exception: sign-in creates each member's personal operator (first sign-in, sign-up).
+grant insert on agents to :"role";
 grant select, delete on grants to :"role";
 -- Append-only: the app can never rewrite or erase history.
 grant select, insert on audit to :"role";

@@ -484,7 +484,7 @@ fn malformed(err: &serde_json::Error) -> Fail {
 }
 
 /// A WorkOS id as a Mandate id: lowercase, other characters as `_`, at most 64 long.
-fn slug(s: &str) -> String {
+pub(crate) fn slug(s: &str) -> String {
     s.chars()
         .map(|c| c.to_ascii_lowercase())
         .map(|c| {

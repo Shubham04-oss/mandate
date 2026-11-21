@@ -111,6 +111,24 @@ pub fn clear_cookie() -> HeaderValue {
     HeaderValue::from_static("mandate_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
 }
 
+pub const SSO_COOKIE: &str = "mandate_sso";
+
+/// Binds an SSO state to the browser that started it, so a callback link made elsewhere
+/// (login CSRF) is refused. Lax still sends it on WorkOS's top-level redirect back.
+pub fn sso_cookie(state: &str) -> Result<HeaderValue, ApiError> {
+    HeaderValue::from_str(&format!(
+        "{SSO_COOKIE}={state}; Path=/v1/auth/sso; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
+        PENDING_TTL.whole_seconds()
+    ))
+    .map_err(|_| ApiError::internal())
+}
+
+pub fn clear_sso_cookie() -> HeaderValue {
+    HeaderValue::from_static(
+        "mandate_sso=; Path=/v1/auth/sso; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
+    )
+}
+
 /// A new session for `member` in `tenant` (the transaction's tenant); returns the cookie
 /// value `<tenant>.<secret>`. Clears the member's dead sessions while here.
 pub async fn create(

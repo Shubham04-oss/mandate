@@ -1,26 +1,58 @@
 //! The web app's JSON API. The core authenticates every request from its own session cookie;
 //! the web app decides nothing and never talks to WorkOS.
+pub mod auth;
 pub mod ratelimit;
 pub mod session;
 
 use crate::store::{Store, StoreError};
+use auth::AuthProvider;
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::body::Bytes;
+use axum::extract::{FromRequest, Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 
 pub(crate) const MAX_BODY_BYTES: usize = 64 * 1024;
 const CSRF_HEADER: HeaderName = HeaderName::from_static("x-mandate");
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct ApiState {
     pub store: Store,
     /// `MANDATE_WEB_ORIGIN`: the only origin CORS allows and CSRF accepts, e.g. `https://app.example.com`.
     pub web_origin: String,
+    pub auth: Arc<dyn AuthProvider>,
+    /// Where WorkOS sends the browser after SSO: this API's `/v1/auth/sso/callback`.
+    pub sso_redirect_uri: String,
+}
+
+/// A JSON body (an empty one reads as `{}`); a malformed one is `invalid_input`, never serde's
+/// text, which can quote what was typed.
+pub struct Input<T>(pub T);
+
+impl<S, T> FromRequest<S> for Input<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
+        let bytes = Bytes::from_request(req, state)
+            .await
+            .map_err(|_| ApiError::invalid_input())?;
+        let bytes: &[u8] = if bytes.is_empty() { b"{}" } else { &bytes };
+        serde_json::from_slice(bytes)
+            .map(Input)
+            .map_err(|_| ApiError::invalid_input())
+    }
 }
 
 /// `{ "error": { "code", "message" } }`; messages are ours, never WorkOS's or the database's.
@@ -147,7 +179,8 @@ fn cors(web_origin: &str) -> CorsLayer {
 
 /// Every `/v1` route of the web API, with its CSRF, CORS and body-size layers.
 pub fn router(state: Arc<ApiState>) -> Router {
-    with_routes(Router::new(), state)
+    let routes = Router::new().merge(auth::routes(&state));
+    with_routes(routes, state)
 }
 
 /// `routes` behind the API's layers; the layers cover only routes added before this call.
@@ -156,6 +189,10 @@ pub fn with_routes(routes: Router<Arc<ApiState>>, state: Arc<ApiState>) -> Route
     routes
         .layer(middleware::from_fn_with_state(state.clone(), csrf))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            TIMEOUT,
+        ))
         .layer(cors)
         .with_state(state)
 }
