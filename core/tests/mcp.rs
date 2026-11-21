@@ -116,6 +116,8 @@ fn app(store: Store, backend: Arc<dyn BrowserBackend>) -> axum::Router {
         policy: policy(),
         catalog,
         assertion_key: key().verifying_key(),
+        assertion_signing_key: key(),
+        workos: None,
     }))
 }
 

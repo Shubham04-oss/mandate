@@ -1,6 +1,7 @@
 //! The MCP server: the only door from the agent to tools. Lists what the gate allows, gates every call.
 use crate::assertion::{Assertion, verify};
 use crate::gate::{Outcome, authorize, list};
+use crate::identity::{TokenVerifier, exchange};
 use crate::ids::ToolId;
 use crate::policy::{Decision, Effect, Policy};
 use crate::store::Store;
@@ -8,7 +9,7 @@ use crate::tools::{Catalog, ToolError};
 use axum::extract::{Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use http::StatusCode;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
@@ -34,6 +35,9 @@ pub struct AppState {
     pub policy: Policy,
     pub catalog: Catalog,
     pub assertion_key: VerifyingKey,
+    pub assertion_signing_key: SigningKey,
+    /// `None` when WorkOS is not configured: the exchange route answers 404.
+    pub workos: Option<Arc<TokenVerifier>>,
 }
 
 /// The verified assertion of this very request; never cached across requests.
@@ -148,6 +152,7 @@ async fn bearer(State(s): State<Arc<AppState>>, mut req: Request, next: Next) ->
 }
 
 /// MCP streamable HTTP at `/mcp`, stateless: every request stands on its own bearer assertion.
+/// `POST /v1/assertions` sits outside that check: its bearer is a WorkOS token, not an assertion.
 pub fn router(state: Arc<AppState>) -> axum::Router {
     let handler = Mcp(state.clone());
     let config = StreamableHttpServerConfig::default()
@@ -162,9 +167,13 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         Arc::new(NeverSessionManager::default()),
         config,
     );
+    let exchange = axum::Router::new()
+        .route("/v1/assertions", axum::routing::post(exchange))
+        .with_state(state.clone());
     axum::Router::new()
         .nest_service("/mcp", mcp)
         .layer(middleware::from_fn_with_state(state, bearer))
+        .merge(exchange)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

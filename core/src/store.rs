@@ -1,4 +1,4 @@
-use crate::ids::{AgentId, MemberId, TenantId, ToolId};
+use crate::ids::{AgentId, MemberId, TeamId, TenantId, ToolId};
 use crate::policy::Parent;
 use sqlx::{PgPool, Postgres, Row};
 use time::{Duration, OffsetDateTime};
@@ -82,14 +82,187 @@ impl Store {
             .await?;
         Ok(tx)
     }
+
+    /// `tenants` has no RLS, so an org maps to its tenant before any tenant is set.
+    pub async fn tenant_for_org(&self, org: &str) -> Result<Option<TenantId>, StoreError> {
+        let id: Option<String> =
+            sqlx::query_scalar("select id from tenants where workos_org_id = $1")
+                .bind(org)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(id.map(|s| TenantId::parse(&s)).transpose()?)
+    }
+
+    /// The org's tenant, created as `id` if new; `None` if `id` already belongs to another org.
+    pub async fn ensure_tenant(
+        &self,
+        org: &str,
+        id: &TenantId,
+    ) -> Result<Option<TenantId>, StoreError> {
+        sqlx::query(
+            "insert into tenants (id, workos_org_id) values ($1, $2) on conflict do nothing",
+        )
+        .bind(id.as_str())
+        .bind(org)
+        .execute(&self.pool)
+        .await?;
+        self.tenant_for_org(org).await
+    }
+
+    pub async fn directory_cursor(&self) -> Result<Option<String>, StoreError> {
+        Ok(sqlx::query_scalar("select after from directory_cursor")
+            .fetch_optional(&self.pool)
+            .await?)
+    }
 }
 
-/// `None` if the agent is not in this tenant.
+/// Written in the event's own transaction, so an event is applied and passed exactly together.
+pub async fn set_directory_cursor(tx: &mut Tx, after: &str) -> Result<(), StoreError> {
+    sqlx::query(
+        "insert into directory_cursor (id, after) values (true, $1) \
+         on conflict (id) do update set after = excluded.after",
+    )
+    .bind(after)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub async fn upsert_member(
+    tx: &mut Tx,
+    member: &MemberId,
+    workos_user: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "insert into members (tenant_id, id, workos_user_id) values (current_setting('mandate.tenant'), $1, $2) \
+         on conflict (tenant_id, id) do update set workos_user_id = excluded.workos_user_id",
+    )
+    .bind(member.as_str())
+    .bind(workos_user)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// A person who left: no membership, no grants from or to them, no pending approval they
+/// asked for or could give, and their personal agent disabled.
+pub async fn remove_member(tx: &mut Tx, member: &MemberId) -> Result<(), StoreError> {
+    let t = "current_setting('mandate.tenant', true)";
+    for q in [
+        // Before team_members goes: "could approve" includes their teams' agents.
+        format!(
+            "delete from approvals a where a.tenant_id = {t} and a.used_at is null \
+             and (a.requested_by = $1 or a.approved_by = $1 or exists ( \
+               select 1 from agents g where g.tenant_id = {t} and g.id = a.agent \
+               and (g.owner_member = $1 or exists (select 1 from team_members tm \
+                 where tm.tenant_id = {t} and tm.team_id = g.owner_team and tm.member_id = $1))))"
+        ),
+        format!(
+            "delete from grants where tenant_id = {t} \
+             and ((principal_kind = 'member' and principal_id = $1) or granted_by = $1)"
+        ),
+        format!("delete from team_members where tenant_id = {t} and member_id = $1"),
+        format!("delete from members where tenant_id = {t} and id = $1"),
+        format!(
+            "update agents set disabled = true where tenant_id = {t} and kind = 'personal' and owner_member = $1"
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(q))
+            .bind(member.as_str())
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn upsert_team(tx: &mut Tx, team: &TeamId, workos_group: &str) -> Result<(), StoreError> {
+    sqlx::query(
+        "insert into teams (tenant_id, id, workos_group_id) values (current_setting('mandate.tenant'), $1, $2) \
+         on conflict (tenant_id, id) do update set workos_group_id = excluded.workos_group_id",
+    )
+    .bind(team.as_str())
+    .bind(workos_group)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_team(tx: &mut Tx, team: &TeamId) -> Result<(), StoreError> {
+    let t = "current_setting('mandate.tenant', true)";
+    for q in [
+        format!("delete from team_members where tenant_id = {t} and team_id = $1"),
+        format!(
+            "delete from grants where tenant_id = {t} and principal_kind = 'team' and principal_id = $1"
+        ),
+        format!("delete from teams where tenant_id = {t} and id = $1"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(q))
+            .bind(team.as_str())
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn set_team_member(
+    tx: &mut Tx,
+    team: &TeamId,
+    member: &MemberId,
+    present: bool,
+) -> Result<(), StoreError> {
+    let q = if present {
+        "insert into team_members (tenant_id, team_id, member_id) \
+         values (current_setting('mandate.tenant'), $1, $2) on conflict do nothing"
+    } else {
+        "delete from team_members where tenant_id = current_setting('mandate.tenant', true) \
+         and team_id = $1 and member_id = $2"
+    };
+    sqlx::query(q)
+        .bind(team.as_str())
+        .bind(member.as_str())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn member_for_workos_user(
+    tx: &mut Tx,
+    workos_user: &str,
+) -> Result<Option<MemberId>, StoreError> {
+    let id: Option<String> = sqlx::query_scalar(
+        "select id from members where workos_user_id = $1 and tenant_id = current_setting('mandate.tenant', true)",
+    )
+    .bind(workos_user)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(id.map(|s| MemberId::parse(&s)).transpose()?)
+}
+
+/// The member's own personal agent, or a bot of a team they belong to; never a disabled one.
+pub async fn may_use_agent(
+    tx: &mut Tx,
+    member: &MemberId,
+    agent: &AgentId,
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from agents g where g.id = $1 and not g.disabled \
+           and g.tenant_id = current_setting('mandate.tenant', true) \
+           and (g.owner_member = $2 or exists (select 1 from team_members tm \
+             where tm.tenant_id = current_setting('mandate.tenant', true) \
+             and tm.team_id = g.owner_team and tm.member_id = $2)))",
+    )
+    .bind(agent.as_str())
+    .bind(member.as_str())
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// `None` if the agent is not in this tenant or is disabled.
 pub async fn agent_parents(
     tx: &mut Tx,
     agent: &AgentId,
 ) -> Result<Option<Vec<Parent>>, StoreError> {
-    let row = sqlx::query("select owner_member, owner_team from agents where id = $1 and tenant_id = current_setting('mandate.tenant', true)")
+    let row = sqlx::query("select owner_member, owner_team from agents where id = $1 and not disabled and tenant_id = current_setting('mandate.tenant', true)")
         .bind(agent.as_str())
         .fetch_optional(&mut **tx)
         .await?;
@@ -99,7 +272,7 @@ pub async fn agent_parents(
         parents.push(Parent::Member(MemberId::parse(&m)?));
     }
     if let Some(t) = row.get::<Option<String>, _>("owner_team") {
-        parents.push(Parent::Team(crate::ids::TeamId::parse(&t)?));
+        parents.push(Parent::Team(TeamId::parse(&t)?));
     }
     Ok(Some(parents))
 }

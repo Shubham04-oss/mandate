@@ -16,6 +16,7 @@ chromiumoxide = "0.9.1"
 ed25519-dalek = "3"
 futures = "0.3.34"
 http = "1.5.0"
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 rmcp = { version = "3.11.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,6 +29,7 @@ tower-http = { version = "0.6.11", features = ["limit", "timeout"] }
 tracing = "0.1.44"
 url = "2.5.9"
 uuid = { version = "1", features = ["v4"] }
+workos = "3.7"
 
 [dev-dependencies]
 http-body-util = "0.1.5"
