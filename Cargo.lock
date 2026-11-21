@@ -144,8 +144,11 @@ dependencies = [
  "futures-util",
  "log",
  "pin-project-lite",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2310,6 +2313,7 @@ name = "mandate"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "async-tungstenite",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-bedrockagentcore",
@@ -2326,6 +2330,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken 12.0.0",
  "rmcp",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -3078,6 +3083,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4084,6 +4090,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1 0.10.7",
  "thiserror",
  "utf-8",

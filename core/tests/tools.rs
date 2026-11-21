@@ -210,19 +210,26 @@ fn catalog_looks_up_tools_and_schemas_are_objects() {
     assert!(cat.get(&ToolId::parse("web.nope").unwrap()).is_none());
 }
 
-#[tokio::test]
-#[ignore]
-async fn agentcore_reads_example_com() {
+/// The AgentCore backend for live tests, or None when MANDATE_BROWSER_ID or credentials are absent.
+async fn live_browser() -> Option<mandate::tools::agentcore::AgentCoreBrowser> {
     let Ok(id) = std::env::var("MANDATE_BROWSER_ID") else {
         println!("skipped: MANDATE_BROWSER_ID not set");
-        return;
+        return None;
     };
     let cfg = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     if cfg.credentials_provider().is_none() {
         println!("skipped: no AWS credentials");
-        return;
+        return None;
     }
-    let b = mandate::tools::agentcore::AgentCoreBrowser::new(&cfg, id);
+    Some(mandate::tools::agentcore::AgentCoreBrowser::new(&cfg, id))
+}
+
+#[tokio::test]
+#[ignore]
+async fn agentcore_reads_example_com() {
+    let Some(b) = live_browser().await else {
+        return;
+    };
     let page = b
         .read_page(
             &Url::parse("https://example.com").unwrap(),
@@ -231,5 +238,29 @@ async fn agentcore_reads_example_com() {
         .await
         .unwrap();
     assert!(page.title.contains("Example Domain"));
-    assert!(page.text.contains("Example Domain"));
+    assert!(
+        page.text.contains("documentation examples"),
+        "text: {:?}",
+        page.text
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn agentcore_blocks_cross_host_navigation() {
+    let Some(b) = live_browser().await else {
+        return;
+    };
+    let r = b
+        .read_page(
+            &Url::parse("https://example.com").unwrap(),
+            &["example.org".into()],
+        )
+        .await;
+    // The request interception refuses it, not only the later final-url check.
+    assert!(
+        matches!(&r, Err(ToolError::Backend(m)) if m.contains("ERR_BLOCKED_BY_CLIENT")),
+        "{:?}",
+        r.err()
+    );
 }

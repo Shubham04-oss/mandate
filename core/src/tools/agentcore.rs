@@ -43,6 +43,9 @@ pub struct AgentCoreBrowser {
 
 impl AgentCoreBrowser {
     pub fn new(config: &aws_config::SdkConfig, browser_id: impl Into<String>) -> Self {
+        // rustls is built with both ring and aws-lc-rs here, so the wss client needs one chosen;
+        // an Err means a provider is already installed, which is fine.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         Self {
             client: aws_sdk_bedrockagentcore::Client::new(config),
             config: config.clone(),
@@ -246,6 +249,9 @@ async fn watch_other_targets(
         .event_listener::<EventTargetCreated>()
         .await
         .map_err(backend)?
+        // Frames are seen browser-wide, including other tabs' (the AgentCore browser has another tab that makes one); this
+        // page's frames come through `attached` below.
+        .filter(|e| futures::future::ready(e.target_info.r#type != "iframe"))
         .map(|e| e.target_info.target_id.clone());
     // Children of the page (frames, workers) arrive through chromiumoxide's own auto-attach.
     let attached = page
