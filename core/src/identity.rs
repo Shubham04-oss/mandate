@@ -49,8 +49,15 @@ pub enum IdentityError {
     Store(#[from] StoreError),
 }
 
-fn upstream(e: impl std::fmt::Display) -> IdentityError {
-    IdentityError::Upstream(e.to_string())
+/// A WorkOS failure by kind only, never its text: a transport error's text carries the request
+/// URL (query parameters such as `email=`), and an API message may echo request data.
+fn upstream(e: workos::Error) -> IdentityError {
+    IdentityError::Upstream(match &e {
+        workos::Error::Api(a) => format!("status {}", a.status),
+        workos::Error::Network(t) => format!("network ({:?})", t.kind),
+        workos::Error::Decode(_) => "decode".into(),
+        _ => "other".into(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +90,7 @@ impl KeySource for WorkosKeys {
         // The SDK's typed JWKS is the same JSON jsonwebtoken reads.
         serde_json::to_value(r)
             .and_then(serde_json::from_value)
-            .map_err(upstream)
+            .map_err(|_| IdentityError::Upstream("jwks decode".into()))
     }
 }
 
@@ -687,6 +694,36 @@ pub async fn sync_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_errors_never_carry_request_text() {
+        use workos::transport::{TransportError, TransportErrorKind};
+        let leak = "error sending request for url (https://api.workos.com/user_management/users?email=secret%40x.com)";
+        let network =
+            workos::Error::Network(TransportError::new(TransportErrorKind::Connect, leak));
+        assert!(
+            network.to_string().contains("secret"),
+            "the raw text does leak"
+        );
+        let IdentityError::Upstream(s) = upstream(network) else {
+            unreachable!()
+        };
+        assert!(!s.contains("secret"));
+        assert_eq!(s, "network (Connect)");
+        let api = workos::Error::Api(Box::new(workos::ApiError {
+            status: 422,
+            code: None,
+            message: "secret@x.com is invalid".into(),
+            request_id: None,
+            retry_after: None,
+            raw_body: Default::default(),
+            headers: Default::default(),
+        }));
+        assert_eq!(
+            upstream(api).to_string(),
+            "workos request failed: status 422"
+        );
+    }
 
     #[test]
     fn slugs_are_valid_ids() {
