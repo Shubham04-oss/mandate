@@ -1,6 +1,6 @@
 # Mandate: design
 
-Date: 2026-11-21. Status: draft for the owner's review. A fresh start: every choice below was made
+Date: 2026-11-21. Status: approved by the owner, 2026-11-21. A fresh start: every choice below was made
 on its merits, not to fit earlier repositories (oryxa-go, oryxa-platform), which serve as reference
 only.
 
