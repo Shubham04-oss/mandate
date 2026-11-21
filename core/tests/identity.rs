@@ -3,7 +3,7 @@
 mod common;
 use async_trait::async_trait;
 use axum::body::Body;
-use common::app_store;
+use common::{admin_pool, app_store};
 use ed25519_dalek::SigningKey;
 use futures::stream::{self, BoxStream, StreamExt};
 use http::{Request, StatusCode};
@@ -434,7 +434,7 @@ async fn seed_directory(s: &Store, org: &str, users: &FakeUsers) -> TenantId {
     ]);
     assert_eq!(sync_directory(s, &src, users).await.unwrap(), 4);
     let t = tenant_of(s, org).await;
-    let mut tx = s.begin(&t).await.unwrap();
+    let mut tx = admin_pool().await.begin().await.unwrap();
     for (id, kind, m, team) in [
         ("ann-bot", "personal", Some("directory_user_ann"), None),
         ("bob-bot", "personal", Some("directory_user_bob"), None),
@@ -580,7 +580,7 @@ async fn removed_user_loses_grants_and_pending_approvals() {
     let t = seed_directory(&s, &o, &nobody()).await;
     let (ann, bob) = ("directory_user_ann", "directory_user_bob");
     let later = OffsetDateTime::now_utc() + Duration::hours(1);
-    let mut tx = s.begin(&t).await.unwrap();
+    let mut tx = admin_pool().await.begin().await.unwrap();
     for (kind, id, by) in [
         ("member", ann, "admin"),
         ("agent", "bob-bot", ann),

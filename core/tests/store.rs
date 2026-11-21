@@ -1,6 +1,6 @@
 //! Live tests: need DATABASE_URL (a superuser), run with `--ignored`.
 mod common;
-use common::app_store;
+use common::{admin_pool, app_store};
 use mandate::ids::{AgentId, MemberId, TenantId, ToolId};
 use mandate::policy::Parent;
 use mandate::store::{self, AuditEntry, Store, Tx};
@@ -29,9 +29,17 @@ async fn exec(tx: &mut Tx, t: &TenantId, sql: &'static str, binds: &[&str]) {
     q.execute(&mut **tx).await.unwrap();
 }
 
-async fn personal_agent(tx: &mut Tx, t: &TenantId, a: &str, owner: &str) {
-    exec(
-        tx,
+/// Runs as the superuser: the app role cannot create agents or grants.
+async fn seed(t: &TenantId, sql: &'static str, binds: &[&str]) {
+    let mut q = sqlx::query(sql).bind(t.as_str());
+    for b in binds {
+        q = q.bind(*b);
+    }
+    q.execute(&admin_pool().await).await.unwrap();
+}
+
+async fn personal_agent(t: &TenantId, a: &str, owner: &str) {
+    seed(
         t,
         "insert into agents (tenant_id, id, kind, owner_member) values ($1, $2, 'personal', $3)",
         &[a, owner],
@@ -40,7 +48,6 @@ async fn personal_agent(tx: &mut Tx, t: &TenantId, a: &str, owner: &str) {
 }
 
 async fn grant(
-    tx: &mut Tx,
     t: &TenantId,
     kind: &str,
     who: &str,
@@ -58,7 +65,7 @@ async fn grant(
     .bind(tl)
     .bind(standing)
     .bind(expires)
-    .execute(&mut **tx)
+    .execute(&admin_pool().await)
     .await
     .unwrap();
 }
@@ -68,9 +75,7 @@ async fn grant(
 async fn rows_of_another_tenant_are_invisible() {
     let s = app_store().await;
     let (a, b) = (tenant(), tenant());
-    let mut tx = s.begin(&a).await.unwrap();
-    personal_agent(&mut tx, &a, "bot", "ann").await;
-    tx.commit().await.unwrap();
+    personal_agent(&a, "bot", "ann").await;
 
     let mut tx = s.begin(&b).await.unwrap();
     assert!(
@@ -102,8 +107,8 @@ async fn expired_grant_grants_nothing() {
     let t = tenant();
     let now = OffsetDateTime::now_utc();
     let mut tx = s.begin(&t).await.unwrap();
-    personal_agent(&mut tx, &t, "bot", "ann").await;
-    grant(&mut tx, &t, "agent", "bot", "mail.send", false, now).await;
+    personal_agent(&t, "bot", "ann").await;
+    grant(&t, "agent", "bot", "mail.send", false, now).await;
     let g = store::live_grant(&mut tx, &agent("bot"), &[], &tool("mail.send"), now)
         .await
         .unwrap();
@@ -127,9 +132,8 @@ async fn team_grant_reaches_the_team_bot() {
     let t = tenant();
     let now = OffsetDateTime::now_utc();
     let mut tx = s.begin(&t).await.unwrap();
-    exec(&mut tx, &t, "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'teambot', 'team', 'ops')", &[]).await;
+    seed(&t, "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'teambot', 'team', 'ops')", &[]).await;
     grant(
-        &mut tx,
         &t,
         "team",
         "ops",
@@ -154,7 +158,7 @@ async fn team_grant_reaches_the_team_bot() {
 
 async fn approved(s: &Store, t: &TenantId, now: OffsetDateTime, hash: &[u8; 32]) -> Uuid {
     let mut tx = s.begin(t).await.unwrap();
-    personal_agent(&mut tx, t, "bot", "ann").await;
+    personal_agent(t, "bot", "ann").await;
     let id = store::request_approval(
         &mut tx,
         &agent("bot"),
@@ -254,8 +258,8 @@ async fn only_the_owner_can_approve() {
     let t = tenant();
     let now = OffsetDateTime::now_utc();
     let mut tx = s.begin(&t).await.unwrap();
-    personal_agent(&mut tx, &t, "bot", "ann").await;
-    exec(&mut tx, &t, "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'teambot', 'team', 'ops')", &[]).await;
+    personal_agent(&t, "bot", "ann").await;
+    seed(&t, "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'teambot', 'team', 'ops')", &[]).await;
     exec(
         &mut tx,
         &t,
@@ -380,4 +384,24 @@ async fn approval_details_show_the_exact_args_to_the_tenant_only() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn app_role_cannot_insert_agents_or_grants() {
+    let s = app_store().await;
+    let t = tenant();
+    for q in [
+        "insert into agents (tenant_id, id, kind, owner_member) values ($1, 'bot', 'personal', 'ann')",
+        "insert into grants (tenant_id, principal_kind, principal_id, tool, standing, expires_at, granted_by) \
+         values ($1, 'agent', 'bot', 'mail.send', true, now() + interval '1 hour', 'admin')",
+    ] {
+        let mut tx = s.begin(&t).await.unwrap();
+        let err = sqlx::query(q)
+            .bind(t.as_str())
+            .execute(&mut *tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("permission denied"), "{q}: {err}");
+    }
 }

@@ -1,6 +1,6 @@
 //! Live tests: need DATABASE_URL (a superuser), run with `--ignored`.
 mod common;
-use common::app_store;
+use common::{admin_pool, app_store};
 use mandate::assertion::Assertion;
 use mandate::gate::{Outcome, args_hash, authorize, list};
 use mandate::ids::{AgentId, MemberId, TenantId, ToolId};
@@ -35,8 +35,8 @@ fn who(t: &TenantId) -> Assertion {
 }
 
 /// Seeds agent `bot` owned by `ann`, with a live grant on each given tool.
-async fn seed(s: &Store, t: &TenantId, grants: &[&str], standing: bool) {
-    let mut tx = s.begin(t).await.unwrap();
+async fn seed(t: &TenantId, grants: &[&str], standing: bool) {
+    let mut tx = admin_pool().await.begin().await.unwrap();
     sqlx::query("insert into agents (tenant_id, id, kind, owner_member) values ($1, 'bot', 'personal', 'ann')")
         .bind(t.as_str())
         .execute(&mut *tx)
@@ -90,7 +90,7 @@ fn args_hash_ignores_key_order_and_whitespace() {
 async fn read_under_grant_runs_and_is_audited() {
     let s = app_store().await;
     let t = tenant();
-    seed(&s, &t, &["docs.read"], false).await;
+    seed(&t, &["docs.read"], false).await;
     let now = OffsetDateTime::now_utc();
     let out = authorize(
         &s,
@@ -139,7 +139,7 @@ async fn read_under_grant_runs_and_is_audited() {
 async fn external_asks_then_runs_once_after_approval() {
     let s = app_store().await;
     let t = tenant();
-    seed(&s, &t, &["mail.send"], true).await;
+    seed(&t, &["mail.send"], true).await;
     let args = json!({"to": "a@b.c"});
     let now = OffsetDateTime::now_utc();
     let (p, w, tl) = (policy(), who(&t), tool("mail.send"));
@@ -190,7 +190,7 @@ async fn external_asks_then_runs_once_after_approval() {
 async fn cross_tenant_agent_is_refused() {
     let s = app_store().await;
     let (a, b) = (tenant(), tenant());
-    seed(&s, &b, &["docs.read"], false).await;
+    seed(&b, &["docs.read"], false).await;
     let now = OffsetDateTime::now_utc();
     let out = authorize(
         &s,
@@ -247,8 +247,8 @@ fn as_member(t: &TenantId, m: &str) -> Assertion {
 }
 
 /// Seeds team agent `tbot` owned by team `ops` (members ann and bob), with a standing grant on `tool`.
-async fn seed_team(s: &Store, t: &TenantId, tool: &str) {
-    let mut tx = s.begin(t).await.unwrap();
+async fn seed_team(t: &TenantId, tool: &str) {
+    let mut tx = admin_pool().await.begin().await.unwrap();
     for q in [
         "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'tbot', 'team', 'ops')",
         "insert into team_members (tenant_id, team_id, member_id) values ($1, 'ops', 'ann'), ($1, 'ops', 'bob')",
@@ -287,7 +287,7 @@ async fn approve_as(s: &Store, t: &TenantId, approval: Uuid, m: &str) {
 async fn removed_team_member_is_refused_on_the_next_call() {
     let s = app_store().await;
     let t = tenant();
-    seed_team(&s, &t, "docs.read").await;
+    seed_team(&t, "docs.read").await;
     let (p, w, tl, now) = (
         policy(),
         as_member(&t, "ann"),
@@ -328,7 +328,7 @@ async fn removed_team_member_is_refused_on_the_next_call() {
 async fn approval_is_spent_only_by_its_requester() {
     let s = app_store().await;
     let t = tenant();
-    seed_team(&s, &t, "mail.send").await;
+    seed_team(&t, "mail.send").await;
     let (p, tl, now) = (policy(), tool("mail.send"), OffsetDateTime::now_utc());
     let args = json!({"to": "a@b.c"});
     let (ann, bob) = (as_member(&t, "ann"), as_member(&t, "bob"));
@@ -357,7 +357,7 @@ async fn approval_is_spent_only_by_its_requester() {
 async fn repeated_ask_reuses_the_pending_approval() {
     let s = app_store().await;
     let t = tenant();
-    seed_team(&s, &t, "mail.send").await;
+    seed_team(&t, "mail.send").await;
     let (p, w, tl, now) = (
         policy(),
         as_member(&t, "ann"),
@@ -388,7 +388,7 @@ async fn repeated_ask_reuses_the_pending_approval() {
 async fn approval_covers_only_its_exact_args() {
     let s = app_store().await;
     let t = tenant();
-    seed_team(&s, &t, "mail.send").await;
+    seed_team(&t, "mail.send").await;
     let (p, w, tl, now) = (
         policy(),
         as_member(&t, "ann"),
