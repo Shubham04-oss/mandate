@@ -57,3 +57,9 @@ variable "image_tag" {
   type    = string
   default = "bootstrap"
 }
+
+# The repository whose `dev` GitHub environment may assume the deploy role.
+variable "github_repository" {
+  type    = string
+  default = "Shubham04-oss/mandate"
+}

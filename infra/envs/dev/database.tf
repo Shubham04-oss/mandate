@@ -36,6 +36,8 @@ resource "aws_rds_cluster" "main" {
   backup_retention_period         = 1
   deletion_protection             = true
   final_snapshot_identifier       = "${local.name}-final"
+  # The owner creates roles through the Data API (IAM plus the master secret): no bastion, no open port.
+  enable_http_endpoint = true
   serverlessv2_scaling_configuration {
     min_capacity             = 0
     max_capacity             = 2

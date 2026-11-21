@@ -32,6 +32,12 @@ mock_provider "aws" {
   mock_resource "aws_bedrock_guardrail" {
     defaults = { guardrail_arn = "arn:aws:bedrock:ap-south-1:000000000000:guardrail/mock", guardrail_id = "mock" }
   }
+  mock_resource "aws_iam_openid_connect_provider" {
+    defaults = { arn = "arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com" }
+  }
+  mock_resource "aws_ecs_cluster" {
+    defaults = { arn = "arn:aws:ecs:ap-south-1:000000000000:cluster/mandate-dev" }
+  }
   mock_resource "aws_kms_key" {
     defaults = { arn = "arn:aws:kms:ap-south-1:000000000000:key/mock" }
   }
@@ -118,6 +124,23 @@ override_resource {
 override_resource {
   target = aws_sqs_queue.dead_letter["agent-resume"]
   values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-agent-resume-dlq.fifo" }
+}
+
+override_resource {
+  target = aws_iam_role.execution["core"]
+  values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-core-execution" }
+}
+override_resource {
+  target = aws_iam_role.execution["eve"]
+  values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-eve-execution" }
+}
+override_resource {
+  target = aws_iam_role.execution["migrate"]
+  values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-migrate-execution" }
+}
+override_resource {
+  target = aws_iam_role.core_task
+  values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-core-task" }
 }
 
 variables {
@@ -456,5 +479,37 @@ run "the_core_uses_its_browser_and_guardrail_only" {
   assert {
     condition     = jsondecode(aws_iam_role_policy.browser_recordings.policy).Statement[0].Resource == "${aws_s3_bucket.recordings.arn}/recordings/*"
     error_message = "the browser may write recordings under its prefix only"
+  }
+}
+
+run "only_the_dev_environment_of_this_repo_can_deploy" {
+  command = apply
+
+  assert {
+    condition = jsondecode(aws_iam_role.deploy.assume_role_policy).Statement[0].Condition == {
+      StringEquals = {
+        "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        "token.actions.githubusercontent.com:sub" = "repo:Shubham04-oss/mandate:environment:dev"
+      }
+    }
+    error_message = "GitHub OIDC for the dev environment of this repository only; no long-lived keys"
+  }
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.deploy.policy).Statement : st.Action if st.Resource == "*"
+    ])) == toset(["ecr:GetAuthorizationToken", "ecs:DescribeTaskDefinition", "ecs:RegisterTaskDefinition"])
+    error_message = "only actions without resource-level permissions use a wildcard"
+  }
+  assert {
+    condition = one([
+      for st in jsondecode(aws_iam_role_policy.deploy.policy).Statement : st if contains(flatten([st.Action]), "iam:PassRole")
+    ]).Condition == { StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" } }
+    error_message = "the deploy role passes the task roles to ECS only"
+  }
+  assert {
+    condition = toset(one([
+      for st in jsondecode(aws_iam_role_policy.deploy.policy).Statement : st.Resource if contains(flatten([st.Action]), "iam:PassRole")
+    ])) == toset(concat([for r in aws_iam_role.execution : r.arn], [aws_iam_role.core_task.arn]))
+    error_message = "and only the task roles"
   }
 }

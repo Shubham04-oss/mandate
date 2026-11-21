@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mandate-web",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "@tanstack/react-start/server-entry",
+  // AWS dev (docs/deploy.md): `npx wrangler deploy --env dev`. Replace example.com with the
+  // Cloudflare zone's domain; the API is the core at api.<domain>.
+  "env": {
+    "dev": {
+      "name": "mandate-web-dev",
+      "routes": [{ "pattern": "app.example.com", "custom_domain": true }],
+      "vars": { "MANDATE_API_URL": "https://api.example.com" }
+    }
+  }
+}

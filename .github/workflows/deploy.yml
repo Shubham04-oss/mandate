@@ -1,0 +1,100 @@
+name: deploy
+
+# Off until the owner turns it on (docs/deploy.md): every job needs the repository variable
+# MANDATE_DEPLOY_ENABLED=true, so merging to main deploys nothing by itself.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  CLUSTER: mandate-dev
+  TAG: ${{ github.sha }}
+
+jobs:
+  deploy:
+    if: vars.MANDATE_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    # The deploy role trusts this repository's `dev` environment only; add reviewers there if wanted.
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2.2.0
+
+      - name: Build and push the core and migrate images
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/mandate-dev/core
+        run: |
+          docker build -f core/Dockerfile -t "$REPO:$TAG" .
+          docker build -f core/Dockerfile --target migrate -t "$REPO:migrate-$TAG" .
+          docker push "$REPO:$TAG"
+          docker push "$REPO:migrate-$TAG"
+
+      # eve (agents/) lands in its own lane; until then the eve service is left as it is.
+      - name: Build and push the eve image
+        if: hashFiles('agents/package.json') != ''
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/mandate-dev/eve
+        run: |
+          docker build -f agents/Dockerfile -t "$REPO:$TAG" agents
+          docker push "$REPO:$TAG"
+
+      # Each task definition's latest revision (tofu's config, or the last deploy's) gets the new
+      # image, so infra changes ride along with the next deploy.
+      - name: Migrate, then roll the services
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          NETWORK: ${{ vars.MANDATE_MIGRATE_NETWORK }}
+          WITH_EVE: ${{ hashFiles('agents/package.json') != '' }}
+        run: |
+          set -euo pipefail
+          render() {
+            aws ecs describe-task-definition --task-definition "$1" --query taskDefinition \
+              | jq --arg image "$2" '.containerDefinitions[0].image = $image
+                  | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                        .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+              > "$RUNNER_TEMP/td.json"
+            aws ecs register-task-definition --cli-input-json "file://$RUNNER_TEMP/td.json" \
+              --query taskDefinition.taskDefinitionArn --output text
+          }
+          roll() {
+            td="$(render "mandate-dev-$1" "$2")"
+            aws ecs update-service --cluster "$CLUSTER" --service "$1" --task-definition "$td" >/dev/null
+            aws ecs wait services-stable --cluster "$CLUSTER" --services "$1"
+            echo "$1 is on $td"
+          }
+
+          td="$(render mandate-dev-migrate "$REGISTRY/mandate-dev/core:migrate-$TAG")"
+          task="$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+            --task-definition "$td" --network-configuration "$NETWORK" \
+            --query 'tasks[0].taskArn' --output text)"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          code="$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].containers[0].exitCode' --output text)"
+          echo "migrate exited with $code"
+          test "$code" = 0
+
+          roll core "$REGISTRY/mandate-dev/core:$TAG"
+          if [ "$WITH_EVE" = true ]; then
+            roll eve "$REGISTRY/mandate-dev/eve:$TAG"
+          fi
