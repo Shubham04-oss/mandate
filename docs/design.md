@@ -77,9 +77,10 @@ AWS              v                                   v
    mandate core (one Rust binary, ECS Fargate)
       policy (Cedar) . grants and consent . MCP tool server . brokering . output guard . audit
       |            |                  |                    |
-   Aurora      AgentCore Identity  AgentCore Browser     Bedrock (Claude Opus/Sonnet 5.5,
-   PostgreSQL  (token vault)       (live view, S3        Guardrails)
+   Aurora      AgentCore Identity  AgentCore Browser     Bedrock Guardrails
+   PostgreSQL  (token vault)       (live view, S3        (output guard)
                                     recordings)
+   models: our AI gateway, provider-agnostic, used by eve and the core
    + KMS . SQS . CloudTrail . S3
 ```
 
@@ -154,8 +155,12 @@ it. Driven from the core over CDP; the brain sees only the core's browser tools.
   "credentials held by a third party" so policy can hide them.
 
 ### 8.6 Models
-Bedrock: Claude Opus 5.5 for hard work, Sonnet 5.5 by default, via IAM roles (no API keys). eve
-calls Bedrock directly with its task role; Guardrails run in the core.
+All model calls go through our AI gateway. Nothing in code names a provider or a model: model ids
+(a default, a "hard work" tier, a cheap tier for screening and summaries) are per-environment
+configuration, overridable per tenant. eve reaches the gateway through the AI SDK's gateway support;
+the core does the same for its own calls (input screening). The gateway's credential is a
+server-side secret on AWS, never on Cloudflare and never in prompts. Bedrock Guardrails'
+`ApplyGuardrail` checks text from any model, so the output guard does not depend on the provider.
 
 ## 9. Decisions and approaches considered
 
@@ -231,7 +236,6 @@ eve: https://github.com/vercel/eve . Cedar SymCC: https://docs.rs/cedar-policy-s
 Browser profiles: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/browser-profiles.html .
 AgentCore Identity: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/key-features-and-benefits.html .
 WorkSpaces for AI agents: https://aws.amazon.com/about-aws/whats-new/2026/06/amazon-workspaces-ai/ .
-Claude Opus 5.5 on AWS: https://aws.amazon.com/blogs/machine-learning/claude-opus-5-5-is-now-available-on-aws/ .
 Bedrock Guardrails: https://aws.amazon.com/bedrock/guardrails/ .
 Aurora auto-pause: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html .
 Rust MCP SDK: https://crates.io/crates/rmcp .

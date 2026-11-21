@@ -27,7 +27,8 @@ layer is the product.
 | Core | AWS, one Rust binary | Policy (Cedar), consent and grants, the governed tool server (MCP), audit |
 | Agent brain | AWS, eve (TypeScript) | Conversations, channels (Slack, Teams, web), durable waits. Untrusted: holds no credentials and decides nothing about access |
 | Data | AWS Aurora PostgreSQL | One database: system of record and conversation state |
-| Tools | AWS AgentCore, Bedrock | Browser, token vault, models and output guardrails |
+| Tools | AWS AgentCore, Bedrock Guardrails | Browser, token vault, output guardrails |
+| Models | Our AI gateway | Any provider; model ids are configuration, never code |
 
 The rule that shapes everything: **the Rust core holds all authority, the agent brain holds none.**
 
