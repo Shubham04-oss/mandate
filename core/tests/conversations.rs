@@ -1470,32 +1470,38 @@ async fn starts_are_rate_limited_per_member() {
     let t = tenant();
     seed(&t).await;
     let app = h.app(&t, "ann").await;
-    for _ in 0..10 {
-        let (status, _) = call(
+    // Windows are per minute and a slow run can straddle one boundary: allow two windows.
+    let mut created = 0;
+    let mut refused = None;
+    for _ in 0..21 {
+        let (status, body) = call(
             &app,
             "POST",
             "/v1/conversations",
             Some(json!({ "message": "hi" })),
         )
         .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            refused = Some(body);
+            break;
+        }
         assert_eq!(status, StatusCode::CREATED);
+        created += 1;
     }
-    let (status, body) = call(
-        &app,
-        "POST",
-        "/v1/conversations",
-        Some(json!({ "message": "hi" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let body = refused.expect("more than 10 starts in a minute are refused");
     assert_eq!(body["error"]["code"], "rate_limited");
+    assert!(
+        (10..=20).contains(&created),
+        "{created} starts before the limit"
+    );
+    // Refused starts never reach eve.
     let starts = h
         .fake
         .seen()
         .iter()
         .filter(|s| s.path == "/eve/v1/session")
         .count();
-    assert_eq!(starts, 10);
+    assert_eq!(starts, created);
 }
 
 #[tokio::test]
