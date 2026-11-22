@@ -5,7 +5,6 @@ mod common;
 use api_support::*;
 use common::app_store;
 use http::StatusCode;
-use mandate::api::stubs::{Event, published};
 use mandate::ids::{AgentId, TenantId, ToolId};
 use mandate::store::{self, Store};
 use serde_json::{Value, json};
@@ -107,14 +106,31 @@ async fn admin_creates_and_revokes_grant() {
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     assert_eq!(
-        published(&t),
+        outbox(&s, &t).await,
         [
-            Event::GrantCreated { grant: id },
-            Event::GrantRevoked { grant: id }
+            ("grant.created.v1".to_owned(), json!({ "grant": id })),
+            ("grant.revoked.v1".to_owned(), json!({ "grant": id }))
         ]
     );
+    // Both changes are audited, with fixed reasons and no arguments.
+    let mut tx = s.begin(&t).await.unwrap();
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "select concat_ws(':', agent, member, tool, decision, reason), args_hash from audit order by id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    drop(tx);
+    let row = |d: &str| {
+        (
+            format!("bob-bot:ann:web.read_page:{d}:principal is an agent"),
+            vec![0u8; 32],
+        )
+    };
+    assert_eq!(rows, [row("grant_created"), row("grant_revoked")]);
 
-    // Refused input: unknown tool or principal, a past expiry, unknown fields, bad kinds.
+    // Refused input: unknown tool or principal, a past expiry or one past 90 days, unknown fields,
+    // bad kinds.
     for b in [
         body("agent", "bob-bot", "mail.send", at(Duration::hours(1))),
         body("agent", "nobody", "web.read_page", at(Duration::hours(1))),
@@ -127,6 +143,7 @@ async fn admin_creates_and_revokes_grant() {
             at(Duration::seconds(-1)),
         ),
         body("agent", "bob-bot", "web.read_page", "tomorrow".into()),
+        body("agent", "bob-bot", "web.read_page", at(Duration::days(91))),
         body("org", "bob-bot", "web.read_page", at(Duration::hours(1))),
         body("agent", "Bob Bot", "web.read_page", at(Duration::hours(1))),
         json!({ "principal": { "kind": "agent", "id": "bob-bot" }, "tool": "web.read_page", "expires_at": at(Duration::hours(1)), "granted_by": "bob" }),
@@ -251,7 +268,7 @@ async fn expired_grant_is_listed_as_expired() {
             "member",
             "bob",
             "web.read_page",
-            at(Duration::seconds(1)),
+            at(Duration::hours(1)),
         )),
     )
     .await;
@@ -267,4 +284,56 @@ async fn expired_grant_is_listed_as_expired() {
         v["items"][0]["principal"],
         json!({ "kind": "member", "id": "bob" })
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn expired_grant_gives_way_to_a_new_one() {
+    let s = app_store().await;
+    let t = org(&s).await;
+    let app = app(s.clone());
+    let new = |d| body("agent", "bob-bot", "web.read_page", at(d));
+    let (st, old) = call(
+        &app,
+        "POST",
+        "/v1/grants",
+        Some((&t, "ann")),
+        Some(new(Duration::hours(1))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    admin_exec(
+        "update grants set expires_at = now() - interval '1 second' where tenant_id = $1",
+        &[t.as_str()],
+    )
+    .await;
+    assert!(!granted(&s, &t).await);
+    // Expired: granting again succeeds, as a new grant.
+    let (st, g) = call(
+        &app,
+        "POST",
+        "/v1/grants",
+        Some((&t, "ann")),
+        Some(new(Duration::days(90))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{g}");
+    assert_ne!(g["id"], old["id"]);
+    assert_eq!(g["state"], json!("active"));
+    assert!(granted(&s, &t).await);
+    let (_, v) = call(&app, "GET", "/v1/grants", Some((&t, "ann")), None).await;
+    assert_eq!(v["items"], json!([g]));
+    // Live: still a conflict, and the live grant is untouched.
+    let (st, v) = call(
+        &app,
+        "POST",
+        "/v1/grants",
+        Some((&t, "ann")),
+        Some(new(Duration::hours(1))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(v["error"]["code"], json!("conflict"));
+    let (_, v) = call(&app, "GET", "/v1/grants", Some((&t, "ann")), None).await;
+    assert_eq!(v["items"], json!([g]));
 }

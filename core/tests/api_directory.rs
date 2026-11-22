@@ -4,13 +4,11 @@
 mod common;
 use common::app_store;
 use futures::stream::{self, BoxStream, StreamExt};
-use mandate::api::stubs::{Actor, Event, published};
-use mandate::identity::{
-    EventSource, IdentityError, UserLookup, personal_operator_id, sync_directory,
-};
-use mandate::ids::{MemberId, TenantId};
+use mandate::identity::{EventSource, IdentityError, UserLookup, sync_directory};
+use mandate::ids::{AgentId, MemberId, TenantId};
 use mandate::store::Store;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{Connection, PgConnection, Row};
 use uuid::Uuid;
 
@@ -100,6 +98,40 @@ async fn tenant_of(s: &Store, org: &str) -> TenantId {
         .unwrap()
         .expect("tenant created")
 }
+
+/// The personal operator `ensure_personal_agent` (migration 0008) gives `member`.
+fn personal_operator_id(member: &MemberId) -> AgentId {
+    let hex: String = Sha256::digest(member.as_str())
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    AgentId::parse(&format!("op-{hex}")).unwrap()
+}
+
+/// `(type, member, actor kind)` of the tenant's lifecycle events, each with its outbox row, in
+/// publish order.
+async fn lifecycle(s: &Store, t: &TenantId) -> Vec<(String, Option<String>, String)> {
+    let mut tx = s.begin(t).await.unwrap();
+    sqlx::query_as(
+        "select l.type, l.member, l.actor_kind from lifecycle_log l \
+         join outbox o on o.tenant_id = l.tenant_id and o.id = l.event_id and o.type = l.type \
+         order by o.seq",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap()
+}
+
+fn ev(kind: &str, member: Option<&str>) -> (String, Option<String>, String) {
+    (
+        kind.to_owned(),
+        member.map(str::to_owned),
+        "directory".to_owned(),
+    )
+}
+
+const ORG_CREATED: &str = "organization.created.v1";
 
 async fn rows(s: &Store, t: &TenantId, sql: &'static str) -> Vec<String> {
     let mut tx = s.begin(t).await.unwrap();
@@ -216,13 +248,13 @@ async fn every_member_gets_a_personal_operator() {
          where kind = 'personal' order by owner_member",
     )
     .await;
-    let ann = personal_operator_id(&MemberId::parse("directory_user_ann").unwrap()).unwrap();
-    let cy = personal_operator_id(&MemberId::parse("directory_user_cy").unwrap()).unwrap();
+    let ann = personal_operator_id(&MemberId::parse("directory_user_ann").unwrap());
+    let cy = personal_operator_id(&MemberId::parse("directory_user_cy").unwrap());
     assert_eq!(
         ops,
         [
-            format!("directory_user_ann:{ann}:Personal agent:false"),
-            format!("directory_user_cy:{cy}:Personal agent:false"),
+            format!("directory_user_ann:{ann}:-:false"),
+            format!("directory_user_cy:{cy}:-:false"),
         ]
     );
     // Each member may use their own operator and no one else's.
@@ -264,7 +296,7 @@ async fn removed_member_operator_is_disabled() {
     )
     .await;
     let t = tenant_of(&s, &o).await;
-    let ann = personal_operator_id(&MemberId::parse("directory_user_ann").unwrap()).unwrap();
+    let ann = personal_operator_id(&MemberId::parse("directory_user_ann").unwrap());
     let mut tx = s.begin(&t).await.unwrap();
     let disabled: bool = sqlx::query("select disabled from agents where id = $1")
         .bind(ann.as_str())
@@ -279,10 +311,27 @@ async fn removed_member_operator_is_disabled() {
             .unwrap()
             .is_none()
     );
-}
-
-fn m(id: &str) -> MemberId {
-    MemberId::parse(id).unwrap()
+    drop(tx);
+    // Back in the directory: a member again, but the disabled operator stays disabled until an
+    // admin enables it.
+    sync(
+        &s,
+        vec![event(
+            3,
+            "dsync.user.created",
+            user("directory_user_ANN", &o, "active", "Ann", "Lee"),
+        )],
+    )
+    .await;
+    assert_eq!(
+        rows(
+            &s,
+            &t,
+            "select id || ':' || disabled from agents where kind = 'personal'"
+        )
+        .await,
+        [format!("{ann}:true")]
+    );
 }
 
 #[tokio::test]
@@ -312,16 +361,11 @@ async fn directory_add_emits_member_created() {
     .await;
     let t = tenant_of(&s, &o).await;
     assert_eq!(
-        published(&t),
+        lifecycle(&s, &t).await,
         [
-            Event::MemberCreated {
-                member: m("directory_user_ann"),
-                actor: Actor::Directory
-            },
-            Event::MemberCreated {
-                member: m("directory_user_cy"),
-                actor: Actor::Directory
-            },
+            ev(ORG_CREATED, None),
+            ev("member.created.v1", Some("directory_user_ann")),
+            ev("member.created.v1", Some("directory_user_cy")),
         ]
     );
 }
@@ -350,18 +394,13 @@ async fn directory_change_emits_member_updated() {
     )
     .await;
     let t = tenant_of(&s, &o).await;
-    let ann = m("directory_user_ann");
+    let ann = Some("directory_user_ann");
     assert_eq!(
-        published(&t),
+        lifecycle(&s, &t).await,
         [
-            Event::MemberCreated {
-                member: ann.clone(),
-                actor: Actor::Directory
-            },
-            Event::MemberUpdated {
-                member: ann,
-                actor: Actor::Directory
-            },
+            ev(ORG_CREATED, None),
+            ev("member.created.v1", ann),
+            ev("member.updated.v1", ann),
         ]
     );
 }
@@ -401,18 +440,40 @@ async fn directory_removal_emits_member_removed_with_directory_actor() {
     )
     .await;
     let t = tenant_of(&s, &o).await;
-    let ann = m("directory_user_ann");
+    let ann = Some("directory_user_ann");
     assert_eq!(
-        published(&t),
+        lifecycle(&s, &t).await,
         [
-            Event::MemberCreated {
-                member: ann.clone(),
-                actor: Actor::Directory
-            },
-            Event::MemberRemoved {
-                member: ann,
-                actor: Actor::Directory
-            },
+            ev(ORG_CREATED, None),
+            ev("member.created.v1", ann),
+            ev("member.removed.v1", ann),
         ]
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn directory_sync_creates_org_with_organization_created() {
+    let _turn = SYNC.lock().await;
+    let s = app_store().await;
+    let o = org();
+    reset_cursor().await;
+    let ann = |n, state| {
+        event(
+            n,
+            "dsync.user.updated",
+            user("directory_user_ANN", &o, state, "Ann", "Lee"),
+        )
+    };
+    sync(&s, vec![ann(1, "active")]).await;
+    // Later events for the same org find its tenant: no second organization.created.
+    sync(&s, vec![ann(2, "active")]).await;
+    let t = tenant_of(&s, &o).await;
+    let all = lifecycle(&s, &t).await;
+    assert_eq!(
+        all.iter().filter(|e| e.0 == ORG_CREATED).count(),
+        1,
+        "{all:?}"
+    );
+    assert_eq!(all[0], ev(ORG_CREATED, None));
 }

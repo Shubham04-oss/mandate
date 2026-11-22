@@ -2,10 +2,11 @@
 //! exactly one wins and the other gets 409.
 use crate::api::agents::{AGENT_COLS, AGENT_JOINS, agent_view};
 use crate::api::org::{PAGE, bounded, person, ts};
-use crate::api::stubs::{self, ApiError, Event, Session};
+use crate::api::session::Session;
+use crate::api::{ApiError, ApiState};
+use crate::events::{self, Event};
 use crate::ids::{AgentId, MemberId, ToolId};
-use crate::mcp::AppState;
-use crate::store::{StoreError, Tx};
+use crate::store::{self, AuditEntry, StoreError, Tx};
 use axum::Json;
 use axum::extract::{Path, Query, State as Ax};
 use axum::routing::{get, post};
@@ -16,11 +17,7 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    Approve,
-    Deny,
-}
+pub use crate::events::Decision;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -91,14 +88,14 @@ pub async fn decide_approval(
     decision: Decision,
     now: OffsetDateTime,
 ) -> Result<Approval, DecideError> {
-    let (by_col, at_col) = match decision {
-        Decision::Approve => ("approved_by", "approved_at"),
-        Decision::Deny => ("denied_by", "denied_at"),
+    let (by_col, at_col, verb) = match decision {
+        Decision::Approved => ("approved_by", "approved_at", "approved"),
+        Decision::Denied => ("denied_by", "denied_at", "denied"),
     };
-    let won: Option<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+    let won: Option<[u8; 32]> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "update approvals a set {by_col} = $2, {at_col} = $3 \
          where a.tenant_id = current_setting('mandate.tenant', true) and a.id = $1 \
-         and {PENDING} and a.expires_at > $3 and {MAY_DECIDE} returning a.id"
+         and {PENDING} and a.expires_at > $3 and {MAY_DECIDE} returning a.args_hash"
     )))
     .bind(approval)
     .bind(by.as_str())
@@ -109,7 +106,7 @@ pub async fn decide_approval(
     let a = load(tx, approval, now)
         .await?
         .ok_or(DecideError::NotFound)?;
-    if won.is_none() {
+    let Some(args_hash) = won else {
         if !may_decide(tx, approval, by).await? {
             return Err(DecideError::Forbidden);
         }
@@ -117,8 +114,19 @@ pub async fn decide_approval(
             State::Expired => DecideError::Expired,
             _ => DecideError::AlreadyDecided,
         });
-    }
-    stubs::publish(
+    };
+    let audit = AuditEntry {
+        agent: a.agent.clone(),
+        member: by.clone(),
+        tool: a.tool.clone(),
+        args_hash,
+        decision: verb.to_owned(),
+        reason: None,
+        approval_id: Some(approval),
+        approved_by: (decision == Decision::Approved).then(|| by.clone()),
+    };
+    store::audit(tx, &audit).await?;
+    events::publish(
         tx,
         Event::ApprovalDecided {
             approval,
@@ -197,7 +205,7 @@ pub async fn load(
     }))
 }
 
-pub fn routes() -> axum::Router<Arc<AppState>> {
+pub fn routes() -> axum::Router<Arc<ApiState>> {
     axum::Router::new()
         .route("/v1/approvals", get(list))
         .route("/v1/approvals/{id}/approve", post(approve))
@@ -220,7 +228,7 @@ fn view_sql(filter: &str) -> String {
     )
 }
 
-fn view(s: &AppState, r: &sqlx::postgres::PgRow, now: OffsetDateTime) -> Result<Value, ApiError> {
+fn view(s: &ApiState, r: &sqlx::postgres::PgRow, now: OffsetDateTime) -> Result<Value, ApiError> {
     let row = |e: sqlx::Error| ApiError::from(StoreError::from(e));
     let state = state_of(r, now).map_err(row)?;
     let agent: String = r.try_get("agent").map_err(row)?;
@@ -261,7 +269,7 @@ fn view(s: &AppState, r: &sqlx::postgres::PgRow, now: OffsetDateTime) -> Result<
 
 async fn view_one(
     tx: &mut Tx,
-    s: &AppState,
+    s: &ApiState,
     session: &Session,
     approval: Uuid,
     now: OffsetDateTime,
@@ -286,7 +294,7 @@ struct ListQuery {
 
 /// `<requested_at as unix nanoseconds>.<id>`: the position of the last item shown.
 fn parse_cursor(c: &str) -> Result<(OffsetDateTime, Uuid), ApiError> {
-    let bad = || ApiError::InvalidInput("invalid cursor");
+    let bad = || ApiError::invalid_input();
     let (t, id) = c.split_once('.').ok_or_else(bad)?;
     let t = t.parse::<i128>().map_err(|_| bad())?;
     Ok((
@@ -297,16 +305,16 @@ fn parse_cursor(c: &str) -> Result<(OffsetDateTime, Uuid), ApiError> {
 
 /// `GET /v1/approvals`: what the caller may decide plus the caller's own requests, newest first.
 async fn list(
-    Ax(s): Ax<Arc<AppState>>,
+    Ax(s): Ax<Arc<ApiState>>,
     session: Session,
     q: Result<Query<ListQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let Query(q) = q.map_err(|_| ApiError::InvalidInput("invalid query"))?;
+    let Query(q) = q.map_err(|_| ApiError::invalid_input())?;
     let now = OffsetDateTime::now_utc();
     let state = match q.state.as_deref() {
         None | Some("pending") => format!("({PENDING} and a.expires_at > $1)"),
         Some("decided") => format!("not ({PENDING} and a.expires_at > $1)"),
-        Some(_) => return Err(ApiError::InvalidInput("state must be pending or decided")),
+        Some(_) => return Err(ApiError::invalid_input()),
     };
     let cursor = bounded(q.cursor, 128)?
         .map(|c| parse_cursor(&c))
@@ -344,43 +352,43 @@ async fn list(
 }
 
 async fn approve(
-    Ax(s): Ax<Arc<AppState>>,
+    Ax(s): Ax<Arc<ApiState>>,
     session: Session,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    decide(&s, &session, &id, Decision::Approve).await
+    decide(&s, &session, &id, Decision::Approved).await
 }
 
 async fn deny(
-    Ax(s): Ax<Arc<AppState>>,
+    Ax(s): Ax<Arc<ApiState>>,
     session: Session,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    decide(&s, &session, &id, Decision::Deny).await
+    decide(&s, &session, &id, Decision::Denied).await
 }
 
 async fn decide(
-    s: &AppState,
+    s: &ApiState,
     session: &Session,
     id: &str,
     d: Decision,
 ) -> Result<Json<Value>, ApiError> {
-    let id = Uuid::parse_str(id).map_err(|_| ApiError::NotFound)?;
+    let id = Uuid::parse_str(id).map_err(|_| ApiError::not_found())?;
     let now = OffsetDateTime::now_utc();
     let mut tx = s.store.begin(&session.tenant).await?;
     match decide_approval(&mut tx, id, &session.member, d, now).await {
         Ok(_) => {}
-        Err(DecideError::NotFound) => return Err(ApiError::NotFound),
-        Err(DecideError::Forbidden) => return Err(ApiError::Forbidden),
+        Err(DecideError::NotFound) => return Err(ApiError::not_found()),
+        Err(DecideError::Forbidden) => return Err(ApiError::forbidden()),
         Err(DecideError::AlreadyDecided) => {
-            return Err(ApiError::Conflict("this request was already decided"));
+            return Err(ApiError::conflict("This request was already decided."));
         }
-        Err(DecideError::Expired) => return Err(ApiError::Conflict("this request has expired")),
+        Err(DecideError::Expired) => return Err(ApiError::conflict("This request has expired.")),
         Err(DecideError::Store(e)) => return Err(e.into()),
     }
     let v = view_one(&mut tx, s, session, id, now)
         .await?
-        .ok_or(ApiError::NotFound)?;
+        .ok_or(ApiError::not_found())?;
     tx.commit().await.map_err(StoreError::from)?;
     Ok(Json(v))
 }

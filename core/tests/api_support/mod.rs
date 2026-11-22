@@ -1,23 +1,19 @@
-//! Shared by the `api_*` tests: an in-process app whose session comes from a test header (lane
-//! B's cookie session is stubbed), seeding helpers and a JSON request helper.
+//! Shared by the `api_*` tests: the in-process web API behind its real layers, with a real
+//! cookie session per call, seeding helpers and a JSON request helper.
 // Each api_* binary uses a different subset of these helpers.
 #![allow(dead_code)]
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::Request;
-use axum::middleware::{self, Next};
-use ed25519_dalek::SigningKey;
 use http::StatusCode;
 use http_body_util::BodyExt;
-use mandate::api::stubs::Session;
+use mandate::api::auth::WorkosAuth;
+use mandate::api::{self, ApiState, session};
 use mandate::assertion::Assertion;
 use mandate::ids::{AgentId, MemberId, TenantId, ToolId};
-use mandate::mcp::AppState;
-use mandate::policy::{Effect, Policy};
+use mandate::policy::Effect;
 use mandate::store::{self, Store};
 use mandate::tools::{Catalog, Tool, ToolError};
 use serde_json::Value;
-use std::path::Path;
 use std::sync::Arc;
 use time::OffsetDateTime;
 use tower::ServiceExt;
@@ -56,16 +52,27 @@ impl Tool for Fake {
     }
 }
 
-/// The API router with `x-test-session: <tenant> <member>` standing in for the cookie session.
-pub fn app(store: Store) -> axum::Router {
-    let key = SigningKey::from_bytes(&[7; 32]);
-    let state = Arc::new(AppState {
-        store,
-        policy: Policy::load(Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../policies"
-        )))
-        .unwrap(),
+const WEB: &str = "http://localhost:3000";
+
+pub struct App {
+    router: axum::Router,
+    store: Store,
+}
+
+/// The web API router, exactly as served.
+pub fn app(store: Store) -> App {
+    let state = Arc::new(ApiState {
+        store: store.clone(),
+        web_origin: WEB.into(),
+        // These routes never sign anyone in, so WorkOS is never called.
+        auth: Arc::new(WorkosAuth::new(
+            workos::Client::builder()
+                .api_key("unused")
+                .client_id("unused")
+                .build(),
+        )),
+        sso_redirect_uri: "http://localhost:8080/v1/auth/sso/callback".into(),
+        trust_cf_ip: false,
         catalog: Catalog::new(vec![
             Arc::new(Fake(ToolId::parse("web.read_page").unwrap(), Effect::Read)),
             Arc::new(Fake(
@@ -73,41 +80,40 @@ pub fn app(store: Store) -> axum::Router {
                 Effect::External,
             )),
         ]),
-        assertion_key: key.verifying_key(),
-        assertion_signing_key: key,
-        workos: None,
     });
-    mandate::api::router(state).layer(middleware::from_fn(inject))
-}
-
-async fn inject(mut req: Request, next: Next) -> axum::response::Response {
-    let who = req
-        .headers()
-        .get("x-test-session")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.split_once(' '))
-        .map(|(t, m)| Session {
-            tenant: TenantId::parse(t).unwrap(),
-            member: MemberId::parse(m).unwrap(),
-            is_admin: false,
-        });
-    if let Some(s) = who {
-        req.extensions_mut().insert(s);
+    App {
+        router: api::router(state),
+        store,
     }
-    next.run(req).await
 }
 
 /// One request as `who` (`None`: no session); the JSON body, or `Null` when there is none.
 pub async fn call(
-    app: &axum::Router,
+    app: &App,
     method: &str,
     uri: &str,
     who: Option<(&TenantId, &str)>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
-    let mut req = http::Request::builder().method(method).uri(uri);
+    let mut req = http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-mandate", "1")
+        .header(http::header::ORIGIN, WEB);
     if let Some((t, m)) = who {
-        req = req.header("x-test-session", format!("{t} {m}"));
+        // A fresh session per call: signed in as `m` in `t`, as the browser would be.
+        let mut tx = app.store.begin(t).await.unwrap();
+        let token = session::create(
+            &mut tx,
+            t,
+            &member(m),
+            &Value::Null,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        req = req.header(http::header::COOKIE, format!("mandate_session={token}"));
     }
     let req = match body {
         Some(b) => req
@@ -116,7 +122,7 @@ pub async fn call(
         None => req.body(Body::empty()),
     }
     .unwrap();
-    let res = app.clone().oneshot(req).await.unwrap();
+    let res = app.router.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     (
@@ -210,4 +216,15 @@ pub async fn ask(s: &Store, t: &TenantId, agent: &str, by: &str, args: Value) ->
     .unwrap();
     tx.commit().await.unwrap();
     id
+}
+
+/// `(type, data)` of the tenant's outbox, in publish order.
+pub async fn outbox(s: &Store, t: &TenantId) -> Vec<(String, Value)> {
+    let mut tx = s.begin(t).await.unwrap();
+    let rows: Vec<(String, sqlx::types::Json<Value>)> =
+        sqlx::query_as("select type, data from outbox order by seq")
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+    rows.into_iter().map(|(k, d)| (k, d.0)).collect()
 }

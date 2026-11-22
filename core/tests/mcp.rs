@@ -10,7 +10,7 @@ use mandate::assertion::{self, Assertion};
 use mandate::ids::{AgentId, MemberId, TenantId};
 use mandate::mcp::{AppState, router};
 use mandate::policy::Policy;
-use mandate::store::{self, Store};
+use mandate::store::Store;
 use mandate::tools::browser::{BrowserBackend, Page, ReadPage, SubmitForm};
 use mandate::tools::{Catalog, ToolError};
 use serde_json::{Value, json};
@@ -343,7 +343,7 @@ async fn submit_form_returns_needs_approval_then_runs_after_approve() {
 
     let mut tx = s.begin(&t).await.unwrap();
     assert!(
-        store::approve(&mut tx, approval, &MemberId::parse("ann").unwrap())
+        common::approve(&mut tx, approval, &MemberId::parse("ann").unwrap())
             .await
             .unwrap()
     );

@@ -1,8 +1,8 @@
 //! WorkOS proves who a person is; Mandate exchanges that for its own short-lived assertion and
 //! mirrors the customer's directory, so a person removed there loses access on the next sync.
-use crate::api::stubs::{self, Actor, Event};
 use crate::assertion::{Assertion, TTL_SECS, sign};
-use crate::ids::{AgentId, IdError, MemberId, SpaceId, TeamId, TenantId};
+use crate::events::{self, Actor, Event};
+use crate::ids::{AgentId, MemberId, SpaceId, TeamId, TenantId};
 use crate::mcp::AppState;
 use crate::store::{self, Store, StoreError};
 use async_trait::async_trait;
@@ -15,7 +15,6 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::sync::{Arc, RwLock};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -518,7 +517,7 @@ fn malformed(err: &serde_json::Error) -> Fail {
 }
 
 /// A WorkOS id as a Mandate id: lowercase, other characters as `_`, at most 64 long.
-fn slug(s: &str) -> String {
+pub(crate) fn slug(s: &str) -> String {
     s.chars()
         .map(|c| c.to_ascii_lowercase())
         .map(|c| {
@@ -629,8 +628,7 @@ async fn prepare(
         Some(t) => t,
         None => {
             let id = TenantId::parse(&slug(&org)).map_err(|err| permanent(Some(&org), err))?;
-            store
-                .ensure_tenant(&org, &id)
+            new_tenant(store, &org, &id)
                 .await?
                 .ok_or_else(|| permanent(Some(&org), format!("tenant id {id} is taken")))?
         }
@@ -638,35 +636,29 @@ async fn prepare(
     Ok(Some((tenant, change)))
 }
 
-const OPERATOR_NAME: &str = "Personal agent";
-
-/// A member's personal operator id, derived from the member's so sync and sign-in agree.
-pub fn personal_operator_id(member: &MemberId) -> Result<AgentId, IdError> {
-    let hash = Sha256::digest(member.as_str().as_bytes());
-    let hex: String = hash.iter().take(16).map(|b| format!("{b:02x}")).collect();
-    AgentId::parse(&format!("op-{hex}"))
-}
-
-/// Creates the member's personal operator, or re-enables it for a member who is back. Never
-/// takes over an agent with the same id that is not this member's personal one.
-pub async fn ensure_personal_operator(
-    tx: &mut store::Tx,
-    member: &MemberId,
-) -> Result<AgentId, StoreError> {
-    let id = personal_operator_id(member)?;
-    sqlx::query(
-        "insert into agents (tenant_id, id, kind, owner_member, name) \
-         values (current_setting('mandate.tenant'), $1, 'personal', $2, $3) \
-         on conflict (tenant_id, id) do update set disabled = false \
-         where agents.tenant_id = current_setting('mandate.tenant', true) \
-         and agents.kind = 'personal' and agents.owner_member = excluded.owner_member",
+/// The org's tenant, created as `id` with `organization.created.v1` in the same transaction if
+/// new; `None` if `id` already belongs to another org.
+async fn new_tenant(
+    store: &Store,
+    org: &str,
+    id: &TenantId,
+) -> Result<Option<TenantId>, StoreError> {
+    let mut tx = store.begin(id).await?;
+    let created = sqlx::query(
+        "insert into tenants (id, workos_org_id) values ($1, $2) on conflict do nothing",
     )
     .bind(id.as_str())
-    .bind(member.as_str())
-    .bind(OPERATOR_NAME)
-    .execute(&mut **tx)
-    .await?;
-    Ok(id)
+    .bind(org)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if created {
+        let actor = Actor::Directory;
+        events::publish(&mut tx, Event::OrganizationCreated { actor }).await?;
+    }
+    tx.commit().await?;
+    store.tenant_for_org(org).await
 }
 
 async fn member_exists(tx: &mut store::Tx, member: &MemberId) -> Result<bool, StoreError> {
@@ -739,14 +731,14 @@ async fn apply(
             )
             .await?;
             set_name(&mut tx, Named::Member, id.as_str(), name.as_deref()).await?;
-            ensure_personal_operator(&mut tx, &id).await?;
+            store::ensure_personal_agent(&mut tx, &id).await?;
             let actor = Actor::Directory;
             let event = if existed {
                 Event::MemberUpdated { member: id, actor }
             } else {
                 Event::MemberCreated { member: id, actor }
             };
-            stubs::publish(&mut tx, event).await?;
+            events::publish(&mut tx, event).await?;
         }
         Change::RemoveMember(id) => {
             // Always removes (fail closed), but records only someone who was a member.
@@ -754,7 +746,7 @@ async fn apply(
             store::remove_member(&mut tx, &id).await?;
             if existed {
                 let actor = Actor::Directory;
-                stubs::publish(&mut tx, Event::MemberRemoved { member: id, actor }).await?;
+                events::publish(&mut tx, Event::MemberRemoved { member: id, actor }).await?;
             }
         }
         Change::Team { id, group, name } => {
@@ -782,13 +774,13 @@ async fn apply(
             )
             .await?;
             set_name(&mut tx, Named::Member, member.as_str(), name.as_deref()).await?;
-            ensure_personal_operator(&mut tx, &member).await?;
+            store::ensure_personal_agent(&mut tx, &member).await?;
             store::upsert_team(&mut tx, &team, &group).await?;
             set_name(&mut tx, Named::Team, team.as_str(), team_name.as_deref()).await?;
             store::set_team_member(&mut tx, &team, &member, true).await?;
             if !existed {
                 let actor = Actor::Directory;
-                stubs::publish(&mut tx, Event::MemberCreated { member, actor }).await?;
+                events::publish(&mut tx, Event::MemberCreated { member, actor }).await?;
             }
         }
         Change::Leave { team, member } => {

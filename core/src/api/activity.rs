@@ -2,8 +2,8 @@
 //! teams' bots; org admins see everything.
 use crate::api::agents::{AGENT_COLS, AGENT_JOINS, agent_view};
 use crate::api::org::{PAGE, bounded, is_admin, person, ts};
-use crate::api::stubs::{ApiError, Session};
-use crate::mcp::AppState;
+use crate::api::session::Session;
+use crate::api::{ApiError, ApiState};
 use crate::store::StoreError;
 use axum::Json;
 use axum::extract::{Query, State};
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-pub fn routes() -> axum::Router<Arc<AppState>> {
+pub fn routes() -> axum::Router<Arc<ApiState>> {
     axum::Router::new().route("/v1/activity", get(list))
 }
 
@@ -50,17 +50,18 @@ fn item(r: &PgRow) -> Result<Value, sqlx::Error> {
 
 /// `GET /v1/activity`: newest first; the cursor is the last audit id shown.
 async fn list(
-    State(s): State<Arc<AppState>>,
+    State(s): State<Arc<ApiState>>,
     session: Session,
     q: Result<Query<ListQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let Query(q) = q.map_err(|_| ApiError::InvalidInput("invalid query"))?;
+    let Query(q) = q.map_err(|_| ApiError::invalid_input())?;
     let cursor = bounded(q.cursor, 20)?
         .map(|c| c.parse::<u64>().ok().and_then(|c| i64::try_from(c).ok()))
-        .map(|c| c.ok_or(ApiError::InvalidInput("invalid cursor")))
+        .map(|c| c.ok_or(ApiError::invalid_input()))
         .transpose()?;
     let mut tx = s.store.begin(&session.tenant).await?;
     let admin = is_admin(&mut tx, &session).await?;
+    // Decisions and grant changes are audited too; the feed shows only what agents did.
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "select u.id, u.at, u.agent, u.member, u.tool, u.decision, u.reason, u.approval_id, u.approved_by, \
          m.name as m_name, m.email as m_email, ab.name as ab_name, ab.email as ab_email, {AGENT_COLS} \
@@ -69,6 +70,7 @@ async fn list(
          left join members m on m.tenant_id = u.tenant_id and m.id = u.member \
          left join members ab on ab.tenant_id = u.tenant_id and ab.id = u.approved_by \
          where u.tenant_id = current_setting('mandate.tenant', true) \
+         and u.decision in ('run', 'ask', 'refuse') \
          and ($3 or g.owner_member = $1 or exists (select 1 from team_members tm \
            where tm.tenant_id = u.tenant_id and tm.team_id = g.owner_team and tm.member_id = $1)) \
          and ($2::bigint is null or u.id < $2) \

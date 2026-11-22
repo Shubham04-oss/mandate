@@ -1,7 +1,7 @@
 //! The organization: its members and teams, and the shapes other routes share.
-use crate::api::stubs::{ApiError, Session};
+use crate::api::session::Session;
+use crate::api::{ApiError, ApiState};
 use crate::ids::MemberId;
-use crate::mcp::AppState;
 use crate::store::{StoreError, Tx};
 use axum::Json;
 use axum::extract::rejection::QueryRejection;
@@ -16,7 +16,7 @@ use time::format_description::well_known::Rfc3339;
 /// Items per page on every list route.
 pub(crate) const PAGE: i64 = 50;
 
-pub fn routes() -> axum::Router<Arc<AppState>> {
+pub fn routes() -> axum::Router<Arc<ApiState>> {
     axum::Router::new()
         .route("/v1/org/members", get(members))
         .route("/v1/org/teams", get(teams))
@@ -42,14 +42,14 @@ fn like_pattern(q: &str) -> String {
 
 /// `GET /v1/org/members`: everyone in the org, in id order; `q` searches name and email.
 async fn members(
-    State(s): State<Arc<AppState>>,
+    State(s): State<Arc<ApiState>>,
     session: Session,
     q: Result<Query<MembersQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let Query(q) = q.map_err(|_| ApiError::InvalidInput("invalid query"))?;
+    let Query(q) = q.map_err(|_| ApiError::invalid_input())?;
     let search = bounded(q.q, 100)?.map(|q| like_pattern(&q));
     let cursor = bounded(q.cursor, 64)?
-        .map(|c| MemberId::parse(&c).map_err(|_| ApiError::InvalidInput("invalid cursor")))
+        .map(|c| MemberId::parse(&c).map_err(|_| ApiError::invalid_input()))
         .transpose()?;
     let mut tx = s.store.begin(&session.tenant).await?;
     let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -79,7 +79,7 @@ async fn members(
 
 /// `GET /v1/org/teams`. ponytail: `is_admin` is always false; team admins do not exist until
 /// team bots return (on hold).
-async fn teams(State(s): State<Arc<AppState>>, session: Session) -> Result<Json<Value>, ApiError> {
+async fn teams(State(s): State<Arc<ApiState>>, session: Session) -> Result<Json<Value>, ApiError> {
     let mut tx = s.store.begin(&session.tenant).await?;
     let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
         "select t.id, t.name, (select count(*) from team_members tm \
@@ -126,7 +126,7 @@ pub(crate) async fn is_admin(tx: &mut Tx, s: &Session) -> Result<bool, StoreErro
 /// An optional `?q=` or `?cursor=` value, bounded so it cannot carry a large payload.
 pub(crate) fn bounded(v: Option<String>, max: usize) -> Result<Option<String>, ApiError> {
     match v {
-        Some(v) if v.len() > max => Err(ApiError::InvalidInput("parameter too long")),
+        Some(v) if v.len() > max => Err(ApiError::invalid_input()),
         Some(v) if v.is_empty() => Ok(None),
         v => Ok(v),
     }

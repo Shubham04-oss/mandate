@@ -170,7 +170,7 @@ async fn approved(s: &Store, t: &TenantId, now: OffsetDateTime, hash: &[u8; 32])
     )
     .await
     .unwrap();
-    assert!(store::approve(&mut tx, id, &member("ann")).await.unwrap());
+    assert!(common::approve(&mut tx, id, &member("ann")).await.unwrap());
     tx.commit().await.unwrap();
     id
 }
@@ -280,12 +280,12 @@ async fn only_the_owner_can_approve() {
     .await
     .unwrap();
     assert!(
-        !store::approve(&mut tx, id, &member("mallory"))
+        !common::approve(&mut tx, id, &member("mallory"))
             .await
             .unwrap()
     );
-    assert!(!store::approve(&mut tx, id, &member("bob")).await.unwrap());
-    assert!(store::approve(&mut tx, id, &member("ann")).await.unwrap());
+    assert!(!common::approve(&mut tx, id, &member("bob")).await.unwrap());
+    assert!(common::approve(&mut tx, id, &member("ann")).await.unwrap());
 
     let tid = store::request_approval(
         &mut tx,
@@ -299,11 +299,11 @@ async fn only_the_owner_can_approve() {
     .await
     .unwrap();
     assert!(
-        !store::approve(&mut tx, tid, &member("mallory"))
+        !common::approve(&mut tx, tid, &member("mallory"))
             .await
             .unwrap()
     );
-    assert!(store::approve(&mut tx, tid, &member("bob")).await.unwrap());
+    assert!(common::approve(&mut tx, tid, &member("bob")).await.unwrap());
 
     // An unapproved or unknown approval is never consumable; expired ones cannot be approved.
     let old = store::request_approval(
@@ -317,9 +317,9 @@ async fn only_the_owner_can_approve() {
     )
     .await
     .unwrap();
-    assert!(!store::approve(&mut tx, old, &member("ann")).await.unwrap());
+    assert!(!common::approve(&mut tx, old, &member("ann")).await.unwrap());
     assert!(
-        !store::approve(&mut tx, Uuid::new_v4(), &member("ann"))
+        !common::approve(&mut tx, Uuid::new_v4(), &member("ann"))
             .await
             .unwrap()
     );
@@ -388,33 +388,23 @@ async fn approval_details_show_the_exact_args_to_the_tenant_only() {
 
 #[tokio::test]
 #[ignore]
-async fn app_role_cannot_insert_team_agents_or_rewrite_grants() {
+async fn app_role_cannot_insert_agents_or_rewrite_grants() {
     let s = app_store().await;
     let t = tenant();
-    let refused = |q: &'static str| {
-        let (s, t) = (s.clone(), t.clone());
-        async move {
-            let mut tx = s.begin(&t).await.unwrap();
-            sqlx::query(q)
-                .bind(t.as_str())
-                .execute(&mut *tx)
-                .await
-                .unwrap_err()
-                .to_string()
-        }
-    };
-    // Grants are created (by admins, through the API) and revoked, never rewritten.
-    let err =
-        refused("update grants set expires_at = now() + interval '1 year' where tenant_id = $1")
-            .await;
-    assert!(err.contains("permission denied"), "{err}");
-    // The only agent the app may create is a personal operator of an existing member.
+    // Grants are created (by admins, through the API) and revoked, never rewritten; agents are
+    // created by admins, and personal operators only through `ensure_personal_agent`.
     for q in [
+        "update grants set expires_at = now() + interval '1 year' where tenant_id = $1",
         "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'bot', 'team', 'eng')",
         "insert into agents (tenant_id, id, kind, owner_member) values ($1, 'bot', 'personal', 'ann')",
     ] {
-        let err = refused(q).await;
-        assert!(err.contains("row-level security"), "{q}: {err}");
+        let mut tx = s.begin(&t).await.unwrap();
+        let err = sqlx::query(q)
+            .bind(t.as_str())
+            .execute(&mut *tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("permission denied"), "{q}: {err}");
     }
 }
 

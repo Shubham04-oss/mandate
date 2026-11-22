@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mandate event v1",
+  "description": "The wire form, for the checked-in JSON Schema only.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "source": {
+      "description": "`mandate.core`, or `mandate.app.<provider>`.",
+      "type": "string"
+    },
+    "tenant": {
+      "type": "string"
+    },
+    "occurred_at": {
+      "description": "RFC 3339.",
+      "type": "string"
+    },
+    "kid": {
+      "description": "Names the Ed25519 key that signed the envelope; it belongs to one source.",
+      "type": "string"
+    },
+    "signature": {
+      "description": "Ed25519 over the canonical JSON (sorted keys, no whitespace) of every other field,\nbase64url without padding.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "source",
+    "tenant",
+    "occurred_at",
+    "kid",
+    "signature"
+  ],
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "approval.requested.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "agent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approval",
+            "agent"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "approval.decided.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "decision": {
+              "$ref": "#/$defs/Decision"
+            },
+            "by": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approval",
+            "decision",
+            "by"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "conversation.started.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "conversation": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "conversation"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "conversation.finished.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "conversation": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "conversation"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "grant.created.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "grant": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "grant"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "grant.revoked.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "grant": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "grant"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "member.created.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            }
+          },
+          "required": [
+            "member",
+            "actor"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "member.updated.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            }
+          },
+          "required": [
+            "member",
+            "actor"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "member.removed.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            }
+          },
+          "required": [
+            "member",
+            "actor"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "organization.created.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            }
+          },
+          "required": [
+            "actor"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    }
+  ],
+  "$defs": {
+    "Decision": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "denied"
+      ]
+    },
+    "Actor": {
+      "description": "Who caused a lifecycle change.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "member"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "directory"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "system"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    }
+  }
+}

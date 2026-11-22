@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use mandate::api::{self, ApiState, auth::WorkosAuth};
 use mandate::assertion::{Assertion, TTL_SECS, sign};
 use mandate::identity::{Workos, sync_directory};
 use mandate::ids::{AgentId, MemberId, SpaceId, TenantId};
@@ -11,6 +12,7 @@ use mandate::tools::Catalog;
 use mandate::tools::agentcore::AgentCoreBrowser;
 use mandate::tools::browser::{BrowserBackend, ReadPage, SubmitForm};
 use std::error::Error;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -145,6 +147,8 @@ async fn serve() -> Result<()> {
     let store = Store::connect(&env("DATABASE_URL")?).await?;
 
     let aws = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    // No consumers yet; lane D registers the approval resume here.
+    let events = mandate::events::start(&store, &aws, vec![]).await?;
     let backend: Arc<dyn BrowserBackend> = Arc::new(AgentCoreBrowser::new(&aws, browser_id));
     let hosts = read_hosts(&std::env::var("MANDATE_READ_HOSTS").unwrap_or_default());
     let catalog = Catalog::new(vec![
@@ -164,6 +168,7 @@ async fn serve() -> Result<()> {
     let sync = workos
         .as_ref()
         .map(|(client, _)| tokio::spawn(sync_loop(store.clone(), client.clone())));
+    let web_api = web_api(&store, &catalog);
     let state = Arc::new(AppState {
         store,
         policy,
@@ -172,23 +177,59 @@ async fn serve() -> Result<()> {
         assertion_signing_key: signing,
         workos: workos.map(|(client, id)| Arc::new(Workos::new(client, id))),
     });
-    let app = router(state).route("/healthz", axum::routing::get(|| async { "ok" }));
+    let mut app = router(state).route("/healthz", axum::routing::get(|| async { "ok" }));
+    if let Some(web_api) = web_api {
+        app = app.merge(web_api);
+    }
 
     let bind = std::env::var("MANDATE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .map_err(|e| format!("{bind}: {e}"))?;
     tracing::info!(%bind, "serving");
-    let served = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await;
+    // The peer address is the sign-in rate limit's fallback when there is no CF-Connecting-IP.
+    let served = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await;
     // Each event applies in its own transaction, so aborting mid-sync loses nothing.
     if let Some(sync) = sync {
         sync.abort();
     }
+    // Unsent rows stay in the outbox and unhandled messages in their queue.
+    events.iter().for_each(|t| t.abort());
     served?;
     tracing::info!("stopped");
     Ok(())
+}
+
+/// The web app's API; off unless WorkOS and both origins are configured.
+fn web_api(store: &Store, catalog: &Catalog) -> Option<axum::Router> {
+    let (Ok(key), Ok(client_id), Ok(web_origin), Ok(api_origin)) = (
+        env("WORKOS_API_KEY"),
+        env("WORKOS_CLIENT_ID"),
+        env("MANDATE_WEB_ORIGIN"),
+        env("MANDATE_API_ORIGIN"),
+    ) else {
+        tracing::warn!(
+            "WORKOS_API_KEY, WORKOS_CLIENT_ID, MANDATE_WEB_ORIGIN or MANDATE_API_ORIGIN not set: the web API is off"
+        );
+        return None;
+    };
+    let client = workos::Client::builder()
+        .api_key(key)
+        .client_id(client_id)
+        .build();
+    Some(api::router(Arc::new(ApiState {
+        store: store.clone(),
+        web_origin,
+        auth: Arc::new(WorkosAuth::new(client)),
+        sso_redirect_uri: format!("{}/v1/auth/sso/callback", api_origin.trim_end_matches('/')),
+        trust_cf_ip: std::env::var("MANDATE_TRUST_CF_IP").as_deref() == Ok("1"),
+        catalog: catalog.clone(),
+    })))
 }
 
 async fn sync_loop(store: Store, client: workos::Client) {

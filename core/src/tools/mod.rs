@@ -33,6 +33,7 @@ pub trait Tool: Send + Sync {
     ) -> Result<serde_json::Value, ToolError>;
 }
 
+#[derive(Clone)]
 pub struct Catalog(HashMap<ToolId, Arc<dyn Tool>>);
 
 impl Catalog {

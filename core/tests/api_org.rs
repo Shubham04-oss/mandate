@@ -88,7 +88,9 @@ async fn activity_shows_my_agent_only() {
     // Cy: only the team's bot. Another tenant: nothing.
     let (_, v) = call(&app, "GET", "/v1/activity", Some((&t, "cy")), None).await;
     assert_eq!(agents_of(&v), ["eng-bot"]);
-    let (_, v) = call(&app, "GET", "/v1/activity", Some((&tenant(), "bob")), None).await;
+    let other = tenant();
+    add_member(&s, &other, "bob", "Bob Other", false).await;
+    let (_, v) = call(&app, "GET", "/v1/activity", Some((&other, "bob")), None).await;
     assert_eq!(agents_of(&v), Vec::<String>::new());
     // Leaving the team takes the team's activity with it.
     exec(
@@ -219,15 +221,10 @@ async fn members_search_and_paging() {
     assert_eq!(ids(&p2).len(), 10);
     assert_eq!(p2["next"], json!(null));
     // Another tenant's members are not listed; a bad cursor or an overlong query is 400.
-    let (_, v) = call(
-        &app,
-        "GET",
-        "/v1/org/members",
-        Some((&tenant(), "bob")),
-        None,
-    )
-    .await;
-    assert_eq!(ids(&v), Vec::<String>::new());
+    let other = tenant();
+    add_member(&s, &other, "bob", "Bob Other", false).await;
+    let (_, v) = call(&app, "GET", "/v1/org/members", Some((&other, "bob")), None).await;
+    assert_eq!(ids(&v), ["bob"]);
     for q in ["?cursor=NOT%20AN%20ID", &format!("?q={}", "a".repeat(101))] {
         let (st, _) = call(
             &app,
@@ -263,7 +260,10 @@ async fn teams_list() {
             { "id": "ops", "name": "Operations", "members": 0, "is_admin": false },
         ])
     );
-    let (_, v) = call(&app, "GET", "/v1/org/teams", Some((&tenant(), "ann")), None).await;
+    // The same member id in another tenant sees none of these.
+    let other = tenant();
+    add_member(&s, &other, "ann", "Ann Other", false).await;
+    let (_, v) = call(&app, "GET", "/v1/org/teams", Some((&other, "ann")), None).await;
     assert_eq!(v["items"], json!([]));
 }
 
@@ -301,6 +301,8 @@ async fn agents_list_shows_my_operator() {
     .await;
     let (_, v) = call(&app, "GET", "/v1/agents", Some((&t, "ann")), None).await;
     assert_eq!(v["items"][0]["enabled"], json!(false));
-    let (_, v) = call(&app, "GET", "/v1/agents", Some((&tenant(), "bob")), None).await;
+    let other = tenant();
+    add_member(&s, &other, "bob", "Bob Other", false).await;
+    let (_, v) = call(&app, "GET", "/v1/agents", Some((&other, "bob")), None).await;
     assert_eq!(v["items"], json!([]));
 }

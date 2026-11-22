@@ -5,7 +5,6 @@ use api_support::*;
 use common::app_store;
 use http::StatusCode;
 use mandate::api::approvals::{DecideError, Decision, State, decide_approval};
-use mandate::api::stubs::{Event, published};
 use mandate::store::Store;
 use serde_json::json;
 use sqlx::Row;
@@ -43,13 +42,13 @@ async fn owner_can_approve() {
     let s = app_store().await;
     let t = org(&s).await;
     let id = ask(&s, &t, "ann-bot", "ann", json!({ "n": 1 })).await;
-    let a = decide(&s, &t, id, "ann", Decision::Approve).await.unwrap();
+    let a = decide(&s, &t, id, "ann", Decision::Approved).await.unwrap();
     assert_eq!(a.state, State::Approved);
     assert_eq!(a.decided_by, Some(member("ann")));
     assert!(a.decided_at.is_some());
     // Any member of the owning team may decide a team bot's request.
     let id = ask(&s, &t, "eng-bot", "ann", json!({ "n": 2 })).await;
-    let a = decide(&s, &t, id, "cy", Decision::Approve).await.unwrap();
+    let a = decide(&s, &t, id, "cy", Decision::Approved).await.unwrap();
     assert_eq!(a.decided_by, Some(member("cy")));
     // An approval decided here is the one the gate then spends.
     let mut tx = s.begin(&t).await.unwrap();
@@ -73,7 +72,7 @@ async fn others_cannot_decide() {
     let s = app_store().await;
     let t = org(&s).await;
     let id = ask(&s, &t, "ann-bot", "ann", json!({})).await;
-    for d in [Decision::Approve, Decision::Deny] {
+    for d in [Decision::Approved, Decision::Denied] {
         // Bob is not Ann; a member of another tenant cannot even see it.
         assert!(matches!(
             decide(&s, &t, id, "bob", d).await,
@@ -85,7 +84,7 @@ async fn others_cannot_decide() {
         ));
     }
     assert!(matches!(
-        decide(&s, &t, Uuid::new_v4(), "ann", Decision::Approve).await,
+        decide(&s, &t, Uuid::new_v4(), "ann", Decision::Approved).await,
         Err(DecideError::NotFound)
     ));
     // A disabled agent's requests can no longer be decided.
@@ -97,7 +96,7 @@ async fn others_cannot_decide() {
     )
     .await;
     assert!(matches!(
-        decide(&s, &t, id, "ann", Decision::Approve).await,
+        decide(&s, &t, id, "ann", Decision::Approved).await,
         Err(DecideError::Forbidden)
     ));
     // Expired: no decision, and the caller learns why.
@@ -110,7 +109,7 @@ async fn others_cannot_decide() {
     )
     .await;
     assert!(matches!(
-        decide(&s, &t, id, "bob", Decision::Approve).await,
+        decide(&s, &t, id, "bob", Decision::Approved).await,
         Err(DecideError::Expired)
     ));
 }
@@ -127,13 +126,13 @@ async fn concurrent_decisions_one_wins() {
         &mut first,
         id,
         &member("ann"),
-        Decision::Approve,
+        Decision::Approved,
         OffsetDateTime::now_utc(),
     )
     .await
     .unwrap();
     let (s2, t2) = (s.clone(), t.clone());
-    let second = tokio::spawn(async move { decide(&s2, &t2, id, "cy", Decision::Deny).await });
+    let second = tokio::spawn(async move { decide(&s2, &t2, id, "cy", Decision::Denied).await });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(
         !second.is_finished(),
@@ -149,8 +148,8 @@ async fn concurrent_decisions_one_wins() {
     for i in 0..20 {
         let id = ask(&s, &t, "eng-bot", "ann", json!({ "race": i })).await;
         let (a, b) = tokio::join!(
-            decide(&s, &t, id, "ann", Decision::Approve),
-            decide(&s, &t, id, "cy", Decision::Deny)
+            decide(&s, &t, id, "ann", Decision::Approved),
+            decide(&s, &t, id, "cy", Decision::Denied)
         );
         let wins = [&a, &b].iter().filter(|r| r.is_ok()).count();
         assert_eq!(wins, 1, "race {i}");
@@ -191,7 +190,7 @@ async fn deny_records_denied_by() {
     let t = org(&s).await;
     let args = json!({ "url": "https://x.test/" });
     let id = ask(&s, &t, "ann-bot", "ann", args.clone()).await;
-    let a = decide(&s, &t, id, "ann", Decision::Deny).await.unwrap();
+    let a = decide(&s, &t, id, "ann", Decision::Denied).await.unwrap();
     assert_eq!(a.state, State::Denied);
     assert_eq!(a.decided_by, Some(member("ann")));
     let mut tx = s.begin(&t).await.unwrap();
@@ -208,11 +207,11 @@ async fn deny_records_denied_by() {
     drop(tx);
     // A denial can be neither approved afterwards nor spent.
     assert!(matches!(
-        decide(&s, &t, id, "ann", Decision::Approve).await,
+        decide(&s, &t, id, "ann", Decision::Approved).await,
         Err(DecideError::AlreadyDecided)
     ));
     assert!(
-        !mandate::store::approve(&mut s.begin(&t).await.unwrap(), id, &member("ann"))
+        !common::approve(&mut s.begin(&t).await.unwrap(), id, &member("ann"))
             .await
             .unwrap()
     );
@@ -227,17 +226,65 @@ async fn decision_publishes_approval_decided() {
     let s = app_store().await;
     let t = org(&s).await;
     let id = ask(&s, &t, "ann-bot", "ann", json!({})).await;
-    decide(&s, &t, id, "ann", Decision::Deny).await.unwrap();
+    decide(&s, &t, id, "ann", Decision::Denied).await.unwrap();
     // A losing decision publishes nothing.
-    assert!(decide(&s, &t, id, "ann", Decision::Approve).await.is_err());
+    assert!(decide(&s, &t, id, "ann", Decision::Approved).await.is_err());
     assert_eq!(
-        published(&t),
-        [Event::ApprovalDecided {
-            approval: id,
-            decision: Decision::Deny,
-            by: member("ann"),
-        }]
+        outbox(&s, &t).await,
+        [(
+            "approval.decided.v1".to_owned(),
+            json!({ "approval": id, "decision": "denied", "by": "ann" })
+        )]
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn decisions_are_audited() {
+    let s = app_store().await;
+    let t = org(&s).await;
+    let args = json!({ "n": 1 });
+    let yes = ask(&s, &t, "ann-bot", "ann", args.clone()).await;
+    let no = ask(&s, &t, "eng-bot", "ann", json!({ "n": 2 })).await;
+    decide(&s, &t, yes, "ann", Decision::Approved)
+        .await
+        .unwrap();
+    decide(&s, &t, no, "cy", Decision::Denied).await.unwrap();
+    // A refused decision leaves no row.
+    assert!(decide(&s, &t, no, "ann", Decision::Approved).await.is_err());
+    let mut tx = s.begin(&t).await.unwrap();
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "select concat_ws(':', agent, member, tool, decision, coalesce(reason, '-'), approval_id, \
+         coalesce(approved_by, '-')), args_hash from audit order by id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    let hash = |a: serde_json::Value| mandate::gate::args_hash(&a).to_vec();
+    assert_eq!(
+        rows,
+        [
+            (
+                format!("ann-bot:ann:web.submit_form:approved:-:{yes}:ann"),
+                hash(args)
+            ),
+            (
+                format!("eng-bot:cy:web.submit_form:denied:-:{no}:-"),
+                hash(json!({ "n": 2 }))
+            ),
+        ]
+    );
+    drop(tx);
+    // The activity feed shows what agents did, not these decisions.
+    let (_, v) = call(
+        &app(s.clone()),
+        "GET",
+        "/v1/activity",
+        Some((&t, "ann")),
+        None,
+    )
+    .await;
+    assert_eq!(v["items"], json!([]), "{v}");
 }
 
 // ---- routes ----
@@ -252,7 +299,7 @@ async fn inbox_lists_pending_i_can_decide_and_my_requests() {
     let teams = ask(&s, &t, "eng-bot", "cy", json!({ "a": 2 })).await;
     let bobs = ask(&s, &t, "bob-bot", "bob", json!({ "a": 3 })).await;
     let decided = ask(&s, &t, "ann-bot", "ann", json!({ "a": 4 })).await;
-    decide(&s, &t, decided, "ann", Decision::Approve)
+    decide(&s, &t, decided, "ann", Decision::Approved)
         .await
         .unwrap();
     let ids = |v: &serde_json::Value| -> Vec<String> {
@@ -299,6 +346,7 @@ async fn inbox_lists_pending_i_can_decide_and_my_requests() {
     assert_eq!(ids(&v), [teams.to_string()]);
     // Another tenant with the same member id sees nothing of this one.
     let other = tenant();
+    add_member(&s, &other, "ann", "Ann Other", false).await;
     let (_, v) = call(&app, "GET", "/v1/approvals", Some((&other, "ann")), None).await;
     assert_eq!(ids(&v), Vec::<String>::new());
 
