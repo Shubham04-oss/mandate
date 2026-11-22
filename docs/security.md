@@ -37,6 +37,9 @@
 - Code and password checks share one 5-per-minute bucket per email, so anyone can use up a
   victim's minute, which also blocks their verify-email and invite-accept. That is an accepted
   trade-off: it bounds guessing whatever token, step or IP the guesser uses.
+- A leftover sign-up row (a sign-up nobody confirmed) blocks that email's password sign-ins until
+  a password reset clears it. A sign-up for an email that already has an account blocks its
+  password sign-in for one WorkOS round trip; the 5-per-minute limit caps how often.
 
 ## Browser egress
 
