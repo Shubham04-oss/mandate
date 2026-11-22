@@ -1,10 +1,16 @@
 //! The web app's JSON API. The core authenticates every request from its own session cookie;
 //! the web app decides nothing and never talks to WorkOS.
+pub mod activity;
+pub mod agents;
+pub mod approvals;
 pub mod auth;
+pub mod grants;
+pub mod org;
 pub mod ratelimit;
 pub mod session;
 
 use crate::store::{Store, StoreError};
+use crate::tools::Catalog;
 use auth::AuthProvider;
 use axum::Router;
 use axum::body::Bytes;
@@ -33,6 +39,8 @@ pub struct ApiState {
     pub sso_redirect_uri: String,
     /// `MANDATE_TRUST_CF_IP=1`: rate limits key on `CF-Connecting-IP`; only behind Cloudflare.
     pub trust_cf_ip: bool,
+    /// The served tools: grants name one, and an approval shows its call's effect.
+    pub catalog: Catalog,
 }
 
 /// A JSON body (an empty one reads as `{}`); a malformed one is `invalid_input`, never serde's
@@ -104,6 +112,14 @@ impl ApiError {
             "forbidden",
             "This request is not allowed.",
         )
+    }
+
+    pub const fn not_found() -> Self {
+        Self::new(StatusCode::NOT_FOUND, "not_found", "Not found.")
+    }
+
+    pub const fn conflict(message: &'static str) -> Self {
+        Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
     pub const fn internal() -> Self {
@@ -181,7 +197,13 @@ fn cors(web_origin: &str) -> CorsLayer {
 
 /// Every `/v1` route of the web API, with its CSRF, CORS and body-size layers.
 pub fn router(state: Arc<ApiState>) -> Router {
-    let routes = Router::new().merge(auth::routes(&state));
+    let routes = Router::new()
+        .merge(auth::routes(&state))
+        .merge(approvals::routes())
+        .merge(activity::routes())
+        .merge(agents::routes())
+        .merge(grants::routes())
+        .merge(org::routes());
     with_routes(routes, state)
 }
 

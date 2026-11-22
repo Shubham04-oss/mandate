@@ -14,9 +14,10 @@ grant usage on schema public to :"role";
 
 -- Tenant tables (RLS forced), each with only what the core does to it.
 grant select, insert, update, delete on members, teams, team_members, approvals to :"role";
--- Agents and grants are created by admins, not the app: it only disables agents and revokes grants.
+-- Agents are created by admins (personal operators only via `ensure_personal_agent`); the app disables them.
 grant select, update on agents to :"role";
-grant select, delete on grants to :"role";
+-- Grants: org admins create and revoke them through the core's API (`/v1/grants`); never rewritten.
+grant select, insert, delete on grants to :"role";
 -- Append-only: the app can never rewrite or erase history.
 grant select, insert on audit to :"role";
 grant usage on sequence audit_id_seq to :"role";

@@ -168,7 +168,7 @@ async fn serve() -> Result<()> {
     let sync = workos
         .as_ref()
         .map(|(client, _)| tokio::spawn(sync_loop(store.clone(), client.clone())));
-    let web_api = web_api(&store);
+    let web_api = web_api(&store, &catalog);
     let state = Arc::new(AppState {
         store,
         policy,
@@ -206,7 +206,7 @@ async fn serve() -> Result<()> {
 }
 
 /// The web app's API; off unless WorkOS and both origins are configured.
-fn web_api(store: &Store) -> Option<axum::Router> {
+fn web_api(store: &Store, catalog: &Catalog) -> Option<axum::Router> {
     let (Ok(key), Ok(client_id), Ok(web_origin), Ok(api_origin)) = (
         env("WORKOS_API_KEY"),
         env("WORKOS_CLIENT_ID"),
@@ -228,6 +228,7 @@ fn web_api(store: &Store) -> Option<axum::Router> {
         auth: Arc::new(WorkosAuth::new(client)),
         sso_redirect_uri: format!("{}/v1/auth/sso/callback", api_origin.trim_end_matches('/')),
         trust_cf_ip: std::env::var("MANDATE_TRUST_CF_IP").as_deref() == Ok("1"),
+        catalog: catalog.clone(),
     })))
 }
 

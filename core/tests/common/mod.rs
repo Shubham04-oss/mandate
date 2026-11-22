@@ -55,3 +55,20 @@ pub async fn app_store() -> Store {
         .await
         .unwrap()
 }
+
+/// `by` approves through `decide_approval`; false when it refuses (not theirs, decided, expired
+/// or unknown), so a test can assert either way.
+#[allow(dead_code)]
+pub async fn approve(
+    tx: &mut mandate::store::Tx,
+    approval: uuid::Uuid,
+    by: &mandate::ids::MemberId,
+) -> Result<bool, mandate::store::StoreError> {
+    use mandate::api::approvals::{DecideError, Decision, decide_approval};
+    let now = time::OffsetDateTime::now_utc();
+    match decide_approval(tx, approval, by, Decision::Approved, now).await {
+        Ok(_) => Ok(true),
+        Err(DecideError::Store(e)) => Err(e),
+        Err(_) => Ok(false),
+    }
+}

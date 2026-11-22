@@ -156,7 +156,7 @@ async fn external_asks_then_runs_once_after_approval() {
         .unwrap();
     assert_eq!((d.tool, d.args), (tool("mail.send"), args.clone()));
     assert!(
-        store::approve(&mut tx, approval, &MemberId::parse("ann").unwrap())
+        common::approve(&mut tx, approval, &MemberId::parse("ann").unwrap())
             .await
             .unwrap()
     );
@@ -166,10 +166,11 @@ async fn external_asks_then_runs_once_after_approval() {
     // Single use: the same call asks again.
     assert!(matches!(call().await, Outcome::Ask { .. }));
     let decisions: Vec<String> = audit_rows(&s, &t).await.into_iter().map(|r| r.0).collect();
-    assert_eq!(decisions, ["ask", "run", "ask"]);
+    // The approval itself is audited between the ask and the run it allowed.
+    assert_eq!(decisions, ["ask", "approved", "run", "ask"]);
     // The run that spent the approval records which one and who gave it.
     assert_eq!(
-        audit_approvals(&s, &t).await[1],
+        audit_approvals(&s, &t).await[2],
         ("run".to_owned(), Some(approval), Some("ann".to_owned()))
     );
 
@@ -275,7 +276,7 @@ async fn seed_team(t: &TenantId, tool: &str) {
 async fn approve_as(s: &Store, t: &TenantId, approval: Uuid, m: &str) {
     let mut tx = s.begin(t).await.unwrap();
     assert!(
-        store::approve(&mut tx, approval, &MemberId::parse(m).unwrap())
+        common::approve(&mut tx, approval, &MemberId::parse(m).unwrap())
             .await
             .unwrap()
     );

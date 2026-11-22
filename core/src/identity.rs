@@ -1,6 +1,7 @@
 //! WorkOS proves who a person is; Mandate exchanges that for its own short-lived assertion and
 //! mirrors the customer's directory, so a person removed there loses access on the next sync.
 use crate::assertion::{Assertion, TTL_SECS, sign};
+use crate::events::{self, Actor, Event};
 use crate::ids::{AgentId, MemberId, SpaceId, TeamId, TenantId};
 use crate::mcp::AppState;
 use crate::store::{self, Store, StoreError};
@@ -395,12 +396,40 @@ struct DirUser {
     state: String,
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+}
+
+impl DirUser {
+    /// `None` when the directory gives no name, so a stored one is kept.
+    fn name(&self) -> Option<String> {
+        let parts = [&self.first_name, &self.last_name];
+        display_name(
+            &parts
+                .iter()
+                .filter_map(|p| p.as_deref())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
 }
 
 #[derive(Deserialize)]
 struct DirGroup {
     id: String,
     organization_id: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+const MAX_NAME_CHARS: usize = 200;
+
+/// Trimmed and capped; `None` if empty. Names are shown, never used for access.
+fn display_name(s: &str) -> Option<String> {
+    let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!s.is_empty()).then(|| s.chars().take(MAX_NAME_CHARS).collect())
 }
 
 #[derive(Deserialize)]
@@ -416,20 +445,24 @@ enum Change {
         directory_user: String,
         email: Option<String>,
         workos_user: Option<String>,
+        name: Option<String>,
     },
     RemoveMember(MemberId),
     Team {
         id: TeamId,
         group: String,
+        name: Option<String>,
     },
     RemoveTeam(TeamId),
     Join {
         team: TeamId,
         group: String,
+        team_name: Option<String>,
         member: MemberId,
         directory_user: String,
         email: Option<String>,
         workos_user: Option<String>,
+        name: Option<String>,
     },
     Leave {
         team: TeamId,
@@ -538,6 +571,7 @@ async fn prepare(
                 let workos_user = link(users, u.email.as_deref(), &u.organization_id, e).await;
                 Change::Member {
                     id,
+                    name: u.name(),
                     directory_user: u.id,
                     email: u.email,
                     workos_user,
@@ -551,7 +585,11 @@ async fn prepare(
             let change = if kind == "dsync.group.deleted" {
                 Change::RemoveTeam(id)
             } else {
-                Change::Team { id, group: g.id }
+                Change::Team {
+                    id,
+                    name: g.name.as_deref().and_then(display_name),
+                    group: g.id,
+                }
             };
             (g.organization_id, change)
         }
@@ -571,8 +609,10 @@ async fn prepare(
             } else if user.state == "active" {
                 Change::Join {
                     team,
+                    team_name: group.name.as_deref().and_then(display_name),
                     group: group.id,
                     member,
+                    name: user.name(),
                     workos_user: link(users, user.email.as_deref(), &org, e).await,
                     directory_user: user.id,
                     email: user.email,
@@ -588,13 +628,77 @@ async fn prepare(
         Some(t) => t,
         None => {
             let id = TenantId::parse(&slug(&org)).map_err(|err| permanent(Some(&org), err))?;
-            store
-                .ensure_tenant(&org, &id)
+            new_tenant(store, &org, &id)
                 .await?
                 .ok_or_else(|| permanent(Some(&org), format!("tenant id {id} is taken")))?
         }
     };
     Ok(Some((tenant, change)))
+}
+
+/// The org's tenant, created as `id` with `organization.created.v1` in the same transaction if
+/// new; `None` if `id` already belongs to another org.
+async fn new_tenant(
+    store: &Store,
+    org: &str,
+    id: &TenantId,
+) -> Result<Option<TenantId>, StoreError> {
+    let mut tx = store.begin(id).await?;
+    let created = sqlx::query(
+        "insert into tenants (id, workos_org_id) values ($1, $2) on conflict do nothing",
+    )
+    .bind(id.as_str())
+    .bind(org)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+    if created {
+        let actor = Actor::Directory;
+        events::publish(&mut tx, Event::OrganizationCreated { actor }).await?;
+    }
+    tx.commit().await?;
+    store.tenant_for_org(org).await
+}
+
+async fn member_exists(tx: &mut store::Tx, member: &MemberId) -> Result<bool, StoreError> {
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from members where tenant_id = current_setting('mandate.tenant', true) and id = $1)",
+    )
+    .bind(member.as_str())
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+/// Which table a directory name belongs to.
+#[derive(Clone, Copy)]
+enum Named {
+    Member,
+    Team,
+}
+
+/// `None` keeps the stored name: an event without one must not erase it.
+async fn set_name(
+    tx: &mut store::Tx,
+    what: Named,
+    id: &str,
+    name: Option<&str>,
+) -> Result<(), StoreError> {
+    let Some(name) = name else { return Ok(()) };
+    let q = match what {
+        Named::Member => {
+            "update members set name = $2 where tenant_id = current_setting('mandate.tenant', true) and id = $1"
+        }
+        Named::Team => {
+            "update teams set name = $2 where tenant_id = current_setting('mandate.tenant', true) and id = $1"
+        }
+    };
+    sqlx::query(q)
+        .bind(id)
+        .bind(name)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// One event, one transaction: the change and the cursor commit together or not at all.
@@ -615,7 +719,9 @@ async fn apply(
             directory_user,
             email,
             workos_user,
+            name,
         } => {
+            let existed = member_exists(&mut tx, &id).await?;
             store::upsert_member(
                 &mut tx,
                 &id,
@@ -623,19 +729,42 @@ async fn apply(
                 email.as_deref(),
                 workos_user.as_deref(),
             )
-            .await?
+            .await?;
+            set_name(&mut tx, Named::Member, id.as_str(), name.as_deref()).await?;
+            store::ensure_personal_agent(&mut tx, &id).await?;
+            let actor = Actor::Directory;
+            let event = if existed {
+                Event::MemberUpdated { member: id, actor }
+            } else {
+                Event::MemberCreated { member: id, actor }
+            };
+            events::publish(&mut tx, event).await?;
         }
-        Change::RemoveMember(id) => store::remove_member(&mut tx, &id).await?,
-        Change::Team { id, group } => store::upsert_team(&mut tx, &id, &group).await?,
+        Change::RemoveMember(id) => {
+            // Always removes (fail closed), but records only someone who was a member.
+            let existed = member_exists(&mut tx, &id).await?;
+            store::remove_member(&mut tx, &id).await?;
+            if existed {
+                let actor = Actor::Directory;
+                events::publish(&mut tx, Event::MemberRemoved { member: id, actor }).await?;
+            }
+        }
+        Change::Team { id, group, name } => {
+            store::upsert_team(&mut tx, &id, &group).await?;
+            set_name(&mut tx, Named::Team, id.as_str(), name.as_deref()).await?;
+        }
         Change::RemoveTeam(id) => store::delete_team(&mut tx, &id).await?,
         Change::Join {
             team,
             group,
+            team_name,
             member,
             directory_user,
             email,
             workos_user,
+            name,
         } => {
+            let existed = member_exists(&mut tx, &member).await?;
             store::upsert_member(
                 &mut tx,
                 &member,
@@ -644,8 +773,15 @@ async fn apply(
                 workos_user.as_deref(),
             )
             .await?;
+            set_name(&mut tx, Named::Member, member.as_str(), name.as_deref()).await?;
+            store::ensure_personal_agent(&mut tx, &member).await?;
             store::upsert_team(&mut tx, &team, &group).await?;
+            set_name(&mut tx, Named::Team, team.as_str(), team_name.as_deref()).await?;
             store::set_team_member(&mut tx, &team, &member, true).await?;
+            if !existed {
+                let actor = Actor::Directory;
+                events::publish(&mut tx, Event::MemberCreated { member, actor }).await?;
+            }
         }
         Change::Leave { team, member } => {
             store::set_team_member(&mut tx, &team, &member, false).await?

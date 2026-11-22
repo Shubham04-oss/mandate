@@ -1270,17 +1270,6 @@ async fn insert_member(tx: &mut Tx, user: &AuthUser) -> Result<Option<MemberId>,
     Ok(created.map(|_| id))
 }
 
-/// The member's personal operator (`op-` + a hash of the member id), created if they have none;
-/// a disabled one stays disabled. The app role cannot insert agents: a narrow database function
-/// does it.
-async fn ensure_personal_agent(tx: &mut Tx, member: &MemberId) -> Result<(), StoreError> {
-    sqlx::query("select ensure_personal_agent($1)")
-        .bind(member.as_str())
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
 /// Admin follows the WorkOS role at every sign-in; a session, and the `Me` to show.
 async fn sign_in(
     mut tx: Tx,
@@ -1289,7 +1278,7 @@ async fn sign_in(
     is_admin: bool,
     profile: &Value,
 ) -> Result<SignedIn, ApiError> {
-    ensure_personal_agent(&mut tx, member).await?;
+    store::ensure_personal_agent(&mut tx, member).await?;
     sqlx::query(
         "update members set is_admin = $2 where tenant_id = current_setting('mandate.tenant', true) and id = $1",
     )
