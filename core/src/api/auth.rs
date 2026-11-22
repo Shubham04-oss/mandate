@@ -677,12 +677,8 @@ async fn sign_up(
             }
             json!({ "decoy": true })
         }
-        Err(e) => {
-            if recorded {
-                unrecord_sign_up_email(&s, b.email.as_str()).await?;
-            }
-            return Err(e.into());
-        }
+        // Ambiguous (a timeout, a 5xx): WorkOS may have made the user, so the row stays.
+        Err(e) => return Err(e.into()),
     };
     let pending = store_pending(&s, "sign_up", None, Some(b.email.as_str()), data).await?;
     let body = json!({ "status": "next", "next": "verify_email", "pending": pending });
@@ -702,11 +698,13 @@ async fn record_sign_up_email(s: &ApiState, email: &str) -> Result<bool, ApiErro
     Ok(made.is_some())
 }
 
-/// The new WorkOS user owns the email's row (a stale row from a deleted user starts over).
+/// The new WorkOS user owns the email's row (a stale row from a deleted user starts over). An
+/// upsert: a concurrent sign-up that got Conflict may have dropped the row this one relied on.
 async fn claim_sign_up_row(s: &ApiState, email: &str, user: &str) -> Result<(), ApiError> {
     let mut tx = s.store.begin_untenanted().await?;
     sqlx::query(
-        "update sign_up_passwords set workos_user_id = $2, neutralised_at = null where email = lower($1)",
+        "insert into sign_up_passwords (email, workos_user_id) values (lower($1), $2) \
+         on conflict (email) do update set workos_user_id = excluded.workos_user_id, neutralised_at = null",
     )
     .bind(email.trim())
     .bind(user)
@@ -1125,6 +1123,8 @@ async fn reset(
         Err(e) => return Err(e.into()),
     };
     // First, while nothing else can fail first: every session in every tenant ends.
+    // ponytail: the password is changed and the token spent before this runs, so if it fails the
+    // reset cannot be retried and sessions live on; a failure here needs an operator.
     let mut tx = s.store.begin_untenanted().await?;
     sqlx::query("select end_sessions_for_workos_user($1)")
         .bind(&user.id)

@@ -545,6 +545,13 @@ struct FakeUser {
     totp: bool,
 }
 
+#[derive(Default)]
+struct CreateRace {
+    calls: std::sync::atomic::AtomicUsize,
+    created: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
 /// WorkOS as the sign-in API sees it, in memory. Pending tokens look like `pat_<user>` and
 /// must never reach the browser.
 #[derive(Default)]
@@ -563,6 +570,11 @@ struct Fake {
     set_password_fails: Mutex<bool>,
     /// One-shot: the next `set_password` waits at the first barrier (arrived), then the second.
     set_password_gate: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
+    /// Lines up two `create_user` calls for one email: the first waits until the second has
+    /// made the user; the second then waits for the first barrier's release.
+    create_race: Mutex<Option<Arc<CreateRace>>>,
+    /// One-shot: `create_user` makes the user, then answers with this error anyway.
+    create_user_error: Mutex<Option<AuthError>>,
 }
 
 impl Fake {
@@ -851,6 +863,15 @@ impl AuthProvider for Fake {
         name: &str,
     ) -> Result<AuthUser, AuthError> {
         self.call(format!("create-user {email}"));
+        let race = self.create_race.lock().unwrap().clone();
+        let second = match &race {
+            Some(r) if r.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 => {
+                r.created.notified().await;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
         if self.by_email(email).is_some() {
             return Err(AuthError::Conflict);
         }
@@ -864,6 +885,14 @@ impl AuthProvider for Fake {
             totp: false,
         };
         self.users.lock().unwrap().push(u.clone());
+        if let Some(r) = race.filter(|_| second) {
+            r.created.notify_one();
+            r.release.notified().await;
+        }
+        let error = self.create_user_error.lock().unwrap().take();
+        if let Some(e) = error {
+            return Err(e);
+        }
         Ok(Self::auth_user(&u))
     }
 
@@ -3065,4 +3094,71 @@ async fn totp_setup_guesses_are_limited_per_user_across_challenges() {
         guess(c2).await.unwrap().status(),
         StatusCode::TOO_MANY_REQUESTS
     );
+}
+
+/// `(workos_user_id, neutralised)` of the sign-up row for an email.
+async fn sign_up_row_by_email(h: &Harness, email: &str) -> Option<(Option<String>, bool)> {
+    let mut tx = h.store.begin_untenanted().await.unwrap();
+    sqlx::query_as(
+        "select workos_user_id, neutralised_at is not null from sign_up_passwords where email = lower($1)",
+    )
+    .bind(email)
+    .fetch_optional(&mut *tx)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn concurrent_sign_ups_leave_the_row_with_the_created_user() {
+    let h = Harness::new().await;
+    let email = format!("race-{}@acme.test", Uuid::new_v4().simple());
+    let race = Arc::new(CreateRace::default());
+    *h.fake.create_race.lock().unwrap() = Some(race.clone());
+    let sign_up = || {
+        h.app.clone().oneshot(auth_post(
+            "/v1/auth/sign-up",
+            &random_ip(),
+            sign_up_body(&email),
+        ))
+    };
+    // A records the row first, then waits in WorkOS until B has made the user.
+    let a = tokio::spawn(sign_up());
+    while !h.fake.called(&format!("create-user {email}")) {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let b = tokio::spawn(sign_up());
+    // A gets Conflict and drops the row it made, all before B records its user.
+    assert_eq!(a.await.unwrap().unwrap().status(), StatusCode::ACCEPTED);
+    race.release.notify_one();
+    assert_eq!(b.await.unwrap().unwrap().status(), StatusCode::ACCEPTED);
+    let user = h.fake.by_email(&email).unwrap();
+    assert_eq!(
+        sign_up_row_by_email(&h, &email).await,
+        Some((Some(user.id), false))
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn ambiguous_create_user_failure_keeps_the_row() {
+    let h = Harness::new().await;
+    let email = format!("timeout-{}@acme.test", Uuid::new_v4().simple());
+    // WorkOS made the user but the answer was lost.
+    *h.fake.create_user_error.lock().unwrap() = Some(AuthError::Upstream("status 504".into()));
+    let r = h.post("/v1/auth/sign-up", sign_up_body(&email)).await;
+    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(sign_up_row_by_email(&h, &email).await, Some((None, false)));
+    // So that password is refused even after the email gets verified some other way.
+    let inviter = h.user("admin");
+    let u = h.fake.by_email(&email).unwrap();
+    victim_ready(&h, &inviter, &u);
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": email, "password": SIGN_UP_PASSWORD }),
+        )
+        .await;
+    assert!(session_cookie(&r).is_none());
+    assert_eq!(body_json(r).await["error"]["code"], "invalid_credentials");
 }
