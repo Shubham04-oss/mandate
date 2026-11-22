@@ -14,9 +14,10 @@ grant usage on schema public to :"role";
 
 -- Tenant tables (RLS forced), each with only what the core does to it.
 grant select, insert, update, delete on members, teams, team_members, approvals to :"role";
--- Agents and grants are created by admins, not the app: it only disables agents and revokes grants.
+-- Agents are created by admins (personal operators only via `ensure_personal_agent`); the app disables them.
 grant select, update on agents to :"role";
-grant select, delete on grants to :"role";
+-- Grants: org admins create and revoke them through the core's API (`/v1/grants`); never rewritten.
+grant select, insert, delete on grants to :"role";
 -- Append-only: the app can never rewrite or erase history.
 grant select, insert on audit to :"role";
 grant usage on sequence audit_id_seq to :"role";
@@ -26,6 +27,26 @@ grant select, insert on tenants to :"role";
 grant select, insert, update on directory_cursor to :"role";
 grant select, insert on directory_dead_letters to :"role";
 
--- Conversations (RLS forced). Relayed events and approval links are append-only.
-grant select, insert, update on conversations to :"role";
+-- Web sessions (RLS forced): created at sign-in, touched per request, deleted at sign-out.
+grant select, insert, update, delete on sessions to :"role";
+-- Pending sign-in steps (RLS forced): stored, read and used up, never edited.
+grant select, insert, delete on auth_pending to :"role";
+-- Sign-in rate counters (RLS-free, hashes only): upserted per attempt, old windows dropped.
+grant select, insert, update, delete on rate_limits to :"role";
+-- Sign-in gives a member their personal operator only through this narrow function.
+grant execute on function ensure_personal_agent(text) to :"role";
+-- Events. The outbox is written by `publish`; the publisher may only mark rows sent.
+grant select, insert on outbox to :"role";
+grant update (sent_at) on outbox to :"role";
+grant usage on sequence outbox_seq_seq to :"role";
+-- Append-only: who joined and left is never rewritten.
+grant select, insert on lifecycle_log to :"role";
+-- RLS-free consumer bookkeeping: the core only records; `on conflict do nothing` needs no SELECT.
+grant insert on events_inbox, events_quarantine to :"role";
+grant usage on sequence events_quarantine_id_seq to :"role";
+
+-- Conversations (RLS forced). The core moves only a conversation's state, eve session and cursor;
+-- relayed events, approval links and calls are append-only.
+grant select, insert on conversations to :"role";
+grant update (state, eve_session, eve_cursor, updated_at) on conversations to :"role";
 grant select, insert on conversation_events, conversation_approvals, conversation_calls to :"role";

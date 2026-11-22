@@ -1,93 +1,68 @@
 //! Your agent in the web app. The core starts eve turns for the signed-in member's personal
 //! operator, relays eve's events to the browser as server-sent events, and resumes a turn when
 //! its approval is decided. eve is untrusted: its stream is translated, never passed through.
+use crate::api::session::{self, Session};
+use crate::api::{ApiError, ApiState, Input, approvals, ratelimit};
 use crate::assertion::{Assertion, TTL_SECS, sign};
 use crate::eve::{EveClient, EveError, EveSessionId, Fact, Record};
+use crate::events::{self, Decision as Decided, Envelope, Handler, HandlerError};
 use crate::gate::{self, args_hash};
 use crate::guard::{Guard, NOTICE, screen};
 use crate::ids::{AgentId, MemberId, TenantId, ToolId};
 use crate::mcp::AppState;
 use crate::policy::Decision;
 use crate::store::{self, AuditEntry, StoreError, Tx};
-use axum::extract::{FromRequestParts, Path, Query, State};
-use axum::response::sse::{Event, KeepAlive, Sse};
+use async_trait::async_trait;
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{Path, Query, State};
+use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use futures::Stream;
-use http::request::Parts;
 use http::{HeaderMap, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use time::OffsetDateTime;
-use tokio::sync::Mutex;
-use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
-const MAX_BODY_BYTES: usize = 64 * 1024;
 const PAGE: i64 = 50;
 // A browser stream ends after this long; EventSource reconnects with Last-Event-ID.
-const STREAM_LIFETIME: Duration = Duration::from_secs(15 * 60);
+const STREAM_LIFETIME: Duration = Duration::from_secs(5 * 60);
+// Each open stream polls Postgres, so their number is bounded per member and per process.
+const MAX_STREAMS_PER_MEMBER: usize = 5;
+const MAX_STREAMS: usize = 500;
+// A stream re-checks its session every this many polls, so signing out ends it.
+const SESSION_RECHECK_POLLS: u32 = 30;
+// Each start opens an eve session, so it is limited per member per minute.
+const STARTS_PER_MINUTE: i32 = 10;
 const MAX_RELAY_FAILURES: u32 = 5;
 // eve prefixes connection tools with the connection's file name (`agents/agent/connections/mandate.ts`).
 const TOOL_PREFIX: &str = "mandate__";
 const TS: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'"#;
 
-/// ponytail: stand-in for lane B's `Session` extractor (cookie, CSRF). It trusts only a value
-/// a layer put in the request extensions, so in production, with no such layer, every request is 401.
-#[derive(Debug, Clone)]
-pub struct Session {
-    pub tenant: TenantId,
-    pub member: MemberId,
-    pub is_admin: bool,
-}
-
-impl<S: Send + Sync> FromRequestParts<S> for Session {
-    type Rejection = ApiError;
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
-        parts.extensions.get::<Session>().cloned().ok_or(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "forbidden",
-            "Sign in first.",
-        ))
-    }
-}
-
-/// `{ "error": { "code", "message" } }`; messages are short and never carry eve's text.
-#[derive(Debug)]
-pub struct ApiError(StatusCode, &'static str, &'static str);
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let body = json!({ "error": { "code": self.1, "message": self.2 } });
-        (self.0, Json(body)).into_response()
-    }
-}
-
-fn internal<E: std::fmt::Display>(e: E) -> ApiError {
-    tracing::error!(error = %e, "conversations request failed");
-    ApiError(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "Something went wrong.",
-    )
-}
+const EVE_DOWN: ApiError = ApiError::new(
+    StatusCode::BAD_GATEWAY,
+    "internal",
+    "The agent is unavailable.",
+);
+const NO_AGENT: ApiError =
+    ApiError::new(StatusCode::FORBIDDEN, "no_access", "You have no agent yet.");
+const TOO_MANY_STREAMS: ApiError = ApiError::new(
+    StatusCode::TOO_MANY_REQUESTS,
+    "rate_limited",
+    "Too many open conversations. Close one and try again.",
+);
 
 fn eve_down(e: EveError) -> ApiError {
     tracing::warn!(error = %e, "eve call failed");
-    ApiError(
-        StatusCode::BAD_GATEWAY,
-        "internal",
-        "The agent is unavailable.",
-    )
+    EVE_DOWN
 }
-
-const NOT_FOUND: ApiError = ApiError(StatusCode::NOT_FOUND, "not_found", "No such conversation.");
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConversationError {
@@ -97,16 +72,30 @@ pub enum ConversationError {
     Db(#[from] sqlx::Error),
     #[error(transparent)]
     Eve(#[from] EveError),
+    #[error("the approval could not be shown")]
+    View,
 }
+
+/// A plain lock: no one holds it across an await, and a panic elsewhere does not poison the count.
+fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+type PumpKey = (TenantId, Uuid);
+type StreamKey = (TenantId, MemberId);
 
 pub struct Conversations {
     pub app: Arc<AppState>,
+    /// The web API's state: an `approval_wait` carries the inbox's own view of the approval.
+    pub api: Arc<ApiState>,
     pub eve: EveClient,
     pub guard: Arc<dyn Guard>,
     /// Pause between relay reconnects and between browser polls.
     pub poll: Duration,
-    /// Conversations with a relay running in this process; a second one would only waste work.
-    pumps: Mutex<HashSet<(TenantId, Uuid)>>,
+    /// Conversations with a relay running in this process, each with "kicked again since it last looked".
+    pumps: Mutex<HashMap<PumpKey, bool>>,
+    /// Open browser streams: the total, and per member.
+    streams: Mutex<(usize, HashMap<StreamKey, usize>)>,
 }
 
 /// What the core keeps about one conversation.
@@ -117,19 +106,56 @@ struct Conv {
     cursor: i64,
 }
 
+/// Removes a relay's `pumps` entry if the relay ends without doing so (a panic or an abort).
+struct PumpEntry {
+    conv: Arc<Conversations>,
+    key: PumpKey,
+    armed: bool,
+}
+
+impl Drop for PumpEntry {
+    fn drop(&mut self) {
+        if self.armed {
+            locked(&self.conv.pumps).remove(&self.key);
+        }
+    }
+}
+
+/// One open browser stream, counted until it is dropped: when it ends or the browser leaves.
+struct StreamSlot {
+    conv: Arc<Conversations>,
+    key: StreamKey,
+}
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        let mut s = locked(&self.conv.streams);
+        s.0 = s.0.saturating_sub(1);
+        if let Some(n) = s.1.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                s.1.remove(&self.key);
+            }
+        }
+    }
+}
+
 impl Conversations {
     pub fn new(
         app: Arc<AppState>,
+        api: Arc<ApiState>,
         eve: EveClient,
         guard: Arc<dyn Guard>,
         poll: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             app,
+            api,
             eve,
             guard,
             poll,
-            pumps: Mutex::new(HashSet::new()),
+            pumps: Mutex::new(HashMap::new()),
+            streams: Mutex::new((0, HashMap::new())),
         })
     }
 
@@ -144,6 +170,7 @@ impl Conversations {
     }
 
     /// A fresh assertion for every eve call: a waiting turn may resume long after the last one expired.
+    // ponytail: one assertion lasts TTL_SECS; a single eve turn longer than that loses its tool access.
     fn token(&self, tenant: &TenantId, c: &Conv) -> String {
         sign(
             &self.who(tenant, &c.member, &c.agent),
@@ -151,54 +178,100 @@ impl Conversations {
         )
     }
 
-    /// Resumes the eve turn waiting on `approval`: answers its prompt and relays what follows.
-    /// False when no conversation waits on it. ponytail: lane F's consumer of
-    /// `approval.decided.v1` (fed by lane C's `decide_approval`) calls this once both merge.
-    pub async fn approval_decided(
+    fn open_stream(
         self: &Arc<Self>,
         tenant: &TenantId,
-        approval: Uuid,
-        approve: bool,
-    ) -> Result<bool, ConversationError> {
-        let mut tx = self.app.store.begin(tenant).await?;
-        let row: Option<(Uuid, String)> = sqlx::query_as(
-            "select conversation, interaction from conversation_approvals \
-             where tenant_id = current_setting('mandate.tenant', true) and approval = $1",
-        )
-        .bind(approval)
-        .fetch_optional(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        let Some((id, interaction)) = row else {
-            return Ok(false);
-        };
-        let Some(c) = load(&self.app.store, tenant, id, None).await? else {
-            return Ok(false);
-        };
-        // eve only runs the call; the core's MCP gate spends the approval, or asks again.
-        self.eve
-            .answer(&self.token(tenant, &c), &c.eve, &interaction, approve)
-            .await?;
-        let mut tx = self.app.store.begin(tenant).await?;
-        set_state(&mut tx, id, "working").await?;
-        tx.commit().await?;
-        self.kick(tenant, id).await;
-        Ok(true)
+        member: &MemberId,
+    ) -> Result<StreamSlot, ApiError> {
+        let key = (tenant.clone(), member.clone());
+        let mut s = locked(&self.streams);
+        let mine = s.1.get(&key).copied().unwrap_or(0);
+        if mine >= MAX_STREAMS_PER_MEMBER || s.0 >= MAX_STREAMS {
+            return Err(TOO_MANY_STREAMS);
+        }
+        s.0 += 1;
+        s.1.insert(key.clone(), mine + 1);
+        Ok(StreamSlot {
+            conv: self.clone(),
+            key,
+        })
     }
 
-    /// Starts a relay for this conversation unless one already runs here.
-    pub async fn kick(self: &Arc<Self>, tenant: &TenantId, id: Uuid) {
-        let mut pumps = self.pumps.lock().await;
-        if pumps.insert((tenant.clone(), id)) {
-            tokio::spawn(self.clone().pump(tenant.clone(), id));
+    /// Answers every eve prompt waiting on `approval` and relays what follows, if the store still
+    /// shows the decision the event names. An eve error leaves the event for redelivery.
+    // ponytail: an approval that expires undecided resumes nothing; its turn waits until cancelled.
+    async fn resume(
+        self: &Arc<Self>,
+        tx: &mut Tx,
+        tenant: &TenantId,
+        approval: Uuid,
+        decision: Decided,
+    ) -> Result<(), HandlerError> {
+        let want = match decision {
+            Decided::Approved => approvals::State::Approved,
+            Decided::Denied => approvals::State::Denied,
+        };
+        match approvals::load(tx, approval, OffsetDateTime::now_utc()).await? {
+            Some(a) if a.state == want => {}
+            _ => {
+                tracing::warn!(%approval, "approval is not in the decided state; nothing resumed");
+                return Ok(());
+            }
+        }
+        let links: Vec<(Uuid, String)> = sqlx::query_as(
+            "select conversation, interaction from conversation_approvals \
+             where tenant_id = current_setting('mandate.tenant', true) and approval = $1 \
+             order by conversation, interaction",
+        )
+        .bind(approval)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(StoreError::from)?;
+        for (id, interaction) in links {
+            let Some(c) = load(&self.app.store, tenant, id, None).await? else {
+                continue;
+            };
+            // eve only runs the call; the core's MCP gate spends the approval, or asks again.
+            self.eve
+                .answer(
+                    &self.token(tenant, &c),
+                    &c.eve,
+                    &interaction,
+                    decision == Decided::Approved,
+                )
+                .await
+                .map_err(|e| HandlerError::Retry(e.to_string()))?;
+            working(self, tenant, id).await?;
+        }
+        Ok(())
+    }
+
+    /// Starts a relay for this conversation unless one already runs here; that one looks again.
+    pub fn kick(self: &Arc<Self>, tenant: &TenantId, id: Uuid) {
+        let key = (tenant.clone(), id);
+        let mut pumps = locked(&self.pumps);
+        match pumps.get_mut(&key) {
+            Some(again) => *again = true,
+            None => {
+                pumps.insert(key.clone(), false);
+                tokio::spawn(self.clone().pump(key));
+            }
         }
     }
 
-    async fn pump(self: Arc<Self>, tenant: TenantId, id: Uuid) {
+    // ponytail: a conversation left `working` by a restart waits for its next kick (a message,
+    // cancel or decision); re-kick those at startup if that is too slow.
+    async fn pump(self: Arc<Self>, key: PumpKey) {
+        let mut entry = PumpEntry {
+            conv: self.clone(),
+            key: key.clone(),
+            armed: true,
+        };
+        let (tenant, id) = (&key.0, key.1);
         let mut calls = HashMap::new();
         let mut failures = 0;
         loop {
-            let ended = match self.relay(&tenant, id, &mut calls).await {
+            let ended = match self.relay(tenant, id, &mut calls).await {
                 Ok(ended) => {
                     failures = 0;
                     ended
@@ -207,23 +280,28 @@ impl Conversations {
                     failures += 1;
                     tracing::warn!(error = %e, conversation = %id, failures, "relay failed");
                     if failures >= MAX_RELAY_FAILURES {
-                        let _ = self.give_up(&tenant, id).await;
+                        let _ = self.give_up(tenant, id).await;
                         true
                     } else {
                         false
                     }
                 }
             };
-            // Decided under the lock, so a `kick` racing this exit either sees us or starts anew.
-            let mut pumps = self.pumps.lock().await;
             let working =
-                !ended && matches!(self.state(&tenant, id).await, Ok(Some(s)) if s == "working");
-            if !working {
-                pumps.remove(&(tenant.clone(), id));
-                return;
+                !ended && matches!(self.state(tenant, id).await, Ok(Some(s)) if s == "working");
+            {
+                let mut pumps = locked(&self.pumps);
+                // A kick since the last look may mean new work: look once more before stopping.
+                let again = pumps.get_mut(&key).is_some_and(std::mem::take);
+                if !working && !again {
+                    pumps.remove(&key);
+                    entry.armed = false;
+                    return;
+                }
             }
-            drop(pumps);
-            tokio::time::sleep(self.poll * (1 + failures)).await;
+            if working {
+                tokio::time::sleep(self.poll * (1 + failures)).await;
+            }
         }
     }
 
@@ -272,6 +350,11 @@ impl Conversations {
                     let mut tx = self.app.store.begin(tenant).await?;
                     lock(&mut tx, id).await?;
                     set_state(&mut tx, id, "idle").await?;
+                    events::publish(
+                        &mut tx,
+                        events::Event::ConversationFinished { conversation: id },
+                    )
+                    .await?;
                     tx.commit().await?;
                     return Ok(true);
                 }
@@ -303,7 +386,7 @@ impl Conversations {
             return Ok(());
         }
         for (f, p) in facts.iter().zip(prepared) {
-            apply(&mut tx, id, &who, f, p, &mut answers).await?;
+            apply(&mut tx, &self.api, id, &who, f, p, &mut answers).await?;
         }
         sqlx::query(
             "update conversations set eve_cursor = $2, updated_at = now() \
@@ -336,9 +419,11 @@ impl Conversations {
             "call.requested" => {
                 let name = f.data["capability"]["name"].as_str().unwrap_or_default();
                 let call = f.data["callId"].as_str().unwrap_or_default();
+                // Only a tool the core serves; anything else eve names is not shown.
                 if let Some(tool) = name
                     .strip_prefix(TOOL_PREFIX)
                     .and_then(|t| ToolId::parse(t).ok())
+                    .filter(|t| self.app.catalog.get(t).is_some())
                 {
                     let input = f.data.get("input").cloned().unwrap_or(Value::Null);
                     calls.insert(call.to_owned(), (tool, input));
@@ -432,6 +517,7 @@ enum Prepared {
 
 async fn apply(
     tx: &mut Tx,
+    api: &ApiState,
     id: Uuid,
     who: &Assertion,
     f: &Fact,
@@ -442,19 +528,6 @@ async fn apply(
     match (f.kind.as_str(), p) {
         ("delivery.admitted" | "turn.started", _) => set_state(tx, id, "working").await?,
         ("turn.paused", _) => set_state(tx, id, "waiting").await?,
-        ("delivery.consumed", _) => {
-            let text: Vec<&str> = d["parts"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|p| p["kind"] == "text")
-                .filter_map(|p| p["text"].as_str())
-                .collect();
-            if !text.is_empty() {
-                let ev = json!({ "role": "user", "text": text.join("\n") });
-                push(tx, id, "message", ev).await?;
-            }
-        }
         ("content.completed", Prepared::Guarded(verdict)) => {
             let Some(text) = assistant_text(d) else {
                 return Ok(());
@@ -499,8 +572,18 @@ async fn apply(
                 Some((Decision::Ask, tool, args)) => {
                     let approval = ask(tx, who, &tool, &args).await?;
                     link(tx, approval, id, interaction).await?;
-                    let ev = json!({ "approval": approval_json(tx, approval).await? });
-                    push(tx, id, "approval_wait", ev).await?;
+                    // The owner is who reads this conversation, so `can_decide` is theirs.
+                    let viewer = Session {
+                        tenant: who.tenant.clone(),
+                        member: who.member.clone(),
+                        is_admin: false,
+                    };
+                    let view =
+                        approvals::view_one(tx, api, &viewer, approval, OffsetDateTime::now_utc())
+                            .await
+                            .map_err(|_| ConversationError::View)?
+                            .ok_or(ConversationError::View)?;
+                    push(tx, id, "approval_wait", json!({ "approval": view })).await?;
                 }
                 // The core lets it run unattended; its MCP gate decides again when eve calls.
                 Some((Decision::Run, ..)) => answers.push((interaction.to_owned(), true)),
@@ -607,21 +690,6 @@ async fn ask(
     Ok(approval)
 }
 
-/// ponytail: a subset of lane C's `Approval` shape; replace with its serializer when it merges.
-async fn approval_json(tx: &mut Tx, approval: Uuid) -> Result<Value, sqlx::Error> {
-    let q = format!(
-        "select json_build_object('id', id, 'agent', json_build_object('id', agent), 'tool', tool, \
-           'args', args, 'requested_by', json_build_object('id', requested_by), \
-           'expires_at', to_char(expires_at at time zone 'utc', {TS}), 'state', 'pending', \
-           'can_decide', true) \
-         from approvals where tenant_id = current_setting('mandate.tenant', true) and id = $1"
-    );
-    sqlx::query_scalar(sqlx::AssertSqlSafe(q))
-        .bind(approval)
-        .fetch_one(&mut **tx)
-        .await
-}
-
 async fn link(tx: &mut Tx, approval: Uuid, id: Uuid, interaction: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "insert into conversation_approvals (tenant_id, approval, conversation, interaction) \
@@ -630,6 +698,15 @@ async fn link(tx: &mut Tx, approval: Uuid, id: Uuid, interaction: &str) -> Resul
     .bind(approval)
     .bind(id)
     .bind(interaction)
+    .execute(&mut **tx)
+    .await?;
+    // So the approvals inbox can point at the conversation; the first one to ask keeps it.
+    sqlx::query(
+        "update approvals set conversation = coalesce(conversation, $2) \
+         where tenant_id = current_setting('mandate.tenant', true) and id = $1",
+    )
+    .bind(approval)
+    .bind(id.to_string())
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -729,6 +806,23 @@ async fn conversation_json(tx: &mut Tx, id: Uuid) -> Result<Value, sqlx::Error> 
         .await
 }
 
+/// The `agent-resume` consumer of `approval.decided.v1`: resumes the turns waiting on it.
+pub struct Resume(pub Arc<Conversations>);
+
+#[async_trait]
+impl Handler for Resume {
+    async fn handle(&self, tx: &mut Tx, env: &Envelope) -> Result<(), HandlerError> {
+        // Every other event, and one whose data does not decode, resumes nothing.
+        let Ok(events::Event::ApprovalDecided {
+            approval, decision, ..
+        }) = events::Event::from_envelope(env)
+        else {
+            return Ok(());
+        };
+        self.0.resume(tx, &env.tenant, approval, decision).await
+    }
+}
+
 #[derive(Deserialize)]
 struct MessageBody {
     message: String,
@@ -737,69 +831,94 @@ struct MessageBody {
 fn message(b: &MessageBody) -> Result<&str, ApiError> {
     let m = b.message.trim();
     if m.is_empty() || m.len() > MAX_MESSAGE_BYTES {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "invalid_input",
-            "A message must be 1 to 16 KiB of text.",
-        ));
+        return Err(ApiError::invalid_input());
     }
     Ok(m)
 }
 
 fn conversation_id(raw: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(raw).map_err(|_| NOT_FOUND)
+    Uuid::parse_str(raw).map_err(|_| ApiError::not_found())
 }
 
 async fn start(
-    State(s): State<Arc<Conversations>>,
+    State(api): State<Arc<ApiState>>,
+    Extension(s): Extension<Arc<Conversations>>,
     session: Session,
-    Json(body): Json<MessageBody>,
+    Input(body): Input<MessageBody>,
 ) -> Result<Response, ApiError> {
     let text = message(&body)?;
-    let store = &s.app.store;
-    let mut tx = store.begin(&session.tenant).await.map_err(internal)?;
+    let key = format!("conversation-start:{}:{}", session.tenant, session.member);
+    if let Some(secs) = ratelimit::hit(
+        &api.store,
+        &key,
+        STARTS_PER_MINUTE,
+        OffsetDateTime::now_utc(),
+    )
+    .await?
+    {
+        return Err(ApiError::rate_limited(secs));
+    }
+    let mut tx = api.store.begin(&session.tenant).await?;
     let agent: Option<String> = sqlx::query_scalar(
         "select id from agents where tenant_id = current_setting('mandate.tenant', true) \
          and kind = 'personal' and owner_member = $1 and not disabled order by id limit 1",
     )
     .bind(session.member.as_str())
     .fetch_optional(&mut *tx)
-    .await
-    .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
+    .await?;
     let agent = agent
         .map(|a| AgentId::parse(&a))
         .transpose()
-        .map_err(internal)?
-        .ok_or(ApiError(
-            StatusCode::FORBIDDEN,
-            "no_access",
-            "You have no agent yet.",
-        ))?;
+        .map_err(StoreError::from)?
+        .ok_or(NO_AGENT)?;
 
+    // Row, message and event first, in one transaction around the eve call: if eve fails, none is kept.
+    let id = Uuid::new_v4();
+    let title: String = text.chars().take(80).collect();
+    sqlx::query(
+        "insert into conversations (tenant_id, id, member, agent, eve_session, title, state) \
+         values (current_setting('mandate.tenant'), $1, $2, $3, '', $4, 'working')",
+    )
+    .bind(id)
+    .bind(session.member.as_str())
+    .bind(agent.as_str())
+    .bind(&title)
+    .execute(&mut *tx)
+    .await?;
+    push(
+        &mut tx,
+        id,
+        "message",
+        json!({ "role": "user", "text": text }),
+    )
+    .await?;
+    events::publish(
+        &mut tx,
+        events::Event::ConversationStarted { conversation: id },
+    )
+    .await?;
     let token = sign(
         &s.who(&session.tenant, &session.member, &agent),
         &s.app.assertion_signing_key,
     );
     let eve = s.eve.start(&token, text).await.map_err(eve_down)?;
-    let id = Uuid::new_v4();
-    let title: String = text.chars().take(80).collect();
-    let mut tx = store.begin(&session.tenant).await.map_err(internal)?;
     sqlx::query(
-        "insert into conversations (tenant_id, id, member, agent, eve_session, title, state) \
-         values (current_setting('mandate.tenant'), $1, $2, $3, $4, $5, 'working')",
+        "update conversations set eve_session = $2 \
+         where tenant_id = current_setting('mandate.tenant', true) and id = $1",
     )
     .bind(id)
-    .bind(session.member.as_str())
-    .bind(agent.as_str())
     .bind(eve.as_str())
-    .bind(&title)
     .execute(&mut *tx)
-    .await
-    .map_err(internal)?;
-    let json = conversation_json(&mut tx, id).await.map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
-    s.kick(&session.tenant, id).await;
+    .await?;
+    let json = conversation_json(&mut tx, id).await?;
+    if let Err(e) = tx.commit().await {
+        // Nothing of it is kept here, so end it at eve too.
+        if let Err(e) = s.eve.cancel(&token, &eve).await {
+            tracing::warn!(error = %e, "eve session left after a failed start");
+        }
+        return Err(e.into());
+    }
+    s.kick(&session.tenant, id);
     Ok((StatusCode::CREATED, Json(json)).into_response())
 }
 
@@ -809,16 +928,17 @@ struct ListQuery {
 }
 
 async fn list(
-    State(s): State<Arc<Conversations>>,
+    State(api): State<Arc<ApiState>>,
     session: Session,
-    Query(q): Query<ListQuery>,
+    q: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    let Query(q) = q.map_err(|_| ApiError::invalid_input())?;
     let cursor = q
         .cursor
         .map(|c| Uuid::parse_str(&c))
         .transpose()
-        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid_input", "Bad cursor."))?;
-    let mut tx = s.app.store.begin(&session.tenant).await.map_err(internal)?;
+        .map_err(|_| ApiError::invalid_input())?;
+    let mut tx = api.store.begin(&session.tenant).await?;
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "select id from conversations c where tenant_id = current_setting('mandate.tenant', true) \
          and member = $1 and ($2::uuid is null or (created_at, id) < ( \
@@ -830,47 +950,58 @@ async fn list(
     .bind(cursor)
     .bind(PAGE + 1)
     .fetch_all(&mut *tx)
-    .await
-    .map_err(internal)?;
+    .await?;
     let more = ids.len() as i64 > PAGE;
     let mut items = Vec::new();
     for id in ids.iter().take(PAGE as usize) {
-        items.push(conversation_json(&mut tx, *id).await.map_err(internal)?);
+        items.push(conversation_json(&mut tx, *id).await?);
     }
     let next = more.then(|| ids[PAGE as usize - 1].to_string());
     Ok(Json(json!({ "items": items, "next": next })))
 }
 
 async fn send(
-    State(s): State<Arc<Conversations>>,
+    State(api): State<Arc<ApiState>>,
+    Extension(s): Extension<Arc<Conversations>>,
     session: Session,
     Path(raw): Path<String>,
-    Json(body): Json<MessageBody>,
+    Input(body): Input<MessageBody>,
 ) -> Result<StatusCode, ApiError> {
     let text = message(&body)?;
     let id = conversation_id(&raw)?;
-    let c = load(&s.app.store, &session.tenant, id, Some(&session.member))
-        .await
-        .map_err(internal)?
-        .ok_or(NOT_FOUND)?;
+    let c = load(&api.store, &session.tenant, id, Some(&session.member))
+        .await?
+        .ok_or(ApiError::not_found())?;
+    // The member's own words enter the log under the row lock, and only if eve takes them.
+    let mut tx = api.store.begin(&session.tenant).await?;
+    lock(&mut tx, id).await?;
+    push(
+        &mut tx,
+        id,
+        "message",
+        json!({ "role": "user", "text": text }),
+    )
+    .await?;
+    set_state(&mut tx, id, "working").await?;
     s.eve
         .send(&s.token(&session.tenant, &c), &c.eve, text)
         .await
         .map_err(eve_down)?;
-    working(&s, &session.tenant, id).await?;
+    tx.commit().await?;
+    s.kick(&session.tenant, id);
     Ok(StatusCode::ACCEPTED)
 }
 
 async fn cancel(
-    State(s): State<Arc<Conversations>>,
+    State(api): State<Arc<ApiState>>,
+    Extension(s): Extension<Arc<Conversations>>,
     session: Session,
     Path(raw): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = conversation_id(&raw)?;
-    let c = load(&s.app.store, &session.tenant, id, Some(&session.member))
-        .await
-        .map_err(internal)?
-        .ok_or(NOT_FOUND)?;
+    let c = load(&api.store, &session.tenant, id, Some(&session.member))
+        .await?
+        .ok_or(ApiError::not_found())?;
     s.eve
         .cancel(&s.token(&session.tenant, &c), &c.eve)
         .await
@@ -880,27 +1011,47 @@ async fn cancel(
 }
 
 /// Marks the conversation working, then makes sure a relay picks up what eve does next.
-async fn working(s: &Arc<Conversations>, tenant: &TenantId, id: Uuid) -> Result<(), ApiError> {
-    let mut tx = s.app.store.begin(tenant).await.map_err(internal)?;
-    set_state(&mut tx, id, "working").await.map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
-    s.kick(tenant, id).await;
+async fn working(s: &Arc<Conversations>, tenant: &TenantId, id: Uuid) -> Result<(), StoreError> {
+    let mut tx = s.app.store.begin(tenant).await?;
+    set_state(&mut tx, id, "working").await?;
+    tx.commit().await?;
+    s.kick(tenant, id);
     Ok(())
+}
+
+/// One browser stream's position in the log.
+struct Tail {
+    s: Arc<Conversations>,
+    api: Arc<ApiState>,
+    headers: HeaderMap,
+    session: Session,
+    id: Uuid,
+    after: i64,
+    buf: VecDeque<(i64, String, Value)>,
+    polls: u32,
+    _slot: StreamSlot,
+}
+
+impl Tail {
+    /// The request's session still exists and is the same member's.
+    async fn signed_in(&self) -> bool {
+        matches!(session::current(&self.api, &self.headers).await, Ok(now) if now == self.session)
+    }
 }
 
 /// Server-sent events from the stored, guarded log: an id is a `seq`, so a reconnect with
 /// `Last-Event-ID` resumes exactly after the last event the browser saw.
 async fn events(
-    State(s): State<Arc<Conversations>>,
+    State(api): State<Arc<ApiState>>,
+    Extension(s): Extension<Arc<Conversations>>,
     session: Session,
     Path(raw): Path<String>,
     headers: HeaderMap,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>, ApiError> {
     let id = conversation_id(&raw)?;
-    load(&s.app.store, &session.tenant, id, Some(&session.member))
-        .await
-        .map_err(internal)?
-        .ok_or(NOT_FOUND)?;
+    load(&api.store, &session.tenant, id, Some(&session.member))
+        .await?
+        .ok_or(ApiError::not_found())?;
     let after: i64 = match headers.get("last-event-id") {
         None => 0,
         Some(v) => v
@@ -908,46 +1059,48 @@ async fn events(
             .ok()
             .and_then(|v| v.trim().parse::<i64>().ok())
             .filter(|n| *n >= 0)
-            .ok_or(ApiError(
-                StatusCode::BAD_REQUEST,
-                "invalid_input",
-                "Bad Last-Event-ID.",
-            ))?,
+            .ok_or(ApiError::invalid_input())?,
     };
+    let slot = s.open_stream(&session.tenant, &session.member)?;
     let deadline = tokio::time::Instant::now() + STREAM_LIFETIME;
-    let init = (
+    let init = Tail {
         s,
-        session.tenant,
+        api,
+        headers,
+        session,
         id,
         after,
-        VecDeque::<(i64, String, Value)>::new(),
-    );
-    let stream = futures::stream::unfold(
-        init,
-        move |(s, tenant, id, mut after, mut buf)| async move {
-            loop {
-                if let Some((seq, kind, data)) = buf.pop_front() {
-                    after = seq;
-                    let ev = Event::default()
-                        .id(seq.to_string())
-                        .event(kind)
-                        .data(data.to_string());
-                    return Some((Ok(ev), (s, tenant, id, after, buf)));
-                }
-                if tokio::time::Instant::now() >= deadline {
+        buf: VecDeque::new(),
+        polls: 0,
+        _slot: slot,
+    };
+    let stream = futures::stream::unfold(init, move |mut t| async move {
+        loop {
+            if let Some((seq, kind, data)) = t.buf.pop_front() {
+                t.after = seq;
+                let ev = sse::Event::default()
+                    .id(seq.to_string())
+                    .event(kind)
+                    .data(data.to_string());
+                return Some((Ok(ev), t));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            t.polls += 1;
+            if t.polls % SESSION_RECHECK_POLLS == 0 && !t.signed_in().await {
+                return None;
+            }
+            match read_events(&t.s.app.store, &t.session.tenant, t.id, t.after).await {
+                Ok(rows) if !rows.is_empty() => t.buf.extend(rows),
+                Ok(_) => tokio::time::sleep(t.s.poll).await,
+                Err(e) => {
+                    tracing::warn!(error = %e, "reading conversation events failed");
                     return None;
                 }
-                match read_events(&s.app.store, &tenant, id, after).await {
-                    Ok(rows) if !rows.is_empty() => buf.extend(rows),
-                    Ok(_) => tokio::time::sleep(s.poll).await,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "reading conversation events failed");
-                        return None;
-                    }
-                }
             }
-        },
-    );
+        }
+    });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
@@ -971,13 +1124,13 @@ async fn read_events(
     Ok(rows.into_iter().map(|(s, k, d)| (s, k, d.0)).collect())
 }
 
-/// `/v1/conversations…`, mounted outside the MCP router's 60-second timeout: event streams last.
-pub fn router(state: Arc<Conversations>) -> Router {
+/// `/v1/conversations…`, for `api::with_routes`: its session, CSRF, CORS, body and time limits
+/// apply. The timeout bounds only the response head, so an event stream outlives it.
+pub fn routes(conv: Arc<Conversations>) -> Router<Arc<ApiState>> {
     Router::new()
         .route("/v1/conversations", get(list).post(start))
         .route("/v1/conversations/{id}/messages", post(send))
         .route("/v1/conversations/{id}/events", get(events))
         .route("/v1/conversations/{id}/cancel", post(cancel))
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        .with_state(state)
+        .layer(Extension(conv))
 }

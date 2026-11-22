@@ -27,13 +27,14 @@ create table conversation_events (
   primary key (tenant_id, conversation, seq)
 );
 
--- Which eve approval prompt a core approval answers, so a decision can resume the right turn.
+-- Which eve approval prompts a core approval answers, so a decision resumes every turn waiting on
+-- it: an approval reused by a second conversation or a retried prompt is linked too.
 create table conversation_approvals (
   tenant_id text not null,
   approval uuid not null,
   conversation uuid not null,
   interaction text not null,
-  primary key (tenant_id, approval)
+  primary key (tenant_id, approval, conversation, interaction)
 );
 
 -- The core tools eve asked to call, so a relay that restarts mid-turn still knows each call.

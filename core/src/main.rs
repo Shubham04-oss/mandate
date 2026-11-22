@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use mandate::api::conversations::{self, Conversations};
+use mandate::api::conversations::{self, Conversations, Resume};
+use mandate::api::{self, ApiState, auth::WorkosAuth};
 use mandate::assertion::{Assertion, TTL_SECS, sign};
 use mandate::eve::EveClient;
 use mandate::guard::{BedrockGuard, Guard, Unconfigured};
@@ -14,6 +15,7 @@ use mandate::tools::Catalog;
 use mandate::tools::agentcore::AgentCoreBrowser;
 use mandate::tools::browser::{BrowserBackend, ReadPage, SubmitForm};
 use std::error::Error;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -168,34 +170,23 @@ async fn serve() -> Result<()> {
         .as_ref()
         .map(|(client, _)| tokio::spawn(sync_loop(store.clone(), client.clone())));
     let state = Arc::new(AppState {
-        store,
+        store: store.clone(),
         policy,
         catalog,
         assertion_key: signing.verifying_key(),
         assertion_signing_key: signing,
         workos: workos.map(|(client, id)| Arc::new(Workos::new(client, id))),
     });
-    let mut app = router(state.clone()).route("/healthz", axum::routing::get(|| async { "ok" }));
-    match env("MANDATE_EVE_URL") {
-        Ok(url) => {
-            let eve =
-                EveClient::new(url::Url::parse(&url).map_err(|e| format!("MANDATE_EVE_URL: {e}"))?);
-            let guard: Arc<dyn Guard> = match (
-                env("MANDATE_GUARDRAIL_ID"),
-                env("MANDATE_GUARDRAIL_VERSION"),
-            ) {
-                (Ok(id), Ok(version)) => Arc::new(BedrockGuard::new(&aws, id, version)),
-                _ => {
-                    tracing::warn!(
-                        "MANDATE_GUARDRAIL_ID or MANDATE_GUARDRAIL_VERSION not set: every agent message is withheld"
-                    );
-                    Arc::new(Unconfigured)
-                }
-            };
-            let conv = Conversations::new(state, eve, guard, Duration::from_secs(1));
-            app = app.merge(conversations::router(conv));
-        }
-        Err(_) => tracing::warn!("MANDATE_EVE_URL not set: /v1/conversations is off"),
+    let (web_api, conv) = web_api(&state, &aws)?.unzip();
+    let consumers = conv
+        .flatten()
+        .map(|c| mandate::events::consumer("agent-resume", Resume(c)))
+        .into_iter()
+        .collect();
+    let events = mandate::events::start(&store, &aws, consumers).await?;
+    let mut app = router(state).route("/healthz", axum::routing::get(|| async { "ok" }));
+    if let Some(web_api) = web_api {
+        app = app.merge(web_api);
     }
 
     let bind = std::env::var("MANDATE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
@@ -203,16 +194,83 @@ async fn serve() -> Result<()> {
         .await
         .map_err(|e| format!("{bind}: {e}"))?;
     tracing::info!(%bind, "serving");
-    let served = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await;
+    // The peer address is the sign-in rate limit's fallback when there is no CF-Connecting-IP.
+    let served = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await;
     // Each event applies in its own transaction, so aborting mid-sync loses nothing.
     if let Some(sync) = sync {
         sync.abort();
     }
+    // Unsent rows stay in the outbox and unhandled messages in their queue.
+    events.iter().for_each(|t| t.abort());
     served?;
     tracing::info!("stopped");
     Ok(())
+}
+
+/// The web app's API, and the agent conversations when eve is configured; off unless WorkOS
+/// and both origins are configured.
+fn web_api(
+    state: &Arc<AppState>,
+    aws: &aws_config::SdkConfig,
+) -> Result<Option<(axum::Router, Option<Arc<Conversations>>)>> {
+    let (Ok(key), Ok(client_id), Ok(web_origin), Ok(api_origin)) = (
+        env("WORKOS_API_KEY"),
+        env("WORKOS_CLIENT_ID"),
+        env("MANDATE_WEB_ORIGIN"),
+        env("MANDATE_API_ORIGIN"),
+    ) else {
+        tracing::warn!(
+            "WORKOS_API_KEY, WORKOS_CLIENT_ID, MANDATE_WEB_ORIGIN or MANDATE_API_ORIGIN not set: the web API is off"
+        );
+        return Ok(None);
+    };
+    let client = workos::Client::builder()
+        .api_key(key)
+        .client_id(client_id)
+        .build();
+    let api_state = Arc::new(ApiState {
+        store: state.store.clone(),
+        web_origin,
+        auth: Arc::new(WorkosAuth::new(client)),
+        sso_redirect_uri: format!("{}/v1/auth/sso/callback", api_origin.trim_end_matches('/')),
+        trust_cf_ip: std::env::var("MANDATE_TRUST_CF_IP").as_deref() == Ok("1"),
+        catalog: state.catalog.clone(),
+    });
+    let mut web = api::router(api_state.clone());
+    let Ok(url) = env("MANDATE_EVE_URL") else {
+        tracing::warn!("MANDATE_EVE_URL not set: /v1/conversations is off");
+        return Ok(Some((web, None)));
+    };
+    let eve = EveClient::new(url::Url::parse(&url).map_err(|e| format!("MANDATE_EVE_URL: {e}"))?);
+    let guard: Arc<dyn Guard> = match (
+        env("MANDATE_GUARDRAIL_ID"),
+        env("MANDATE_GUARDRAIL_VERSION"),
+    ) {
+        (Ok(id), Ok(version)) => Arc::new(BedrockGuard::new(aws, id, version)),
+        _ => {
+            tracing::warn!(
+                "MANDATE_GUARDRAIL_ID or MANDATE_GUARDRAIL_VERSION not set: every agent message is withheld"
+            );
+            Arc::new(Unconfigured)
+        }
+    };
+    let conv = Conversations::new(
+        state.clone(),
+        api_state.clone(),
+        eve,
+        guard,
+        Duration::from_secs(1),
+    );
+    web = web.merge(api::with_routes(
+        conversations::routes(conv.clone()),
+        api_state,
+    ));
+    Ok(Some((web, Some(conv))))
 }
 
 async fn sync_loop(store: Store, client: workos::Client) {
