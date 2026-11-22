@@ -233,6 +233,8 @@ impl Conversations {
                 continue;
             };
             // eve only runs the call; the core's MCP gate spends the approval, or asks again.
+            // ponytail: this runs inside the consumer's inbox transaction, holding a connection for up
+            // to ~15 s per link (and the outbox lock in in-process mode); answer after commit if that bites.
             let answered = self
                 .eve
                 .answer(
@@ -256,6 +258,38 @@ impl Conversations {
             }
         }
         Ok(())
+    }
+
+    /// Hands eve the member's message logged at `seq`, keyed by it, so a transport failure is
+    /// retried once without running it twice. On failure the browser is told; if eve may have
+    /// taken it anyway, the relay still runs to show what it does.
+    async fn deliver(
+        self: &Arc<Self>,
+        tenant: &TenantId,
+        id: Uuid,
+        eve: &EveSessionId,
+        token: &str,
+        text: &str,
+        seq: i64,
+    ) -> Result<(), ApiError> {
+        let key = format!("{id}:{seq}");
+        let mut sent = self.eve.send(token, eve, text, &key).await;
+        if matches!(sent, Err(EveError::Request(_))) {
+            sent = self.eve.send(token, eve, text, &key).await;
+        }
+        match sent {
+            Ok(()) => {
+                self.kick(tenant, id);
+                Ok(())
+            }
+            Err(e) => {
+                self.give_up(tenant, id, false).await?;
+                if matches!(e, EveError::Request(_)) {
+                    self.kick(tenant, id);
+                }
+                Err(eve_down(e))
+            }
+        }
     }
 
     /// Starts a relay for this conversation unless one already runs here; that one looks again.
@@ -784,18 +818,19 @@ async fn set_state(tx: &mut Tx, id: Uuid, state: &str) -> Result<(), sqlx::Error
 }
 
 /// Appends one browser event; the caller holds the conversation's row lock, so `seq` is unique.
-async fn push(tx: &mut Tx, id: Uuid, kind: &str, data: Value) -> Result<(), sqlx::Error> {
-    sqlx::query(
+/// Returns the event's `seq`.
+async fn push(tx: &mut Tx, id: Uuid, kind: &str, data: Value) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
         "insert into conversation_events (tenant_id, conversation, seq, kind, data) \
          select current_setting('mandate.tenant'), $1, coalesce(max(seq), 0) + 1, $2, $3 \
-         from conversation_events where tenant_id = current_setting('mandate.tenant', true) and conversation = $1",
+         from conversation_events where tenant_id = current_setting('mandate.tenant', true) and conversation = $1 \
+         returning seq",
     )
     .bind(id)
     .bind(kind)
     .bind(sqlx::types::Json(data))
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
+    .fetch_one(&mut **tx)
+    .await
 }
 
 /// The conversation, if it is in this tenant and (when given) belongs to `member`.
@@ -926,7 +961,7 @@ async fn start(
     .bind(&title)
     .execute(&mut *tx)
     .await?;
-    push(
+    let seq = push(
         &mut tx,
         id,
         "message",
@@ -944,20 +979,13 @@ async fn start(
         &s.who(&session.tenant, &session.member, &agent),
         &s.app.assertion_signing_key,
     );
-    let operation = id.to_string();
-    let eve = match s.eve.start(&token, text, &operation).await {
+    // A session first, with no turn: a create that is lost or repeated leaves at most an idle session.
+    let eve = match s.eve.create(&token, &id.to_string()).await {
         Ok(eve) => eve,
         Err(e) => {
-            if matches!(e, EveError::Request(_)) {
-                // A start cut short may still have made a session; its operation id finds it, to end it.
-                let (eve, text) = (s.eve.clone(), text.to_owned());
-                tokio::spawn(async move {
-                    if let Ok(found) = eve.start(&token, &text, &operation).await {
-                        let _ = eve.cancel(&token, &found).await;
-                    }
-                });
+            if let Err(err) = s.give_up(&session.tenant, id, true).await {
+                tracing::error!(error = %err, conversation = %id, "failed start not recorded; row left working");
             }
-            s.give_up(&session.tenant, id, true).await?;
             return Err(eve_down(e));
         }
     };
@@ -972,7 +1000,8 @@ async fn start(
     .await?;
     let json = conversation_json(&mut tx, id).await?;
     tx.commit().await?;
-    s.kick(&session.tenant, id);
+    s.deliver(&session.tenant, id, &eve, &token, text, seq)
+        .await?;
     Ok((StatusCode::CREATED, Json(json)).into_response())
 }
 
@@ -1040,7 +1069,7 @@ async fn send(
     // The member's own words enter the log in a short transaction; eve is called outside any lock.
     let mut tx = api.store.begin(&session.tenant).await?;
     lock(&mut tx, id).await?;
-    push(
+    let seq = push(
         &mut tx,
         id,
         "message",
@@ -1049,15 +1078,9 @@ async fn send(
     .await?;
     set_state(&mut tx, id, "working").await?;
     tx.commit().await?;
-    if let Err(e) = s
-        .eve
-        .send(&s.token(&session.tenant, &c), &c.eve, text)
-        .await
-    {
-        s.give_up(&session.tenant, id, false).await?;
-        return Err(eve_down(e));
-    }
-    s.kick(&session.tenant, id);
+    let token = s.token(&session.tenant, &c);
+    s.deliver(&session.tenant, id, &c.eve, &token, text, seq)
+        .await?;
     Ok(StatusCode::ACCEPTED)
 }
 

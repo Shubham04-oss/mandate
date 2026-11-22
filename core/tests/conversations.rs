@@ -60,11 +60,21 @@ struct FakeEve {
     /// Session starts, or messages to a session, answer only after 30 s.
     hang_start: AtomicBool,
     hang_send: AtomicBool,
+    /// Only the next message hangs.
+    hang_send_once: AtomicBool,
     /// Statuses for the next answers to approval prompts, in order; then 202.
     answer_statuses: Mutex<std::collections::VecDeque<u16>>,
 }
 
 impl FakeEve {
+    /// The messages eve would run: one per idempotency key, as eve dedupes them.
+    fn messages_run(&self) -> std::collections::BTreeSet<String> {
+        self.seen()
+            .iter()
+            .filter(|s| s.body.get("message").is_some())
+            .map(|s| s.body["idempotencyKey"].as_str().unwrap().to_owned())
+            .collect()
+    }
     fn push(&self, line: Value) {
         self.lines.lock().unwrap().push(line.to_string());
     }
@@ -114,7 +124,9 @@ async fn fake_post(
 ) -> (axum::http::StatusCode, Json<Value>) {
     let body = body.map(|b| b.0).unwrap_or(Value::Null);
     f.record(format!("/eve/v1/session/{rest}"), &headers, body.clone());
-    if body.get("message").is_some() && f.hang_send.load(Ordering::SeqCst) {
+    if body.get("message").is_some()
+        && (f.hang_send.load(Ordering::SeqCst) || f.hang_send_once.swap(false, Ordering::SeqCst))
+    {
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
     if body.get("answers").is_some()
@@ -194,12 +206,9 @@ fn fact_line(facts: Value) -> Value {
 async fn starts_session_with_assertion() {
     let fake = Arc::new(FakeEve::default());
     let eve = EveClient::new(serve_fake(fake.clone()).await).unwrap();
-    let id = eve
-        .start("signed.assertion", "hello there", "op-1")
-        .await
-        .unwrap();
+    let id = eve.create("signed.assertion", "op-1").await.unwrap();
     assert_eq!(id.as_str(), "wrun_FAKE01");
-    eve.send("signed.assertion", &id, "and again")
+    eve.send("signed.assertion", &id, "and again", "op-1:1")
         .await
         .unwrap();
     eve.answer("signed.assertion", &id, "int_1", true)
@@ -213,12 +222,13 @@ async fn starts_session_with_assertion() {
             .all(|s| s.bearer.as_deref() == Some("signed.assertion"))
     );
     assert_eq!(seen[0].path, "/eve/v1/session");
-    assert_eq!(
-        seen[0].body,
-        json!({ "message": "hello there", "operationId": "op-1" })
-    );
+    // A create carries no message, so it starts no turn.
+    assert_eq!(seen[0].body, json!({ "operationId": "op-1" }));
     assert_eq!(seen[1].path, "/eve/v1/session/wrun_FAKE01");
-    assert_eq!(seen[1].body, json!({ "message": "and again" }));
+    assert_eq!(
+        seen[1].body,
+        json!({ "message": "and again", "idempotencyKey": "op-1:1" })
+    );
     assert_eq!(
         seen[2].body,
         json!({ "answers": [{ "interactionId": "int_1", "optionId": "approve" }] })
@@ -615,10 +625,12 @@ async fn start_conversation_returns_201_and_starts_eve() {
     assert!(!body.to_string().contains("wrun_"));
     let seen = h.fake.seen();
     assert_eq!(seen[0].path, "/eve/v1/session");
-    // The conversation id is eve's operation id, so a timed-out start can be found again.
+    // A session made once per conversation, then the first message keyed by its log position.
+    assert_eq!(seen[0].body, json!({ "operationId": body["id"] }));
+    let key = format!("{}:1", body["id"].as_str().unwrap());
     assert_eq!(
-        seen[0].body,
-        json!({ "message": "hello there", "operationId": body["id"] })
+        seen[1].body,
+        json!({ "message": "hello there", "idempotencyKey": key })
     );
     let a = assertion_of(&seen[0]);
     assert_eq!(
@@ -1690,6 +1702,8 @@ async fn hanging_eve_starts_hold_no_database_connection() {
         .map(|c| c["state"].as_str().unwrap())
         .collect();
     assert_eq!(states, vec!["failed"; 10]);
+    // A create carries no message: however a lost one ends, no turn runs.
+    assert!(h.fake.messages_run().is_empty());
 }
 
 #[tokio::test]
@@ -1702,6 +1716,8 @@ async fn a_hanging_eve_send_leaves_the_row_unlocked() {
     let id = start(&h, &t, "hello").await;
     h.settle(&t, &id).await;
     h.fake.hang_send.store(true, Ordering::SeqCst);
+    // eve takes the message but never answers the request.
+    turn(&h.fake, 1, "again", "Later");
     let sent = tokio::spawn({
         let (app, id) = (h.app(&t, "ann").await, id.clone());
         async move {
@@ -1724,10 +1740,46 @@ async fn a_hanging_eve_send_leaves_the_row_unlocked() {
         .expect("the conversation row is not locked across the eve call");
     drop(tx);
     assert_eq!(sent.await.unwrap().0, StatusCode::BAD_GATEWAY);
-    assert_eq!(h.state(&t, &id).await, "idle");
-    let got = read_sse(&h.app(&t, "ann").await, &id, None, 5).await;
+    // The hung message was sent twice under one key, so eve runs it once.
+    let sends = h
+        .fake
+        .seen()
+        .iter()
+        .filter(|s| s.body.get("message").is_some())
+        .count();
+    assert_eq!((sends, h.fake.messages_run().len()), (3, 2));
+    // The relay still runs, so what eve did with it is shown after the error.
+    h.settle(&t, &id).await;
+    let got = read_sse(&h.app(&t, "ann").await, &id, None, 7).await;
     assert_eq!(got[3].data, json!({ "role": "user", "text": "again" }));
     assert_eq!(got[4].event, "error");
+    assert_eq!(got[5].data, json!({ "role": "assistant", "text": "Later" }));
+    assert_eq!(got[6].event, "done");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_first_message_lost_in_transit_runs_once() {
+    let h = harness().await;
+    let t = tenant();
+    seed(&t).await;
+    turn(&h.fake, 0, "hello", "Hi");
+    h.fake.hang_send_once.store(true, Ordering::SeqCst);
+    let id = start(&h, &t, "hello").await;
+    // Sent twice under one key: eve runs it once.
+    let sends = h
+        .fake
+        .seen()
+        .iter()
+        .filter(|s| s.body.get("message").is_some())
+        .count();
+    assert_eq!(sends, 2);
+    assert_eq!(
+        h.fake.messages_run().into_iter().collect::<Vec<_>>(),
+        vec![format!("{id}:1")]
+    );
+    h.settle(&t, &id).await;
+    assert!(stored_text(&h, &t).await.contains("Hi"));
 }
 
 #[tokio::test]

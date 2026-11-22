@@ -108,29 +108,33 @@ impl EveClient {
         res.json().await.map_err(|_| EveError::Malformed)
     }
 
-    /// Creates a session and starts its first turn with `message`. eve creates one session per
-    /// caller and `operation`: a repeat returns that session without sending the message again.
-    pub async fn start(
-        &self,
-        assertion: &str,
-        message: &str,
-        operation: &str,
-    ) -> Result<EveSessionId, EveError> {
-        let body = json!({ "message": message, "operationId": operation });
+    // eve 1.3.0, docs/channels/eve.mdx "Start and continue a session": a create without a message
+    // starts no turn and, with an operationId, is made once per caller; a follow-up's idempotencyKey
+    // makes a repeat return the first receipt without running the input again.
+
+    /// Creates a session with no turn yet, once per caller and `operation`.
+    pub async fn create(&self, assertion: &str, operation: &str) -> Result<EveSessionId, EveError> {
+        let body = json!({ "operationId": operation });
         let v = self.post(assertion, "/eve/v1/session", body).await?;
         EveSessionId::parse(v["sessionId"].as_str().ok_or(EveError::Malformed)?)
     }
 
+    /// Sends a message; a repeat with the same `key` runs it only once.
     pub async fn send(
         &self,
         assertion: &str,
         session: &EveSessionId,
         message: &str,
+        key: &str,
     ) -> Result<(), EveError> {
         let path = format!("/eve/v1/session/{session}");
-        self.post(assertion, &path, json!({ "message": message }))
-            .await
-            .map(drop)
+        self.post(
+            assertion,
+            &path,
+            json!({ "message": message, "idempotencyKey": key }),
+        )
+        .await
+        .map(drop)
     }
 
     /// Answers an approval eve is waiting on.
