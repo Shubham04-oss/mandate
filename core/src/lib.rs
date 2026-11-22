@@ -1,4 +1,5 @@
 pub mod assertion;
+pub mod events;
 pub mod gate;
 pub mod identity;
 pub mod ids;
