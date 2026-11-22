@@ -75,11 +75,25 @@ fn client_ip(req: &Request, trust_cf: bool) -> String {
 fn subject(body: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(body).ok()?;
     if let Some(email) = v.get("email").and_then(Value::as_str) {
-        return Some(format!("email:{}", email.trim().to_lowercase()));
+        return Some(email_key(email));
     }
     ["challenge", "pending", "token"]
         .into_iter()
         .find_map(|k| v.get(k).and_then(Value::as_str).map(|s| format!("{k}:{s}")))
+}
+
+/// One bucket per email, however it was typed.
+pub fn email_key(email: &str) -> String {
+    format!("email:{}", email.trim().to_lowercase())
+}
+
+/// Counts an attempt against an identity a handler learns only after the layer ran (an
+/// invitation's email, a step's user); refused exactly like the layer refuses.
+pub async fn charge(s: &ApiState, key: &str) -> Result<(), ApiError> {
+    match hit(&s.store, key, PER_SUBJECT, OffsetDateTime::now_utc()).await? {
+        Some(secs) => Err(ApiError::rate_limited(secs)),
+        None => Ok(()),
+    }
 }
 
 /// Layer for `/v1/auth/*`: 429 with `Retry-After` once either the caller's IP or the subject
