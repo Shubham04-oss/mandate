@@ -6,7 +6,8 @@ use std::fmt;
 use std::time::Duration;
 use url::Url;
 
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+// Well below the web API's 30 s timeout, so a slow eve fails a request instead of the API cutting it.
+const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 // eve sends heartbeats while a stream is quiet, so a silent read this long means it is gone.
 const READ_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
@@ -74,15 +75,17 @@ pub struct EveClient {
 }
 
 impl EveClient {
-    pub fn new(base: Url) -> Self {
+    /// Fails if the HTTP client cannot be built (no TLS backend): startup stops rather than run a
+    /// client without these timeouts and redirect rules.
+    pub fn new(base: Url) -> Result<Self, EveError> {
         let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(5))
             .read_timeout(READ_TIMEOUT)
             // eve is private: a redirect is never expected and never followed.
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_default();
-        Self { http, base }
+            .map_err(EveError::Request)?;
+        Ok(Self { http, base })
     }
 
     fn url(&self, path: &str) -> Result<Url, EveError> {
@@ -105,11 +108,16 @@ impl EveClient {
         res.json().await.map_err(|_| EveError::Malformed)
     }
 
-    /// Creates a session and starts its first turn with `message`.
-    pub async fn start(&self, assertion: &str, message: &str) -> Result<EveSessionId, EveError> {
-        let v = self
-            .post(assertion, "/eve/v1/session", json!({ "message": message }))
-            .await?;
+    /// Creates a session and starts its first turn with `message`. eve creates one session per
+    /// caller and `operation`: a repeat returns that session without sending the message again.
+    pub async fn start(
+        &self,
+        assertion: &str,
+        message: &str,
+        operation: &str,
+    ) -> Result<EveSessionId, EveError> {
+        let body = json!({ "message": message, "operationId": operation });
+        let v = self.post(assertion, "/eve/v1/session", body).await?;
         EveSessionId::parse(v["sessionId"].as_str().ok_or(EveError::Malformed)?)
     }
 

@@ -57,6 +57,11 @@ struct FakeEve {
     fail_start: AtomicBool,
     /// A read ends with eve's `stream.ended` (the session is over) instead of a lease end.
     ended: AtomicBool,
+    /// Session starts, or messages to a session, answer only after 30 s.
+    hang_start: AtomicBool,
+    hang_send: AtomicBool,
+    /// Statuses for the next answers to approval prompts, in order; then 202.
+    answer_statuses: Mutex<std::collections::VecDeque<u16>>,
 }
 
 impl FakeEve {
@@ -86,6 +91,9 @@ async fn fake_start(
         &headers,
         body.map(|b| b.0).unwrap_or(Value::Null),
     );
+    if f.hang_start.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
     if f.fail_start.load(Ordering::SeqCst) {
         return (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -104,11 +112,17 @@ async fn fake_post(
     headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> (axum::http::StatusCode, Json<Value>) {
-    f.record(
-        format!("/eve/v1/session/{rest}"),
-        &headers,
-        body.map(|b| b.0).unwrap_or(Value::Null),
-    );
+    let body = body.map(|b| b.0).unwrap_or(Value::Null);
+    f.record(format!("/eve/v1/session/{rest}"), &headers, body.clone());
+    if body.get("message").is_some() && f.hang_send.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+    if body.get("answers").is_some()
+        && let Some(code) = f.answer_statuses.lock().unwrap().pop_front()
+    {
+        let code = axum::http::StatusCode::from_u16(code).unwrap();
+        return (code, Json(json!({ "ok": code.is_success() })));
+    }
     (
         axum::http::StatusCode::ACCEPTED,
         Json(json!({ "ok": true, "sessionId": "wrun_FAKE01", "deliveryId": "d2" })),
@@ -179,8 +193,11 @@ fn fact_line(facts: Value) -> Value {
 #[tokio::test]
 async fn starts_session_with_assertion() {
     let fake = Arc::new(FakeEve::default());
-    let eve = EveClient::new(serve_fake(fake.clone()).await);
-    let id = eve.start("signed.assertion", "hello there").await.unwrap();
+    let eve = EveClient::new(serve_fake(fake.clone()).await).unwrap();
+    let id = eve
+        .start("signed.assertion", "hello there", "op-1")
+        .await
+        .unwrap();
     assert_eq!(id.as_str(), "wrun_FAKE01");
     eve.send("signed.assertion", &id, "and again")
         .await
@@ -196,7 +213,10 @@ async fn starts_session_with_assertion() {
             .all(|s| s.bearer.as_deref() == Some("signed.assertion"))
     );
     assert_eq!(seen[0].path, "/eve/v1/session");
-    assert_eq!(seen[0].body, json!({ "message": "hello there" }));
+    assert_eq!(
+        seen[0].body,
+        json!({ "message": "hello there", "operationId": "op-1" })
+    );
     assert_eq!(seen[1].path, "/eve/v1/session/wrun_FAKE01");
     assert_eq!(seen[1].body, json!({ "message": "and again" }));
     assert_eq!(
@@ -221,7 +241,7 @@ async fn stream_resumes_from_cursor() {
         { "type": "a.test", "data": { "n": 4 } },
         { "type": "b.test", "data": { "n": 5 } }
     ])));
-    let eve = EveClient::new(serve_fake(fake.clone()).await);
+    let eve = EveClient::new(serve_fake(fake.clone()).await).unwrap();
     let id = EveSessionId::parse("wrun_FAKE01").unwrap();
     let mut s = eve.stream("tok", &id, 2).await.unwrap();
     let mut got = Vec::new();
@@ -367,7 +387,7 @@ async fn harness_with(guard: FakeGuard) -> Harness {
         assertion_signing_key: key(),
         workos: None,
     });
-    let eve = EveClient::new(serve_fake(fake.clone()).await);
+    let eve = EveClient::new(serve_fake(fake.clone()).await).unwrap();
     let api_state: Arc<ApiState> = api_support::state(store.clone());
     let conv = Conversations::new(
         app,
@@ -595,7 +615,11 @@ async fn start_conversation_returns_201_and_starts_eve() {
     assert!(!body.to_string().contains("wrun_"));
     let seen = h.fake.seen();
     assert_eq!(seen[0].path, "/eve/v1/session");
-    assert_eq!(seen[0].body, json!({ "message": "hello there" }));
+    // The conversation id is eve's operation id, so a timed-out start can be found again.
+    assert_eq!(
+        seen[0].body,
+        json!({ "message": "hello there", "operationId": body["id"] })
+    );
     let a = assertion_of(&seen[0]);
     assert_eq!(
         (a.tenant, a.member.as_str(), a.agent.as_str()),
@@ -1151,10 +1175,12 @@ async fn decide(h: &Harness, t: &TenantId, approval: Uuid, d: Decision) {
 /// Hands every `approval.decided.v1` in `t`'s outbox to the `agent-resume` consumer, signed as
 /// the publisher signs it, through the consumer kit's verify-and-deduplicate path.
 async fn deliver(h: &Harness, t: &TenantId) -> Vec<Outcome> {
-    let signer = Signer::new(
-        Source::core(),
-        ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
-    );
+    deliver_from(h, t, Source::core()).await
+}
+
+/// `deliver`, as if `source` had signed and sent the events.
+async fn deliver_from(h: &Harness, t: &TenantId, source: Source) -> Vec<Outcome> {
+    let signer = Signer::new(source, ed25519_dalek::SigningKey::from_bytes(&[7; 32]));
     let mut keys = Keyring::default();
     keys.add(signer.source().clone(), signer.verifying_key());
     let resume = consumer("agent-resume", Resume(h.conv.clone()));
@@ -1170,7 +1196,7 @@ async fn deliver(h: &Harness, t: &TenantId) -> Vec<Outcome> {
     for (id, ty, data, at) in rows {
         let env = Envelope {
             id,
-            source: Source::core(),
+            source: signer.source().clone(),
             r#type: EventType::parse(&ty).unwrap(),
             tenant: t.clone(),
             occurred_at: at,
@@ -1450,12 +1476,25 @@ async fn a_tool_the_core_does_not_serve_is_not_shown() {
         { "type": "call.requested", "data": {
             "callId": "call_9", "capability": { "kind": "tool", "name": "mandate__web.wire_money" }, "input": {} } },
         { "type": "call.settled", "data": { "callId": "call_9", "outcome": "completed" } },
+        // A served tool, but a call id that is not an eve id: neither stored nor shown.
+        { "type": "call.requested", "data": {
+            "callId": "bad id/..", "capability": { "kind": "tool", "name": "mandate__web.read_page" }, "input": {} } },
         { "type": "turn.settled", "data": { "turnId": "turn_0", "outcome": "completed" } }
     ])));
     let id = start(&h, &t, "hello").await;
     h.settle(&t, &id).await;
     let text = stored_text(&h, &t).await;
-    assert!(!text.contains("wire_money"), "{text}");
+    assert!(
+        !text.contains("wire_money") && !text.contains("read_page"),
+        "{text}"
+    );
+    let mut tx = h.store.begin(&t).await.unwrap();
+    let calls: i64 = sqlx::query_scalar("select count(*) from conversation_calls")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(calls, 0);
+    drop(tx);
     let got = read_sse(&h.app(&t, "ann").await, &id, None, 2).await;
     assert_eq!(
         got.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
@@ -1506,7 +1545,7 @@ async fn starts_are_rate_limited_per_member() {
 
 #[tokio::test]
 #[ignore]
-async fn a_failed_eve_start_keeps_nothing() {
+async fn a_failed_eve_start_marks_the_conversation_failed() {
     let h = harness().await;
     let t = tenant();
     seed(&t).await;
@@ -1520,14 +1559,24 @@ async fn a_failed_eve_start_keeps_nothing() {
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(body["error"]["code"], "internal");
-    let mut tx = h.store.begin(&t).await.unwrap();
-    let rows: i64 = sqlx::query_scalar("select count(*) from conversations")
-        .fetch_one(&mut *tx)
+    let (_, list) = call(&h.app(&t, "ann").await, "GET", "/v1/conversations", None).await;
+    let id = list["items"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(list["items"][0]["state"], "failed");
+    // The browser can still read why.
+    let got = read_sse(&h.app(&t, "ann").await, &id, None, 2).await;
+    assert_eq!(
+        got.iter().map(|e| e.event.as_str()).collect::<Vec<_>>(),
+        vec!["message", "error"]
+    );
+    let kinds: Vec<String> = outbox(&h.store, &t)
         .await
-        .unwrap();
-    drop(tx);
-    assert_eq!((rows, h.event_count(&t).await), (0, 0));
-    assert!(outbox(&h.store, &t).await.is_empty());
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["conversation.started.v1", "conversation.finished.v1"]
+    );
 }
 
 #[tokio::test]
@@ -1553,4 +1602,166 @@ async fn app_role_cannot_rewrite_who_a_conversation_belongs_to() {
             "{sql}: {err}"
         );
     }
+}
+
+// ---- second review ----
+
+/// Two conversations waiting on one approval (eve's prompt `int_1` in each).
+async fn two_waiting(h: &Harness, t: &TenantId) -> (String, String, Uuid) {
+    let (first, approval) = asked(h, t).await;
+    let second = start(h, t, "file my expense").await;
+    wait_state(h, t, &second, "waiting").await;
+    (first, second, approval)
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_refused_resume_is_skipped_not_retried() {
+    let h = harness().await;
+    let t = tenant();
+    let (first, second, approval) = two_waiting(&h, &t).await;
+    // One prompt is answered; eve refuses the other (its turn was cancelled meanwhile).
+    h.fake.answer_statuses.lock().unwrap().extend([202, 409]);
+    decide(&h, &t, approval, Decision::Approved).await;
+    assert_eq!(deliver(&h, &t).await, vec![Outcome::Handled]);
+    assert_eq!(answers(&h).len(), 2);
+    // Handled once: a redelivery answers nobody again.
+    assert_eq!(deliver(&h, &t).await, vec![Outcome::Skipped]);
+    assert_eq!(answers(&h).len(), 2);
+    let mut states = vec![h.state(&t, &first).await, h.state(&t, &second).await];
+    states.sort();
+    assert_eq!(states, vec!["waiting", "working"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_eve_fault_on_resume_is_retried() {
+    let h = harness().await;
+    let t = tenant();
+    let (_, approval) = asked(&h, &t).await;
+    h.fake.answer_statuses.lock().unwrap().push_back(503);
+    decide(&h, &t, approval, Decision::Approved).await;
+    assert_eq!(deliver(&h, &t).await, vec![Outcome::Failed]);
+    // Nothing was recorded as handled, so the redelivery resumes the turn.
+    assert_eq!(deliver(&h, &t).await, vec![Outcome::Handled]);
+    assert_eq!(answers(&h).len(), 2);
+}
+
+#[tokio::test]
+#[ignore]
+async fn hanging_eve_starts_hold_no_database_connection() {
+    let h = harness().await;
+    let t = tenant();
+    seed(&t).await;
+    h.fake.hang_start.store(true, Ordering::SeqCst);
+    let app = h.app(&t, "ann").await;
+    // As many hung starts as the pool has connections.
+    let starts: Vec<_> = (0..10)
+        .map(|_| {
+            let app = app.clone();
+            tokio::spawn(async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/conversations",
+                    Some(json!({ "message": "hi" })),
+                )
+                .await
+            })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Everyone else still gets a connection while eve hangs.
+    let (status, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        call(&app, "GET", "/v1/conversations", None),
+    )
+    .await
+    .expect("the pool is not drained by calls waiting on eve");
+    assert_eq!(status, StatusCode::OK);
+    for s in starts {
+        assert_eq!(s.await.unwrap().0, StatusCode::BAD_GATEWAY);
+    }
+    let (_, list) = call(&app, "GET", "/v1/conversations", None).await;
+    let states: Vec<&str> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, vec!["failed"; 10]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_hanging_eve_send_leaves_the_row_unlocked() {
+    let h = harness().await;
+    let t = tenant();
+    seed(&t).await;
+    turn(&h.fake, 0, "hello", "Hi");
+    let id = start(&h, &t, "hello").await;
+    h.settle(&t, &id).await;
+    h.fake.hang_send.store(true, Ordering::SeqCst);
+    let sent = tokio::spawn({
+        let (app, id) = (h.app(&t, "ann").await, id.clone());
+        async move {
+            call(
+                &app,
+                "POST",
+                &format!("/v1/conversations/{id}/messages"),
+                Some(json!({ "message": "again" })),
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // The relay's lock is free while eve takes its time.
+    let mut tx = h.store.begin(&t).await.unwrap();
+    sqlx::query("select 1 from conversations where id = $1::uuid for update nowait")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .expect("the conversation row is not locked across the eve call");
+    drop(tx);
+    assert_eq!(sent.await.unwrap().0, StatusCode::BAD_GATEWAY);
+    assert_eq!(h.state(&t, &id).await, "idle");
+    let got = read_sse(&h.app(&t, "ann").await, &id, None, 5).await;
+    assert_eq!(got[3].data, json!({ "role": "user", "text": "again" }));
+    assert_eq!(got[4].event, "error");
+}
+
+#[tokio::test]
+#[ignore]
+async fn approval_done_shows_the_stored_decision() {
+    let h = harness().await;
+    let t = tenant();
+    let (id, approval) = asked(&h, &t).await;
+    decide(&h, &t, approval, Decision::Denied).await;
+    assert_eq!(deliver(&h, &t).await, vec![Outcome::Handled]);
+    // eve claims the prompt was accepted; the store says denied.
+    finish_turn(&h.fake, true);
+    h.settle(&t, &id).await;
+    let got = read_sse(&h.app(&t, "ann").await, &id, None, 4).await;
+    assert_eq!(
+        (got[3].event.as_str(), got[3].data.clone()),
+        (
+            "approval_done",
+            json!({ "approval_id": approval.to_string(), "state": "denied" })
+        )
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn resume_ignores_events_from_other_sources() {
+    let h = harness().await;
+    let t = tenant();
+    let (_, approval) = asked(&h, &t).await;
+    decide(&h, &t, approval, Decision::Approved).await;
+    let app_source = Source::parse("mandate.app.test").unwrap();
+    assert_eq!(
+        deliver_from(&h, &t, app_source).await,
+        vec![Outcome::Handled]
+    );
+    assert!(answers(&h).is_empty());
 }

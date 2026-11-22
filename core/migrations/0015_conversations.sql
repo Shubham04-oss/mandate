@@ -7,7 +7,8 @@ create table conversations (
   -- eve's session id: never shown to the browser.
   eve_session text not null,
   title text not null,
-  state text not null check (state in ('working', 'waiting', 'idle')),
+  -- failed: eve never started it.
+  state text not null check (state in ('working', 'waiting', 'idle', 'failed')),
   -- The next eve stream line to relay; advanced in the same transaction as the events it made.
   eve_cursor bigint not null default 0,
   created_at timestamptz not null default now(),

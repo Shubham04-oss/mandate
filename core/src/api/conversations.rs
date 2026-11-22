@@ -5,7 +5,7 @@ use crate::api::session::{self, Session};
 use crate::api::{ApiError, ApiState, Input, approvals, ratelimit};
 use crate::assertion::{Assertion, TTL_SECS, sign};
 use crate::eve::{EveClient, EveError, EveSessionId, Fact, Record};
-use crate::events::{self, Decision as Decided, Envelope, Handler, HandlerError};
+use crate::events::{self, Decision as Decided, Envelope, Handler, HandlerError, Source};
 use crate::gate::{self, args_hash};
 use crate::guard::{Guard, NOTICE, screen};
 use crate::ids::{AgentId, MemberId, TenantId, ToolId};
@@ -39,8 +39,9 @@ const MAX_STREAMS_PER_MEMBER: usize = 5;
 const MAX_STREAMS: usize = 500;
 // A stream re-checks its session every this many polls, so signing out ends it.
 const SESSION_RECHECK_POLLS: u32 = 30;
-// Each start opens an eve session, so it is limited per member per minute.
+// Each start opens an eve session and each message runs a turn, so both are limited per member per minute.
 const STARTS_PER_MINUTE: i32 = 10;
+const SENDS_PER_MINUTE: i32 = 30;
 const MAX_RELAY_FAILURES: u32 = 5;
 // eve prefixes connection tools with the connection's file name (`agents/agent/connections/mandate.ts`).
 const TOOL_PREFIX: &str = "mandate__";
@@ -232,16 +233,27 @@ impl Conversations {
                 continue;
             };
             // eve only runs the call; the core's MCP gate spends the approval, or asks again.
-            self.eve
+            let answered = self
+                .eve
                 .answer(
                     &self.token(tenant, &c),
                     &c.eve,
                     &interaction,
                     decision == Decided::Approved,
                 )
-                .await
-                .map_err(|e| HandlerError::Retry(e.to_string()))?;
-            working(self, tenant, id).await?;
+                .await;
+            match answered {
+                Ok(()) => working(self, tenant, id).await?,
+                // Only a transport error or an eve fault can go better on redelivery.
+                Err(e @ EveError::Request(_)) => return Err(HandlerError::Retry(e.to_string())),
+                Err(EveError::Status(code)) if code >= 500 => {
+                    return Err(HandlerError::Retry(format!("eve answered {code}")));
+                }
+                // A cancelled turn, an ended session or a refused answer never changes: skip it.
+                Err(e) => {
+                    tracing::warn!(error = %e, conversation = %id, "eve refused a resume; skipped")
+                }
+            }
         }
         Ok(())
     }
@@ -280,7 +292,7 @@ impl Conversations {
                     failures += 1;
                     tracing::warn!(error = %e, conversation = %id, failures, "relay failed");
                     if failures >= MAX_RELAY_FAILURES {
-                        let _ = self.give_up(tenant, id).await;
+                        let _ = self.give_up(tenant, id, false).await;
                         true
                     } else {
                         false
@@ -315,12 +327,28 @@ impl Conversations {
         .await?)
     }
 
-    async fn give_up(&self, tenant: &TenantId, id: Uuid) -> Result<(), ConversationError> {
+    /// Tells the browser the agent is unavailable. A conversation eve never started is `failed`
+    /// and finished; any other goes idle.
+    async fn give_up(
+        &self,
+        tenant: &TenantId,
+        id: Uuid,
+        never_started: bool,
+    ) -> Result<(), StoreError> {
         let mut tx = self.app.store.begin(tenant).await?;
         lock(&mut tx, id).await?;
         let ev = json!({ "code": "internal", "message": "The agent is unavailable." });
         push(&mut tx, id, "error", ev).await?;
-        set_state(&mut tx, id, "idle").await?;
+        if never_started {
+            set_state(&mut tx, id, "failed").await?;
+            events::publish(
+                &mut tx,
+                events::Event::ConversationFinished { conversation: id },
+            )
+            .await?;
+        } else {
+            set_state(&mut tx, id, "idle").await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -418,7 +446,9 @@ impl Conversations {
         Ok(match f.kind.as_str() {
             "call.requested" => {
                 let name = f.data["capability"]["name"].as_str().unwrap_or_default();
-                let call = f.data["callId"].as_str().unwrap_or_default();
+                let Some(call) = call_id(&f.data["callId"]) else {
+                    return Ok(Prepared::Call(None));
+                };
                 // Only a tool the core serves; anything else eve names is not shown.
                 if let Some(tool) = name
                     .strip_prefix(TOOL_PREFIX)
@@ -430,12 +460,14 @@ impl Conversations {
                 }
                 Prepared::Call(calls.get(call).cloned())
             }
-            "call.started" | "call.settled" => {
-                let call = f.data["callId"].as_str().unwrap_or_default();
-                Prepared::Call(self.call(who, id, call, calls).await?)
-            }
+            "call.started" | "call.settled" => match call_id(&f.data["callId"]) {
+                Some(call) => Prepared::Call(self.call(who, id, call, calls).await?),
+                None => Prepared::Call(None),
+            },
             "interaction.opened" if f.data["request"]["kind"] == "approval" => {
-                let call = f.data["subject"]["callId"].as_str().unwrap_or_default();
+                let Some(call) = call_id(&f.data["subject"]["callId"]) else {
+                    return Ok(Prepared::Approval(None));
+                };
                 let Some((tool, args)) = self.call(who, id, call, calls).await? else {
                     return Ok(Prepared::Approval(None));
                 };
@@ -593,12 +625,12 @@ async fn apply(
         ("interaction.settled", _) => {
             let interaction = d["interactionId"].as_str().unwrap_or_default();
             if let Some(approval) = linked(tx, id, interaction).await? {
-                let state = match d["outcome"].as_str() {
-                    Some("accepted") => "approved",
-                    Some("declined") => "denied",
-                    _ => "expired",
+                // The store's state, not eve's word for it.
+                let Some(a) = approvals::load(tx, approval, OffsetDateTime::now_utc()).await?
+                else {
+                    return Ok(());
                 };
-                let ev = json!({ "approval_id": approval.to_string(), "state": state });
+                let ev = json!({ "approval_id": approval.to_string(), "state": a.state.as_str() });
                 push(tx, id, "approval_done", ev).await?;
             }
         }
@@ -653,6 +685,11 @@ async fn withheld(
         approved_by: None,
     };
     store::audit(tx, &entry).await
+}
+
+/// An eve call id, only if it is a well-formed eve id: anything else is never stored or matched.
+fn call_id(v: &Value) -> Option<&str> {
+    v.as_str().filter(|c| valid_eve_id(c))
 }
 
 fn valid_eve_id(s: &str) -> bool {
@@ -812,6 +849,10 @@ pub struct Resume(pub Arc<Conversations>);
 #[async_trait]
 impl Handler for Resume {
     async fn handle(&self, tx: &mut Tx, env: &Envelope) -> Result<(), HandlerError> {
+        // Only the core decides approvals: an app source's event resumes nothing.
+        if env.source != Source::core() {
+            return Ok(());
+        }
         // Every other event, and one whose data does not decode, resumes nothing.
         let Ok(events::Event::ApprovalDecided {
             approval, decision, ..
@@ -872,7 +913,7 @@ async fn start(
         .map_err(StoreError::from)?
         .ok_or(NO_AGENT)?;
 
-    // Row, message and event first, in one transaction around the eve call: if eve fails, none is kept.
+    // Row, message and event are committed before eve is called: no transaction waits on eve.
     let id = Uuid::new_v4();
     let title: String = text.chars().take(80).collect();
     sqlx::query(
@@ -897,11 +938,30 @@ async fn start(
         events::Event::ConversationStarted { conversation: id },
     )
     .await?;
+    tx.commit().await?;
+
     let token = sign(
         &s.who(&session.tenant, &session.member, &agent),
         &s.app.assertion_signing_key,
     );
-    let eve = s.eve.start(&token, text).await.map_err(eve_down)?;
+    let operation = id.to_string();
+    let eve = match s.eve.start(&token, text, &operation).await {
+        Ok(eve) => eve,
+        Err(e) => {
+            if matches!(e, EveError::Request(_)) {
+                // A start cut short may still have made a session; its operation id finds it, to end it.
+                let (eve, text) = (s.eve.clone(), text.to_owned());
+                tokio::spawn(async move {
+                    if let Ok(found) = eve.start(&token, &text, &operation).await {
+                        let _ = eve.cancel(&token, &found).await;
+                    }
+                });
+            }
+            s.give_up(&session.tenant, id, true).await?;
+            return Err(eve_down(e));
+        }
+    };
+    let mut tx = api.store.begin(&session.tenant).await?;
     sqlx::query(
         "update conversations set eve_session = $2 \
          where tenant_id = current_setting('mandate.tenant', true) and id = $1",
@@ -911,13 +971,7 @@ async fn start(
     .execute(&mut *tx)
     .await?;
     let json = conversation_json(&mut tx, id).await?;
-    if let Err(e) = tx.commit().await {
-        // Nothing of it is kept here, so end it at eve too.
-        if let Err(e) = s.eve.cancel(&token, &eve).await {
-            tracing::warn!(error = %e, "eve session left after a failed start");
-        }
-        return Err(e.into());
-    }
+    tx.commit().await?;
     s.kick(&session.tenant, id);
     Ok((StatusCode::CREATED, Json(json)).into_response())
 }
@@ -972,7 +1026,18 @@ async fn send(
     let c = load(&api.store, &session.tenant, id, Some(&session.member))
         .await?
         .ok_or(ApiError::not_found())?;
-    // The member's own words enter the log under the row lock, and only if eve takes them.
+    let key = format!("conversation-send:{}:{}", session.tenant, session.member);
+    if let Some(secs) = ratelimit::hit(
+        &api.store,
+        &key,
+        SENDS_PER_MINUTE,
+        OffsetDateTime::now_utc(),
+    )
+    .await?
+    {
+        return Err(ApiError::rate_limited(secs));
+    }
+    // The member's own words enter the log in a short transaction; eve is called outside any lock.
     let mut tx = api.store.begin(&session.tenant).await?;
     lock(&mut tx, id).await?;
     push(
@@ -983,11 +1048,15 @@ async fn send(
     )
     .await?;
     set_state(&mut tx, id, "working").await?;
-    s.eve
+    tx.commit().await?;
+    if let Err(e) = s
+        .eve
         .send(&s.token(&session.tenant, &c), &c.eve, text)
         .await
-        .map_err(eve_down)?;
-    tx.commit().await?;
+    {
+        s.give_up(&session.tenant, id, false).await?;
+        return Err(eve_down(e));
+    }
     s.kick(&session.tenant, id);
     Ok(StatusCode::ACCEPTED)
 }
@@ -1049,9 +1118,20 @@ async fn events(
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>, ApiError> {
     let id = conversation_id(&raw)?;
-    load(&api.store, &session.tenant, id, Some(&session.member))
-        .await?
-        .ok_or(ApiError::not_found())?;
+    // Ownership only: a conversation eve never started still shows its log.
+    let mut tx = api.store.begin(&session.tenant).await?;
+    let mine: bool = sqlx::query_scalar(
+        "select exists (select 1 from conversations where tenant_id = current_setting('mandate.tenant', true) \
+         and id = $1 and member = $2)",
+    )
+    .bind(id)
+    .bind(session.member.as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if !mine {
+        return Err(ApiError::not_found());
+    }
     let after: i64 = match headers.get("last-event-id") {
         None => 0,
         Some(v) => v

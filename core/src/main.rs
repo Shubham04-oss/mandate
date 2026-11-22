@@ -246,7 +246,7 @@ fn web_api(
         tracing::warn!("MANDATE_EVE_URL not set: /v1/conversations is off");
         return Ok(Some((web, None)));
     };
-    let eve = EveClient::new(url::Url::parse(&url).map_err(|e| format!("MANDATE_EVE_URL: {e}"))?);
+    let eve = EveClient::new(url::Url::parse(&url).map_err(|e| format!("MANDATE_EVE_URL: {e}"))?)?;
     let guard: Arc<dyn Guard> = match (
         env("MANDATE_GUARDRAIL_ID"),
         env("MANDATE_GUARDRAIL_VERSION"),
