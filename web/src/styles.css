@@ -221,6 +221,8 @@
 		margin: 0;
 		@apply bg-background font-sans text-foreground antialiased;
 		font-size: 13px;
+		/* phones flash a blue box on every tap otherwise; our controls show their own press */
+		-webkit-tap-highlight-color: transparent;
 	}
 }
 
@@ -237,6 +239,13 @@
 		transition-duration: 0.01ms !important;
 		scroll-behavior: auto !important;
 	}
+}
+
+/* While the theme switches, nothing fades on its own (see chooseTheme). */
+.theme-switching *,
+.theme-switching ::before,
+.theme-switching ::after {
+	transition: none !important;
 }
 
 .reduce-motion *,

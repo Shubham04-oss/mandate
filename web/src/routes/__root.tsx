@@ -26,6 +26,8 @@ export const Route = createRootRoute({
 				rel: "stylesheet",
 				href: appCss,
 			},
+			// the app mark from the Oryxa Website Language logos
+			{ rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
 		],
 		// Runs before the first paint, so the page never flashes the other theme.
 		scripts: [{ children: themeScript }, { children: motionScript }],

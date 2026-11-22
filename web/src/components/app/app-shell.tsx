@@ -37,6 +37,7 @@ import {
 } from "#/components/ui/tooltip.tsx";
 import { describeApproval } from "#/lib/activity.ts";
 import { type Approval, api, type Me, type Person } from "#/lib/api/index.ts";
+import { shortcutLabel, useShortcut } from "#/lib/shortcuts.ts";
 import {
 	chooseTheme,
 	parseChoice,
@@ -59,6 +60,8 @@ type RailItem = {
 	to?: "/";
 	count?: number;
 	onClick?: () => void;
+	/** Shown in the tooltip, so the shortcut can be found. */
+	shortcut?: string;
 };
 
 // ponytail: only Home exists; the rest become links as their pages are built.
@@ -120,7 +123,12 @@ function RailButton({ item }: { item: RailItem }) {
 			>
 				{content}
 			</TooltipTrigger>
-			<TooltipContent side="right">{item.label}</TooltipContent>
+			<TooltipContent side="right">
+				{item.label}
+				{item.shortcut ? (
+					<span className="ml-2 text-muted-foreground">{item.shortcut}</span>
+				) : null}
+			</TooltipContent>
 		</Tooltip>
 	);
 }
@@ -350,6 +358,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 		});
 	const setSettings = (open: boolean) =>
 		showSettings(open ? "appearance" : undefined);
+	useShortcut(",", () => setSettings(true));
 
 	return (
 		<TooltipProvider>
@@ -374,6 +383,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 							label: "Settings",
 							icon: "settings",
 							onClick: () => setSettings(true),
+							shortcut: shortcutLabel(","),
 						}}
 					/>
 					<RailAccount me={me} onSettings={() => setSettings(true)} />

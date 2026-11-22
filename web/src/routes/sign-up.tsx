@@ -61,6 +61,7 @@ function SignUp() {
 						id="name"
 						name="name"
 						autoComplete="name"
+						autoFocus
 						placeholder="Ada Brennan"
 					/>
 				</Field>

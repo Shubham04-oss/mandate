@@ -29,11 +29,16 @@ function page(stored: string | null, deviceLight: boolean) {
 			classList: {
 				toggle: (c: string, on: boolean) =>
 					on ? classes.add(c) : classes.delete(c),
+				add: (c: string) => classes.add(c),
+				remove: (c: string) => classes.delete(c),
 			},
 		},
 	});
+	// frames run at once, so a test sees the page after the switch has settled
+	vi.stubGlobal("requestAnimationFrame", (fn: () => void) => fn());
 	return {
 		light: () => classes.has("light"),
+		switching: () => classes.has("theme-switching"),
 		stored: () => store.get("mandate.theme"),
 		deviceTurns: (light: boolean) => {
 			device.matches = light;
@@ -104,6 +109,7 @@ describe("chooseTheme", () => {
 		chooseTheme(choice);
 		expect(p.stored()).toBe("dark");
 		expect(p.light()).toBe(false);
+		expect(p.switching()).toBe(false);
 
 		p.deviceTurns(true);
 		expect(p.light()).toBe(false);

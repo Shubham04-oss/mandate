@@ -1,6 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { cn } from "cn";
-import type { FormEvent, ReactNode } from "react";
+import {
+	type FormEvent,
+	type ReactNode,
+	type RefObject,
+	useRef,
+	useState,
+} from "react";
+import { toast } from "sonner";
 import {
 	DriveMark,
 	GmailMark,
@@ -29,6 +36,7 @@ import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
 import { clock, usePref } from "#/lib/preferences.ts";
 import { sample } from "#/lib/sample.ts";
+import { shortcutLabel, useShortcut } from "#/lib/shortcuts.ts";
 
 export const Route = createFileRoute("/_app/")({
 	head: () => ({ meta: [{ title: `Home · ${brand.name}` }] }),
@@ -38,13 +46,13 @@ export const Route = createFileRoute("/_app/")({
 	component: Home,
 });
 
-// ponytail: nothing is sent yet; the ask goes to the core once conversations exist.
-const notWired = (e: FormEvent) => e.preventDefault();
-
 function Home() {
 	const { activity } = Route.useLoaderData();
 	const timeFormat = usePref(clock);
 	const handled = handledToday(activity);
+	const [ask, setAsk] = useState("");
+	const askInput = useRef<HTMLInputElement>(null);
+	useShortcut("k", () => askInput.current?.focus());
 	return (
 		<div className="home-grid">
 			<h2
@@ -53,9 +61,14 @@ function Home() {
 			>
 				What do you want to do?
 			</h2>
-			<AskBox />
+			<AskBox value={ask} onChange={setAsk} inputRef={askInput} />
 			<div data-area="below" className="flex flex-col gap-3.5">
-				<QuickActions />
+				<QuickActions
+					onPick={(text) => {
+						setAsk(text);
+						askInput.current?.focus();
+					}}
+				/>
 				<p className="m-0 text-center text-[12px] text-muted-foreground">
 					{handled === 0
 						? "Nothing handled yet today."
@@ -72,9 +85,26 @@ function Home() {
 	);
 }
 
-function AskBox() {
+// ponytail: nothing is sent yet; the ask goes to the core once conversations exist, and the
+// contract has no endpoint for it. Until then the person is told, and their words stay.
+function AskBox({
+	value,
+	onChange,
+	inputRef,
+}: {
+	value: string;
+	onChange: (value: string) => void;
+	inputRef: RefObject<HTMLInputElement | null>;
+}) {
+	const send = (e: FormEvent) => {
+		e.preventDefault();
+		if (!value.trim()) return;
+		toast("Your agent can't take asks from here yet.", {
+			description: "What you wrote stays in the box.",
+		});
+	};
 	return (
-		<form data-area="ask" onSubmit={notWired}>
+		<form data-area="ask" onSubmit={send}>
 			<InputGroup className="h-14 rounded-full bg-raised pr-1.5 pl-3.5 shadow-[inset_0_0_0_1px_var(--field),0_8px_24px_rgb(0_0_0/0.2)] has-[[data-slot=input-group-control]:focus-visible]:shadow-[inset_0_0_0_1.5px_var(--text),0_8px_24px_rgb(0_0_0/0.2)]">
 				<InputGroupAddon align="inline-start" className="pl-0">
 					<Avatar className="size-[26px]">
@@ -82,17 +112,24 @@ function AskBox() {
 					</Avatar>
 				</InputGroupAddon>
 				<InputGroupInput
+					ref={inputRef}
 					aria-label="Ask your agent"
 					placeholder="Ask your agent, or jump to anything"
+					value={value}
+					onChange={(e) => onChange(e.target.value)}
+					onKeyDown={(e) => {
+						if (e.key === "Escape") e.currentTarget.blur();
+					}}
 					className="text-[14px]"
 				/>
 				<InputGroupAddon align="inline-end" className="gap-2.5 pr-0">
-					<Kbd className="max-sm:hidden">⌘K</Kbd>
+					<Kbd className="max-sm:hidden">{shortcutLabel("k")}</Kbd>
 					<InputGroupButton
 						type="submit"
 						variant="default"
 						size="icon-sm"
 						aria-label="Send"
+						disabled={!value.trim()}
 						className="size-[42px] rounded-full"
 					>
 						<Icon name="send" size={17} />
@@ -124,7 +161,8 @@ const quickActions: Quick[] = [
 	},
 ];
 
-function QuickActions() {
+/** Each one starts an ask: it fills the box, ready to send or change. */
+function QuickActions({ onPick }: { onPick: (text: string) => void }) {
 	return (
 		<div className="quick-band rounded-card p-2">
 			<ul
@@ -135,6 +173,7 @@ function QuickActions() {
 					<li key={action.title} className="contents">
 						<Item
 							render={<button type="button" />}
+							onClick={() => onPick(action.title)}
 							className="min-h-24 flex-col flex-nowrap items-start gap-2.5 rounded-[13px] bg-white/10 p-3 text-white shadow-[inset_0_0_0_1px_rgb(255_255_255/0.16)] backdrop-blur-[10px] hover:bg-white/18"
 						>
 							<ItemMedia className="grid size-[26px] place-items-center rounded-[7px] bg-white">
@@ -214,6 +253,7 @@ function SidePanel({
 	count,
 	more,
 	rows,
+	empty,
 }: {
 	area: "left" | "right";
 	scene: string;
@@ -221,6 +261,8 @@ function SidePanel({
 	count?: number;
 	more: string;
 	rows: Row[];
+	/** Said in place of the rows when there are none. */
+	empty: string;
 }) {
 	const id = `${area}-panel`;
 	return (
@@ -248,11 +290,18 @@ function SidePanel({
 					{more}
 				</span>
 			</div>
+			{rows.length === 0 ? (
+				<p className="m-0 px-2.5 pt-1 pb-3 text-[12px] text-muted-foreground leading-normal">
+					{empty}
+				</p>
+			) : null}
 			{rows.map((row) => (
 				<Item
 					key={row.id}
 					size="xs"
 					render={<button type="button" />}
+					// rows cut off long titles; the whole line is there on hover
+					title={`${row.title}\n${row.detail}`}
 					className="min-h-12 rounded-lg px-2.5 py-1.5 hover:bg-hover"
 				>
 					<ItemMedia>{marks[row.kind]}</ItemMedia>
@@ -286,6 +335,7 @@ function WorkingNow() {
 			count={sample.working.filter((row) => row.kind !== "scheduled").length}
 			more="Open"
 			rows={sample.working}
+			empty="Nothing in progress. Ask your agent, and it shows up here."
 		/>
 	);
 }
@@ -298,6 +348,7 @@ function Recent({ rows }: { rows: Row[] }) {
 			title="Recent"
 			more="All"
 			rows={rows}
+			empty="Nothing yet. What your agents do shows up here."
 		/>
 	);
 }

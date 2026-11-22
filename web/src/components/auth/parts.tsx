@@ -1,5 +1,11 @@
 import { cn } from "cn";
-import { type ComponentProps, type ReactNode, useState } from "react";
+import {
+	type ComponentProps,
+	type KeyboardEvent,
+	type ReactNode,
+	useRef,
+	useState,
+} from "react";
 import { TextLink } from "#/components/auth/auth-layout.tsx";
 import { GoogleMark, Icon } from "#/components/icons/icon.tsx";
 import {
@@ -62,10 +68,28 @@ export function GoogleButton({
 
 export function PasswordInput(props: Omit<ComponentProps<"input">, "type">) {
 	const [shown, setShown] = useState(false);
+	// A password typed in capitals fails without saying why; say it while they type.
+	const [caps, setCaps] = useState(false);
+	const readCaps = (e: KeyboardEvent<HTMLInputElement>) =>
+		setCaps(e.getModifierState("CapsLock"));
 	return (
 		<InputGroup>
-			<InputGroupInput type={shown ? "text" : "password"} {...props} />
+			<InputGroupInput
+				type={shown ? "text" : "password"}
+				{...props}
+				onKeyDown={readCaps}
+				onKeyUp={readCaps}
+				onBlur={() => setCaps(false)}
+			/>
 			<InputGroupAddon align="inline-end">
+				{caps ? (
+					<span
+						aria-live="polite"
+						className="whitespace-nowrap font-medium text-[11px] text-soft-foreground"
+					>
+						Caps Lock is on
+					</span>
+				) : null}
 				<InputGroupButton
 					size="icon-sm"
 					aria-label={shown ? "Hide password" : "Show password"}
@@ -142,10 +166,14 @@ export function CodeInput({
 	label: string;
 	autoFocus?: boolean;
 }) {
+	const input = useRef<HTMLInputElement>(null);
 	return (
 		<InputOTP
+			ref={input}
 			id={id}
 			name="code"
+			// the sixth digit sends the form; nothing else is left to fill in
+			onComplete={() => input.current?.form?.requestSubmit()}
 			aria-label={label}
 			maxLength={OTP_LENGTH}
 			inputMode="numeric"

@@ -93,6 +93,7 @@ function SignIn() {
 					<Input
 						id="email"
 						name="email"
+						autoFocus
 						type="email"
 						autoComplete="email"
 						placeholder="you@company.com"

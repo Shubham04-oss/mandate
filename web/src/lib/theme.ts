@@ -36,9 +36,13 @@ export function chooseTheme(choice: ThemeChoice) {
 	const deviceLight = window.matchMedia(
 		"(prefers-color-scheme: light)",
 	).matches;
-	document.documentElement.classList.toggle(
-		"light",
-		wantsLight(choice, deviceLight),
+	const root = document.documentElement;
+	// Without this, every element with a colour transition fades on its own clock and the page
+	// ripples; with it, the whole page changes at once.
+	root.classList.add("theme-switching");
+	root.classList.toggle("light", wantsLight(choice, deviceLight));
+	requestAnimationFrame(() =>
+		requestAnimationFrame(() => root.classList.remove("theme-switching")),
 	);
 }
 
