@@ -86,19 +86,24 @@ The cluster is private; create the roles through the RDS Data API with the maste
 ```sh
 CLUSTER_ARN=$(aws rds describe-db-clusters --db-cluster-identifier mandate-dev --query 'DBClusters[0].DBClusterArn' --output text)
 MASTER=$(tofu output -raw database_master_secret_arn)
-sql() { aws rds-data execute-statement --resource-arn "$CLUSTER_ARN" --secret-arn "$MASTER" --database mandate --sql "$1" >/dev/null; }
+sql() { aws rds-data execute-statement --resource-arn "$CLUSTER_ARN" --secret-arn "$MASTER" --database "$1" --sql "$2" >/dev/null; }
 APP_PW=$(openssl rand -hex 24); EVE_PW=$(openssl rand -hex 24)
-sql "create role mandate_app login nosuperuser nobypassrls password '$APP_PW'"
-sql "create role mandate_eve login nosuperuser nobypassrls password '$EVE_PW'"
-sql "revoke all on schema public from public"
-sql "create schema eve authorization mandate_eve"
-sql "alter role mandate_eve set search_path = eve"
+sql mandate "create role mandate_app login nosuperuser nobypassrls password '$APP_PW'"
+sql mandate "create role mandate_eve login nosuperuser nobypassrls password '$EVE_PW'"
+sql mandate "revoke all on schema public from public"
+sql mandate "revoke connect on database mandate from public"
+sql mandate "grant connect on database mandate to mandate_app"
+sql mandate "create database eve"
+sql eve     "grant create on database eve to mandate_eve"
+sql eve     "grant usage, create on schema public to mandate_eve"
 ```
 
 `mandate_app` gets its privileges from `core/sql/app_role.sql`, which the migrate task re-applies
-after every migration, so a new table never runs without its grants. `mandate_eve` owns only the
-`eve` schema (eve's workflow store) and has no privilege on the core's tables. The migration role
-is the cluster's master user (`mandate_migrator`).
+after every migration, so a new table never runs without its grants. eve's workflow store (the
+Postgres world: its own types in `public`, plus the `workflow` and `graphile_worker` schemas) lives
+in its own database, `eve`, in the same cluster; `mandate_eve` cannot connect to `mandate` at all.
+The eve image runs the world's migrations (`bootstrap`) before it starts. The migration role is the
+cluster's master user (`mandate_migrator`).
 
 ## 5. Secrets
 
@@ -111,7 +116,7 @@ MIGRATOR_PW=$(aws secretsmanager get-secret-value --secret-id "$MASTER" --query 
 enc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
 
 put core/database-url    "postgres://mandate_app:$APP_PW@$HOST:5432/mandate?sslmode=require"
-put eve/database-url     "postgres://mandate_eve:$EVE_PW@$HOST:5432/mandate?sslmode=require"
+put eve/database-url     "postgres://mandate_eve:$EVE_PW@$HOST:5432/eve?sslmode=require"
 put migrate/database-url "postgres://mandate_migrator:$(enc "$MIGRATOR_PW")@$HOST:5432/mandate?sslmode=require"
 put core/workos-api-key   "$WORKOS_API_KEY"
 put core/workos-client-id "$WORKOS_CLIENT_ID"

@@ -29,7 +29,8 @@ resource "aws_service_discovery_service" "this" {
 
 locals {
   internal = aws_service_discovery_private_dns_namespace.main.name
-  # Secret env names per task; the entrypoint turns *_PEM values into 0600 files.
+  # Secret env names per task. The core entrypoint turns *_PEM values into 0600 files; eve reads
+  # MANDATE_ASSERTION_PUBLIC_KEY as PEM text (lane D).
   secret_env = {
     "core/database-url"          = "DATABASE_URL"
     "core/workos-api-key"        = "WORKOS_API_KEY"
@@ -39,8 +40,8 @@ locals {
     "core/event-public-key"      = "MANDATE_EVENT_PUBLIC_KEY_PEM"
     "migrate/database-url"       = "MANDATE_MIGRATION_DATABASE_URL"
     "eve/database-url"           = "WORKFLOW_POSTGRES_URL"
-    "eve/ai-gateway-key"         = "AI_GATEWAY_API_KEY"
-    "eve/assertion-public-key"   = "MANDATE_ASSERTION_PUBLIC_KEY_PEM"
+    "eve/ai-gateway-key"         = "MANDATE_AI_GATEWAY_KEY"
+    "eve/assertion-public-key"   = "MANDATE_ASSERTION_PUBLIC_KEY"
   }
   core_environment = {
     AWS_REGION         = var.region

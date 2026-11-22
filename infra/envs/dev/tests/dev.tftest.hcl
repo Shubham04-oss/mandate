@@ -332,6 +332,12 @@ run "each_task_reads_only_its_own_secrets" {
     error_message = "the core signs events and verifies its own (lane F's MANDATE_EVENT_PUBLIC_KEYS)"
   }
   assert {
+    condition = toset([for s in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].secrets : s.name]) == toset([
+      "WORKFLOW_POSTGRES_URL", "MANDATE_AI_GATEWAY_KEY", "MANDATE_ASSERTION_PUBLIC_KEY",
+    ])
+    error_message = "eve's secrets under the names lane D's agents/ reads"
+  }
+  assert {
     condition     = !strcontains(aws_ecs_task_definition.core.container_definitions, "MANDATE_ENV")
     error_message = "dev-assert stays disabled in the deployed core"
   }

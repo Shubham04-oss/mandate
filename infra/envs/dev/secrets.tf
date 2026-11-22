@@ -9,7 +9,7 @@ locals {
     "core/event-signing-key"     = "Ed25519 PKCS#8 PEM that signs mandate.core events"
     "core/event-public-key"      = "Ed25519 SPKI PEM of mandate.core, for the core's own consumers"
     "migrate/database-url"       = "Postgres URL as the migration role (the cluster's master user)"
-    "eve/database-url"           = "Postgres URL as eve's own role, limited to its own schema"
+    "eve/database-url"           = "Postgres URL as eve's own role, to its own database (eve)"
     "eve/ai-gateway-key"         = "AI gateway key"
     "eve/assertion-public-key"   = "Ed25519 SPKI PEM eve's route auth verifies assertions with"
   }
