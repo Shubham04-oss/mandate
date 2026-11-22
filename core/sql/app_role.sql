@@ -33,6 +33,8 @@ grant select, insert, update, delete on sessions to :"role";
 grant select, insert, delete on auth_pending to :"role";
 -- Sign-in rate counters (RLS-free, hashes only): upserted per attempt, old windows dropped.
 grant select, insert, update, delete on rate_limits to :"role";
+-- Unconfirmed sign-up passwords (RLS-free, ids only): recorded at sign-up, removed once settled.
+grant select, insert, delete on sign_up_passwords to :"role";
 -- Sign-in gives a member their personal operator only through this narrow function.
 grant execute on function ensure_personal_agent(text) to :"role";
 -- Events. The outbox is written by `publish`; the publisher may only mark rows sent.

@@ -181,6 +181,8 @@ pub trait AuthProvider: Send + Sync {
         token: &str,
         password: &str,
     ) -> Result<AuthUser, AuthError>;
+    /// Replaces the user's password (used only to neutralise an unconfirmed sign-up password).
+    async fn set_password(&self, user: &str, password: &str) -> Result<(), AuthError>;
     async fn invitation(&self, token: &str) -> Result<Invitation, AuthError>;
     async fn user(&self, id: &str) -> Result<AuthUser, AuthError>;
     async fn create_user(
@@ -438,7 +440,80 @@ async fn password(
         .auth
         .authenticate_with_password(b.email.as_str(), &b.password.0, None)
         .await;
+    let r = guard_password(&s, b.email.as_str(), r).await?;
     outcome(&s, r).await
+}
+
+/// Whether WorkOS took the credentials: signed in, or a further step other than proving the email.
+fn accepted(r: &Result<Authenticated, AuthError>) -> bool {
+    match r {
+        Ok(_) => true,
+        Err(AuthError::Step(step)) => !matches!(step, Step::VerifyEmail { .. }),
+        Err(_) => false,
+    }
+}
+
+/// The WorkOS user whose password our sign-up set and its verify step has not yet confirmed.
+async fn unconfirmed_by_email(s: &ApiState, email: &str) -> Result<Option<String>, ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    let user =
+        sqlx::query_scalar("select workos_user_id from sign_up_passwords where email = lower($1)")
+            .bind(email.trim())
+            .fetch_optional(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(user)
+}
+
+/// Forgets an unconfirmed sign-up password: confirmed, or replaced by its owner.
+async fn forget_sign_up_password(s: &ApiState, user: &str) -> Result<(), ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    sqlx::query("delete from sign_up_passwords where workos_user_id = $1")
+        .bind(user)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Sets 256 random bits as the user's password through WorkOS; nobody ever learns it.
+async fn scramble_password(s: &ApiState, user: &str) -> Result<(), ApiError> {
+    Ok(s.auth.set_password(user, &session::secret()?).await?)
+}
+
+/// Before any other sign-in of this user counts: a sign-up password nobody confirmed (perhaps an
+/// attacker's, set before the owner proved the email) is replaced first. Fails closed.
+async fn neutralise_sign_up_password(s: &ApiState, user: &str) -> Result<(), ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    let pending: bool = sqlx::query_scalar(
+        "select exists (select 1 from sign_up_passwords where workos_user_id = $1)",
+    )
+    .bind(user)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if pending {
+        scramble_password(s, user).await?;
+        forget_sign_up_password(s, user).await?;
+    }
+    Ok(())
+}
+
+/// A password WorkOS took while it may still be our sign-up's unconfirmed one (the email was
+/// verified some other way) is neutralised and refused: only the emailed code may confirm it.
+async fn guard_password(
+    s: &ApiState,
+    email: &str,
+    r: Result<Authenticated, AuthError>,
+) -> Result<Result<Authenticated, AuthError>, ApiError> {
+    if !accepted(&r) {
+        return Ok(r);
+    }
+    let Some(user) = unconfirmed_by_email(s, email).await? else {
+        return Ok(r);
+    };
+    neutralise_sign_up_password(s, &user).await?;
+    Ok(Err(AuthError::InvalidCredentials))
 }
 
 /// A new session and the `Me` it shows; becomes the JSON answer or the SSO redirect.
@@ -551,6 +626,12 @@ async fn sign_up(
         .await
     {
         Ok(user) => {
+            if let Err(e) = record_sign_up_password(&s, &user).await {
+                // Not recorded means not guarded: make the password useless before failing.
+                // Its own failure is logged by kind as it becomes an `ApiError`; `e` is the answer.
+                let _ = scramble_password(&s, &user.id).await;
+                return Err(e);
+            }
             quietly(
                 "verification email",
                 s.auth.send_verification_email(&user.id).await,
@@ -567,6 +648,19 @@ async fn sign_up(
     Ok((StatusCode::ACCEPTED, axum::Json(body)).into_response())
 }
 
+async fn record_sign_up_password(s: &ApiState, user: &AuthUser) -> Result<(), ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    sqlx::query(
+        "insert into sign_up_passwords (workos_user_id, email) values ($1, lower($2)) on conflict do nothing",
+    )
+    .bind(&user.id)
+    .bind(user.email.trim())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn verify_email(
     State(s): State<Arc<ApiState>>,
     Input(b): Input<PendingCode>,
@@ -581,6 +675,12 @@ async fn verify_email(
             .auth
             .authenticate_with_email_verification(&token, &b.code.0)
             .await;
+        // The password and the emailed code together: as good as sign-up's own verify step.
+        if accepted(&r)
+            && let Some(user) = unconfirmed_by_email(&s, email).await?
+        {
+            forget_sign_up_password(&s, &user).await?;
+        }
         return settle(&s, &b.pending.0, r).await;
     }
     let (Some(user), Some(org_name)) = (p.data["user"].as_str(), p.data["org_name"].as_str())
@@ -590,6 +690,7 @@ async fn verify_email(
     // A wrong code keeps the step; a right one spends it before an org is made.
     let user = s.auth.verify_email(user, &b.code.0).await?;
     take_pending(&s, &b.pending.0, &["sign_up"]).await?;
+    forget_sign_up_password(&s, &user.id).await?;
     create_org(&s, user, org_name).await?.into_json()
 }
 
@@ -954,6 +1055,8 @@ async fn reset(
         Err(AuthError::NotFound) => return Err(AuthError::CodeInvalid.into()),
         Err(e) => return Err(e.into()),
     };
+    // The owner chose this password through the emailed link: nothing unconfirmed is left.
+    forget_sign_up_password(&s, &user.id).await?;
     end_user_sessions(&s, &user.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1049,9 +1152,11 @@ async fn invite_accept(
                 Ok(_) | Err(AuthError::Conflict) => {}
                 Err(e) => return Err(e.into()),
             }
-            s.auth
+            let r = s
+                .auth
                 .authenticate_with_password(&inv.email, &password.0, Some(&token))
-                .await
+                .await;
+            guard_password(&s, &inv.email, r).await?
         }
         (None, None, Some(code)) => {
             s.auth
@@ -1232,6 +1337,8 @@ async fn next(s: &ApiState, step: Step) -> Result<Response, ApiError> {
 
 /// WorkOS proved the person: map the org to its tenant, the user to a member, and sign in.
 async fn finish(s: &ApiState, a: Authenticated) -> Result<SignedIn, ApiError> {
+    // First, whatever happens next: this sign-in may have just verified the email in WorkOS.
+    neutralise_sign_up_password(s, &a.user.id).await?;
     let org = a.org.ok_or_else(no_access)?;
     let memberships = s.auth.memberships(&a.user.id).await?;
     let current = memberships
@@ -1701,6 +1808,16 @@ impl AuthProvider for WorkosAuth {
             .confirm_password_reset(p)
             .await;
         r.map(|r| auth_user(r.user)).map_err(classify)
+    }
+
+    async fn set_password(&self, user: &str, password: &str) -> Result<(), AuthError> {
+        let mut body = workos::user_management::UpdateUserParamsBody::new();
+        body.password = Some(workos::user_management::Password::Plaintext {
+            password: password.to_owned(),
+        });
+        let p = workos::user_management::UpdateUserParams::new(body);
+        let r = self.client.user_management().update_user(user, p).await;
+        r.map(|_| ()).map_err(classify)
     }
 
     async fn invitation(&self, token: &str) -> Result<Invitation, AuthError> {

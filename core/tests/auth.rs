@@ -559,6 +559,8 @@ struct Fake {
     orgs: Mutex<Vec<OrgRef>>,
     /// When set, `verify_email` waits here: lets a test line up two submits of one step.
     verify_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// When set, `set_password` fails as WorkOS being down would.
+    set_password_fails: Mutex<bool>,
 }
 
 impl Fake {
@@ -808,6 +810,16 @@ impl AuthProvider for Fake {
             u.verified = true;
         });
         Ok(Self::auth_user(&u))
+    }
+
+    async fn set_password(&self, user: &str, password: &str) -> Result<(), AuthError> {
+        // The id only: a password never goes into the call log.
+        self.call(format!("set-password {user}"));
+        if *self.set_password_fails.lock().unwrap() {
+            return Err(AuthError::Upstream("status 500".into()));
+        }
+        self.update(user, |u| u.password = password.to_owned());
+        Ok(())
     }
 
     async fn invitation(&self, token: &str) -> Result<Invitation, AuthError> {
@@ -2474,6 +2486,207 @@ async fn personal_operator_only_through_the_narrow_function() {
             .iter()
             .all(|(_, kind, disabled)| kind == "personal" && *disabled)
     );
+}
+
+/// Whether our sign-up still holds an unconfirmed password for this WorkOS user.
+async fn unconfirmed(h: &Harness, user: &str) -> bool {
+    let mut tx = h.store.begin_untenanted().await.unwrap();
+    sqlx::query_scalar("select exists (select 1 from sign_up_passwords where workos_user_id = $1)")
+        .bind(user)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap()
+}
+
+/// The password `sign_up_body` sets: the attacker's, in the pre-hijacking tests.
+const SIGN_UP_PASSWORD: &str = "a long passphrase";
+
+/// An attacker signs up with someone else's email; returns that WorkOS user.
+async fn pre_hijacked(h: &Harness) -> FakeUser {
+    let email = format!("victim-{}@acme.test", Uuid::new_v4().simple());
+    let r = h.post("/v1/auth/sign-up", sign_up_body(&email)).await;
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let u = h.fake.by_email(&email).unwrap();
+    assert!(unconfirmed(h, &u.id).await);
+    u
+}
+
+/// The user's password was replaced by a random one that never reached the call log.
+fn assert_neutralised(h: &Harness, user: &str) {
+    let now = h.fake.by_id(user).unwrap().password;
+    assert_ne!(now, SIGN_UP_PASSWORD);
+    assert_eq!(now.len(), 43, "256 random bits, base64url");
+    assert!(h.fake.called(&format!("set-password {user}")));
+    assert!(
+        !h.fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.contains(&now))
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn another_sign_in_neutralises_an_unconfirmed_sign_up_password() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let victim = pre_hijacked(&h).await;
+    // The owner accepts an invitation with an emailed code (which verifies the email in WorkOS).
+    let token = invite_to(&h, &inviter, &victim.email);
+    let r = h
+        .post(
+            &format!("/v1/auth/invite/{token}/accept"),
+            json!({ "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    assert_neutralised(&h, &victim.id);
+    assert!(!unconfirmed(&h, &victim.id).await);
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": victim.email, "password": SIGN_UP_PASSWORD }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "invalid_credentials");
+}
+
+#[tokio::test]
+#[ignore]
+async fn magic_code_neutralises_even_without_an_org() {
+    let h = Harness::new().await;
+    let victim = pre_hijacked(&h).await;
+    let r = h
+        .post(
+            "/v1/auth/code/verify",
+            json!({ "email": victim.email, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["error"]["code"], "no_access");
+    assert_neutralised(&h, &victim.id);
+    assert!(!unconfirmed(&h, &victim.id).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn unconfirmed_sign_up_password_never_signs_in() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let victim = pre_hijacked(&h).await;
+    // The email got verified outside our sign-up, and the owner joined an org.
+    let org = inviter.memberships[0].clone();
+    h.fake.update(&victim.id, |u| {
+        u.verified = true;
+        u.memberships.push(Membership {
+            role: "member".into(),
+            ..org
+        });
+    });
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": victim.email.to_uppercase(), "password": SIGN_UP_PASSWORD }),
+        )
+        .await;
+    assert!(session_cookie(&r).is_none());
+    assert_eq!(body_json(r).await["error"]["code"], "invalid_credentials");
+    assert_neutralised(&h, &victim.id);
+    assert!(!unconfirmed(&h, &victim.id).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn failed_neutralisation_issues_no_session() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let victim = pre_hijacked(&h).await;
+    *h.fake.set_password_fails.lock().unwrap() = true;
+    let token = invite_to(&h, &inviter, &victim.email);
+    let r = h
+        .post(
+            &format!("/v1/auth/invite/{token}/accept"),
+            json!({ "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    assert!(session_cookie(&r).is_none());
+    assert!(unconfirmed(&h, &victim.id).await, "still to be neutralised");
+}
+
+#[tokio::test]
+#[ignore]
+async fn sign_up_verify_confirms_its_password() {
+    let h = Harness::new().await;
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let v = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
+    let u = h.fake.by_email(&email).unwrap();
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": v["pending"], "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    assert!(!unconfirmed(&h, &u.id).await);
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": email, "password": SIGN_UP_PASSWORD }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    assert!(!h.fake.called("set-password"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn password_and_emailed_code_confirm_a_sign_up_password() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let u = pre_hijacked(&h).await;
+    let org = inviter.memberships[0].clone();
+    h.fake.update(&u.id, |u| u.memberships.push(org));
+    // The password, then the code WorkOS emails: the same proof as sign-up's own step.
+    let pending = pending_for(&h, &h.fake.by_id(&u.id).unwrap(), "verify_email").await;
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": pending, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    assert!(!unconfirmed(&h, &u.id).await);
+    assert!(!h.fake.called("set-password"));
+    assert_eq!(h.fake.by_id(&u.id).unwrap().password, SIGN_UP_PASSWORD);
+}
+
+#[tokio::test]
+#[ignore]
+async fn reset_settles_an_unconfirmed_sign_up_password() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let u = pre_hijacked(&h).await;
+    let r = h
+        .post(
+            "/v1/auth/password/reset",
+            json!({ "token": format!("reset_{}", u.id), "password": "the owner's own one" }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert!(!unconfirmed(&h, &u.id).await);
+    // The owner's new password keeps working.
+    let org = inviter.memberships[0].clone();
+    h.fake.update(&u.id, |u| u.memberships.push(org));
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": u.email, "password": "the owner's own one" }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    assert!(!h.fake.called("set-password"));
 }
 
 #[tokio::test]
