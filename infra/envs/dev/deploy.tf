@@ -18,6 +18,8 @@ resource "aws_iam_role" "deploy" {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:environment:${var.env}"
+          # Only the deploy workflow as it is on main, so a branch cannot ship its own steps.
+          "token.actions.githubusercontent.com:job_workflow_ref" = "${var.github_repository}/.github/workflows/deploy.yml@refs/heads/main"
         }
       }
     }]

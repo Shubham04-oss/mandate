@@ -145,13 +145,20 @@ Set the zone's SSL/TLS mode to **Full (strict)** (or a configuration rule doing 
 ## 7. GitHub
 
 ```sh
-gh api -X PUT repos/Shubham04-oss/mandate/environments/dev
 gh variable set AWS_DEPLOY_ROLE_ARN     --env dev --body "$(tofu output -raw deploy_role_arn)"
 gh variable set MANDATE_MIGRATE_NETWORK --env dev --body "$(tofu output -raw migrate_network_configuration)"
 ```
 
-The deploy role trusts only this repository's `dev` environment. Add required reviewers or a
-branch rule (`main` only) to that environment in the repository settings if you want a gate.
+The deploy role trusts only `.github/workflows/deploy.yml` as it is on `main`, running in this
+repository's `dev` environment. Also restrict the environment to protected branches (required;
+`main` is protected), so no other branch can run a job in `dev` at all:
+
+```sh
+gh api -X PUT repos/Shubham04-oss/mandate/environments/dev \
+  -F 'deployment_branch_policy[protected_branches]=true' -F 'deployment_branch_policy[custom_branch_policies]=false'
+```
+
+Add required reviewers there too if you want a manual gate.
 
 ## 8. Turn deploys on
 

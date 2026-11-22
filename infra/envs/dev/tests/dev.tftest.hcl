@@ -539,11 +539,12 @@ run "only_the_dev_environment_of_this_repo_can_deploy" {
   assert {
     condition = jsondecode(aws_iam_role.deploy.assume_role_policy).Statement[0].Condition == {
       StringEquals = {
-        "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-        "token.actions.githubusercontent.com:sub" = "repo:Shubham04-oss/mandate:environment:dev"
+        "token.actions.githubusercontent.com:aud"              = "sts.amazonaws.com"
+        "token.actions.githubusercontent.com:sub"              = "repo:Shubham04-oss/mandate:environment:dev"
+        "token.actions.githubusercontent.com:job_workflow_ref" = "Shubham04-oss/mandate/.github/workflows/deploy.yml@refs/heads/main"
       }
     }
-    error_message = "GitHub OIDC for the dev environment of this repository only; no long-lived keys"
+    error_message = "GitHub OIDC for main's deploy workflow in the dev environment of this repository only"
   }
   assert {
     condition = toset(flatten([
