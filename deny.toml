@@ -21,6 +21,8 @@ confidence-threshold = 0.9
 exceptions = [
     # The Mozilla CA bundle as data; forced by sqlx tls-rustls, reqwest and the AWS HTTP client.
     { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+    # Blue Oak 1.0.0 is a permissive (OSI) licence; the CBOR codec the EventBridge v2 SDK speaks.
+    { crate = "minicbor", allow = ["BlueOak-1.0.0"] },
 ]
 
 [licenses.private]

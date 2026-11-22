@@ -34,3 +34,12 @@ grant select, insert, delete on auth_pending to :"role";
 grant select, insert, update, delete on rate_limits to :"role";
 -- Sign-in gives a member their personal operator only through this narrow function.
 grant execute on function ensure_personal_agent(text) to :"role";
+-- Events. The outbox is written by `publish`; the publisher may only mark rows sent.
+grant select, insert on outbox to :"role";
+grant update (sent_at) on outbox to :"role";
+grant usage on sequence outbox_seq_seq to :"role";
+-- Append-only: who joined and left is never rewritten.
+grant select, insert on lifecycle_log to :"role";
+-- RLS-free consumer bookkeeping: the core only records; `on conflict do nothing` needs no SELECT.
+grant insert on events_inbox, events_quarantine to :"role";
+grant usage on sequence events_quarantine_id_seq to :"role";
