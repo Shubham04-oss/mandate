@@ -1223,8 +1223,9 @@ async fn insert_member(tx: &mut Tx, user: &AuthUser) -> Result<Option<MemberId>,
     Ok(created.map(|_| id))
 }
 
-/// The member's personal operator, `op-<member>`, created if they have none; a disabled one
-/// stays disabled. The app role cannot insert agents: a narrow database function does it.
+/// The member's personal operator (`op-` + a hash of the member id), created if they have none;
+/// a disabled one stays disabled. The app role cannot insert agents: a narrow database function
+/// does it.
 async fn ensure_personal_agent(tx: &mut Tx, member: &MemberId) -> Result<(), StoreError> {
     sqlx::query("select ensure_personal_agent($1)")
         .bind(member.as_str())

@@ -1040,6 +1040,15 @@ fn assert_no_workos_token(v: &Value) {
     assert!(!s.contains("pat_"), "{s}");
 }
 
+/// The id `ensure_personal_agent` gives `m`'s operator: `op-` + 16 bytes of sha256(m), hex.
+fn personal_operator(m: &MemberId) -> AgentId {
+    let hex: String = Sha256::digest(m.as_str().as_bytes())[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    AgentId::parse(&format!("op-{hex}")).unwrap()
+}
+
 fn tenant_of(org: &str) -> TenantId {
     TenantId::parse(&org.to_lowercase()).unwrap()
 }
@@ -1483,7 +1492,7 @@ async fn verify_email_creates_org_and_admin_member() {
         .await
         .unwrap()
         .unwrap();
-    let agent = AgentId::parse(&format!("op-{member}")).unwrap();
+    let agent = personal_operator(&member);
     assert!(
         mandate::store::may_use_agent(&mut tx, &member, &agent)
             .await
@@ -2317,7 +2326,12 @@ async fn personal_operator_only_through_the_narrow_function() {
     let (a, b) = (tenant(), tenant());
     let ann = member("ann");
     add_member(&store, &a, &ann, false).await;
-    let ensure = |t: TenantId, m: &'static str| {
+    // Two members whose ids share their first 61 characters still get one operator each.
+    let long = |c: char| format!("{}{c}{c}{c}", "m".repeat(61));
+    let (x, y) = (long('x'), long('y'));
+    add_member(&store, &a, &member(&x), false).await;
+    add_member(&store, &a, &member(&y), false).await;
+    let ensure = |t: TenantId, m: String| {
         let store = store.clone();
         async move {
             let mut tx = store.begin(&t).await.unwrap();
@@ -2340,16 +2354,37 @@ async fn personal_operator_only_through_the_narrow_function() {
         rows
     };
     // Not a member of the transaction's tenant: nothing, here or there.
-    ensure(b.clone(), "ann").await;
-    ensure(a.clone(), "bob").await;
+    ensure(b.clone(), "ann".into()).await;
+    ensure(a.clone(), "bob".into()).await;
     assert!(operators(b.clone()).await.is_empty());
     assert!(operators(a.clone()).await.is_empty());
-    // A member gets exactly one `op-<member>`, however often it runs.
-    ensure(a.clone(), "ann").await;
-    ensure(a.clone(), "ann").await;
+    // A member gets exactly one operator, however often it runs; its id is pinned here.
+    ensure(a.clone(), "ann".into()).await;
+    ensure(a.clone(), "ann".into()).await;
     assert_eq!(
         operators(a.clone()).await,
-        vec![("op-ann".into(), "personal".into(), false)]
+        vec![(
+            "op-49915e0d7d4b402e3017d010bc1c0e83".into(),
+            "personal".into(),
+            false
+        )]
+    );
+    assert_eq!(
+        personal_operator(&ann).as_str(),
+        "op-49915e0d7d4b402e3017d010bc1c0e83"
+    );
+    ensure(a.clone(), x.clone()).await;
+    ensure(a.clone(), y.clone()).await;
+    let owners: Vec<(String, String)> = sqlx::query_as(
+        "select id, owner_member from agents where tenant_id = $1 and owner_member <> 'ann' order by owner_member",
+    )
+    .bind(a.as_str())
+    .fetch_all(&common::admin_pool().await)
+    .await
+    .unwrap();
+    assert_eq!(
+        owners,
+        [&x, &y].map(|m| (personal_operator(&member(m)).to_string(), m.clone()))
     );
     // A disabled operator stays disabled.
     let mut tx = store.begin(&a).await.unwrap();
@@ -2360,9 +2395,11 @@ async fn personal_operator_only_through_the_narrow_function() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    ensure(a.clone(), "ann").await;
-    assert_eq!(
-        operators(a).await,
-        vec![("op-ann".into(), "personal".into(), true)]
+    ensure(a.clone(), "ann".into()).await;
+    assert!(
+        operators(a)
+            .await
+            .iter()
+            .all(|(_, kind, disabled)| kind == "personal" && *disabled)
     );
 }
