@@ -324,7 +324,7 @@ const outcomeFor = (email: string): Response => {
 		case "sso":
 			return next("sso_required", { redirect_url: "/sign-in?standin=sso" });
 		case "method":
-			return next("method_required", { methods: ["sso", "magic_code"] });
+			return next("method_required", { methods: ["sso", "magic_auth"] });
 		case "noaccess":
 			return fail(
 				403,
@@ -338,6 +338,7 @@ const outcomeFor = (email: string): Response => {
 
 const validEmail = (v: unknown): v is string =>
 	typeof v === "string" && /^[^@\s]+@[^@\s]+$/.test(v);
+const filled = (v: unknown) => typeof v === "string" && v.trim() !== "";
 const badEmail = () => fail(400, "invalid_input", "Enter a valid email.");
 const wrongCode = () =>
 	fail(400, "code_invalid", "That code isn't right. Check it and try again.");
@@ -383,7 +384,16 @@ const routes: [Method, RegExp, Handler][] = [
 	[
 		"POST",
 		/^\/v1\/auth\/sign-up$/,
-		(_, b) => (validEmail(b.email) ? next("verify_email") : badEmail()),
+		(_, b) =>
+			!validEmail(b.email)
+				? badEmail()
+				: !filled(b.name) || !filled(b.org_name)
+					? fail(
+							400,
+							"invalid_input",
+							"Enter your name and your organization's name.",
+						)
+					: next("verify_email"),
 	],
 	[
 		"POST",

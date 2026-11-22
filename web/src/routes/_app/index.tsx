@@ -85,8 +85,8 @@ function Home() {
 	);
 }
 
-// ponytail: nothing is sent yet; the ask goes to the core once conversations exist, and the
-// contract has no endpoint for it. Until then the person is told, and their words stay.
+// ponytail: nothing is sent yet. The ask goes to POST /v1/conversations (contract 5.2) once the
+// conversation view is built; until then the person is told, and their words stay.
 function AskBox({
 	value,
 	onChange,

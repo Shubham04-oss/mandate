@@ -5,6 +5,7 @@ import {
 	AuthForm,
 	AuthLayout,
 	FormError,
+	FormNote,
 	Lead,
 	StatusIcon,
 	TextLink,
@@ -19,9 +20,11 @@ import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
 import { readFlow, saveFlow } from "#/lib/sign-in-flow.ts";
 
-// `next: method_required`: the organization allows only some ways in, listed in `methods`.
-// ponytail: the contract doesn't fix the method names; these assume "sso", "magic_code", "password"
-// and "google" (noted for the lead). Unknown names are left out.
+// `next: method_required`: the organization allows only some ways in, listed in `methods`. The core
+// passes WorkOS's method names through as they are.
+// ponytail: only the ways the web app can offer are shown; others (Microsoft, GitHub, Apple,
+// passkeys) get a note instead.
+const offered = ["google_oauth", "sso", "magic_auth", "password"];
 export const Route = createFileRoute("/sign-in_/required")({
 	head: () => ({ meta: [{ title: `Sign in another way · ${brand.name}` }] }),
 	ssr: false,
@@ -37,6 +40,7 @@ function RequiredMethod() {
 	if (!methods.length) return <StartAgain />;
 
 	const email = flow.email;
+	const none = !methods.some((m) => offered.includes(m));
 	return (
 		<AuthLayout scene="harbour">
 			<AuthForm label="Sign in another way">
@@ -46,7 +50,13 @@ function RequiredMethod() {
 					Your organization asks its members to sign in with one of these.
 				</Lead>
 				<FormError message={error} />
-				{methods.includes("google") ? (
+				{none ? (
+					<FormNote>
+						oryxa can't offer the way your organization signs in yet. Ask your
+						admin which other ways are allowed.
+					</FormNote>
+				) : null}
+				{methods.includes("google_oauth") ? (
 					<GoogleButton disabled title="Not available yet">
 						Continue with Google
 					</GoogleButton>
@@ -64,7 +74,7 @@ function RequiredMethod() {
 						Continue with single sign-on
 					</Button>
 				) : null}
-				{methods.includes("magic_code") && email ? (
+				{methods.includes("magic_auth") && email ? (
 					<Button
 						variant="secondary"
 						size="lg"

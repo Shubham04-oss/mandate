@@ -15,8 +15,8 @@ type Permission = NotificationPermission | "unsupported";
 const currentPermission = (): Permission =>
 	typeof Notification === "undefined" ? "unsupported" : Notification.permission;
 
-// ponytail: only the test sends a notification for now. The contract has no event stream, so the
-// web app can't hear when something starts needing the person; noted for the lead.
+// ponytail: only the test sends a notification for now. Events stream per conversation only, so
+// the web app can't hear when something new needs the person; noted for the lead.
 export function NotificationsSection() {
 	return (
 		<div className="flex flex-col gap-8">

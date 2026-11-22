@@ -43,9 +43,16 @@ function SignUp() {
 				label="Create an account"
 				onSubmit={(data) => {
 					const email = field(data, "email");
-					run(() => api.auth.signUp(email, password, field(data, "name")), {
-						email,
-					});
+					run(
+						() =>
+							api.auth.signUp({
+								email,
+								password,
+								name: field(data, "name"),
+								orgName: field(data, "org"),
+							}),
+						{ email },
+					);
 				}}
 			>
 				<Title>Create your account</Title>
@@ -74,6 +81,19 @@ function SignUp() {
 						autoComplete="email"
 						placeholder="you@company.com"
 					/>
+				</Field>
+				<Field className="gap-1.5">
+					<FieldLabel htmlFor="org">Organization</FieldLabel>
+					<Input
+						id="org"
+						name="org"
+						autoComplete="organization"
+						placeholder="Northstar"
+						aria-describedby="org-hint"
+					/>
+					<FieldDescription id="org-hint" className="text-[11.5px]">
+						You'll be its admin, and can invite your team once you're in.
+					</FieldDescription>
 				</Field>
 				<Field className="gap-1.5">
 					<FieldLabel htmlFor="password">Password</FieldLabel>

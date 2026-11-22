@@ -40,3 +40,26 @@ describe("stand-in session", () => {
 		expect((await me()).status).toBe(401);
 	});
 });
+
+describe("stand-in sign-up", () => {
+	it("needs the organization's name, as the core does", async () => {
+		const without = await standIn("POST", "/v1/auth/sign-up", {
+			email: "new@northstar.io",
+			password: "Harbour1light!",
+			name: "Ada",
+		});
+		expect(without.status).toBe(400);
+		expect((await without.json()).error.code).toBe("invalid_input");
+
+		const withOrg = await standIn("POST", "/v1/auth/sign-up", {
+			email: "new@northstar.io",
+			password: "Harbour1light!",
+			name: "Ada",
+			org_name: "Northstar",
+		});
+		expect(await withOrg.json()).toMatchObject({
+			status: "next",
+			next: "verify_email",
+		});
+	});
+});

@@ -251,11 +251,19 @@ export const api = {
 			call<SignInOutcome>("POST", "/v1/auth/code/verify", { email, code }),
 		password: (email: string, password: string) =>
 			call<SignInOutcome>("POST", "/v1/auth/password", { email, password }),
-		signUp: (email: string, password: string, name: string) =>
+		/** Self-serve sign-up: once the email is verified, the core creates the organization with
+		 * this person as its admin. */
+		signUp: (input: {
+			email: string;
+			password: string;
+			name: string;
+			orgName: string;
+		}) =>
 			call<SignInOutcome>("POST", "/v1/auth/sign-up", {
-				email,
-				password,
-				name,
+				email: input.email,
+				password: input.password,
+				name: input.name,
+				org_name: input.orgName,
 			}),
 		verifyEmail: (pending: string, code: string) =>
 			call<SignInOutcome>("POST", "/v1/auth/verify-email", { pending, code }),

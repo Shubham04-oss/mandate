@@ -32,7 +32,9 @@ The base URL comes from `VITE_MANDATE_API_URL`:
 - **Set:** the module calls the core at that address. Nothing else changes; the screens stay as
   they are.
 
-Locally, both run on `localhost` so the session cookie works across them:
+Locally, both run on `localhost` so the session cookie works across them. Start the core with
+`MANDATE_WEB_ORIGIN=http://localhost:3000` and `MANDATE_API_ORIGIN=http://localhost:8080` (plus its
+WorkOS settings; see the root README), then:
 
 ```bash
 VITE_MANDATE_API_URL=http://localhost:8080 npm run dev
@@ -61,39 +63,43 @@ The code `000000` is always wrong; any other six digits work. A reset or invitat
 
 ### Contract notes for the lead
 
-Where the contract and the screens don't line up yet. The contract is unchanged; each note says what
-the web app assumes for now.
+Checked against the core on `main` (`core/src/api`). The contract is unchanged by the web app.
 
-1. **Local addresses.** 4.1 puts the core on `127.0.0.1:8080` and 4.2 says `localhost` for both. A
-   session cookie set by `127.0.0.1` isn't sent from `localhost`, so the web app uses
-   `http://localhost:8080`. The core also needs to allow `http://localhost:3000` as an origin with
-   credentials.
-2. **Google sign-in.** The sign-in and sign-up screens have "Continue with Google", but 4.3 has no
-   Google endpoint. The buttons are disabled ("Not available yet"). The `methods` list in
-   `method_required` may also name Google.
-3. **Signed out.** No error code says "no session". The app treats any HTTP 401 as signed out and
-   goes to sign-in; the stand-ins send 401 with `forbidden`.
+**Still open**
+
+1. **Google sign-in.** The sign-in and sign-up screens have "Continue with Google", but there is no
+   Google endpoint, so the buttons are disabled ("Not available yet").
+2. **Ways in for `method_required`.** The core passes WorkOS's method names through. The screen
+   offers `sso`, `magic_auth`, `password` and (disabled) `google_oauth`; any other way (Microsoft,
+   GitHub, Apple, passkeys) gets a note to ask the admin. The outcome also lacks the organization's
+   name, which the screen would use ("Northstar asks its members…").
+3. **Reset links.** The core maps WorkOS errors to contract codes, but a used or expired reset token
+   isn't among them, so unless WorkOS answers 404 it comes back as `internal` (502, "Sign-in is
+   unavailable"). The web app treats `code_expired` and `not_found` as an expired link.
 4. **Timestamps.** The format isn't stated; the app assumes RFC 3339 strings.
-5. **`method_required`.** The method names aren't listed; the app assumes `sso`, `magic_code`,
-   `password` and `google`. The screen would also like the organization's name ("Northstar asks
-   its members…"), which the outcome doesn't carry.
-6. **SSO callback errors.** How the core reports a failed SSO sign-in back to the web app isn't
-   stated; the app assumes `/sign-in?error=<code>` with a contract error code.
-7. **Reset links.** The error for a used or expired reset token isn't stated; the app treats
-   `code_expired` and `not_found` as expired. "Link expired" can't resend without the email, so it
-   sends the person to "Reset your password" to enter it again.
-8. **Invitations.** The invite screen was drawn for someone already signed in; the contract accepts
-   while signed out (a code to the invited email, or a name and password), so the screen offers
-   both. The invitation has no member list, so the faces row on the card is gone.
-9. **Not in the contract yet.** These stay on sample data: "Working now" on Home (tasks in progress,
-   the live browser, scheduled runs), the ask box and quick actions (asking an agent from the web),
-   the Tools pop-up (connections), and activity entries for access that ended.
-10. **Approval `effect`.** The values aren't listed; the app shows a plain description built from
-    the tool name and arguments instead.
-11. **No event stream.** Settings → Notifications lets a person turn on desktop notifications in
-    their browser, but the contract has no way for the core to tell the web app that something new
-    needs them (no stream, no polling endpoint for changes). Until there is, only the test
-    notification is sent.
+5. **Invitations.** The invitation has no member list, so the faces row on the invite card is gone.
+6. **Approval `effect`.** The values aren't listed; the app shows a plain description built from
+   the tool name and arguments instead.
+7. **Not in the contract.** These stay on sample data: "Working now" on Home (tasks in progress,
+   the live browser, scheduled runs), the Tools pop-up (connections), and activity entries for
+   access that ended.
+8. **Asking from the web.** Section 5.2 now has conversation endpoints and a per-conversation event
+   stream. Wiring the ask box and quick actions to them, with a conversation view, is the next web
+   task; until then sending says it isn't ready.
+9. **Desktop notifications.** Events stream per conversation only. Nothing tells the web app that a
+   new approval needs the person outside an open conversation, so Settings → Notifications sends
+   only the test.
+
+**Settled by the core**
+
+- **Local addresses:** the core listens on `127.0.0.1:8080`, which `localhost` reaches, and its
+  tests use `http://localhost:3000` as the web origin. The session cookie is `Secure; SameSite=Lax`,
+  which browsers accept on `localhost`.
+- **Signed out:** HTTP 401 with `forbidden`, which the app treats as signed out.
+- **SSO callback:** success lands on `/`; failure on `/sign-in?error=<code>`.
+- **Sign-up** takes `org_name` and makes the person the new organization's admin; the screen asks
+  for it.
+- **Request bodies** for every auth route match the core's.
 
 ## Settings kept on this device
 
