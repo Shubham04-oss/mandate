@@ -32,6 +32,12 @@
 11. **Dependencies** carry permissive licences and pass `cargo deny`; secrets never appear in code,
     tests, logs, commits or PR text.
 
+## Sign-in rate limits
+
+- Code and password checks share one 5-per-minute bucket per email, so anyone can use up a
+  victim's minute, which also blocks their verify-email and invite-accept. That is an accepted
+  trade-off: it bounds guessing whatever token, step or IP the guesser uses.
+
 ## Browser egress
 
 - **Document navigations** (top level, redirect hops, frames) are limited per call to the allowed
