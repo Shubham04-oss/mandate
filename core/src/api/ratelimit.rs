@@ -70,13 +70,14 @@ fn client_ip(req: &Request, trust_cf: bool) -> String {
     }
 }
 
-/// What one person is trying to get into: the email, else the pending step, else the token.
+/// What one person is trying to get into: the email, else the step (`/mfa/enable`'s challenge
+/// before its `pending`, which it reads only as a flag), else the token.
 fn subject(body: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(body).ok()?;
     if let Some(email) = v.get("email").and_then(Value::as_str) {
         return Some(format!("email:{}", email.trim().to_lowercase()));
     }
-    ["pending", "token"]
+    ["challenge", "pending", "token"]
         .into_iter()
         .find_map(|k| v.get(k).and_then(Value::as_str).map(|s| format!("{k}:{s}")))
 }
@@ -119,6 +120,7 @@ pub async fn limit(State(s): State<Arc<ApiState>>, req: Request, next: Next) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn req(cf: Option<&str>, peer: &str) -> Request {
         let mut b = Request::builder();
@@ -161,5 +163,22 @@ mod tests {
         assert_ne!(a, client_ip(&req(None, "2001:db8:1:3::1"), false));
         // An IPv4-mapped peer is its IPv4 address, not a /64 of all of IPv4.
         assert_eq!(client_ip(&req(None, "::ffff:10.0.0.9"), false), "10.0.0.9");
+    }
+
+    #[test]
+    fn mfa_enable_is_limited_per_challenge() {
+        // `/mfa/enable` reads only the challenge; a fresh `pending` per guess must not reset it.
+        let body = |pending: &str| {
+            json!({ "pending": pending, "challenge": "c1", "code": "1" }).to_string()
+        };
+        assert_eq!(
+            subject(body("a").as_bytes()).as_deref(),
+            Some("challenge:c1")
+        );
+        assert_eq!(subject(body("a").as_bytes()), subject(body("b").as_bytes()));
+        assert_eq!(
+            subject(br#"{"challenge":"c1","code":"1"}"#).as_deref(),
+            Some("challenge:c1")
+        );
     }
 }
