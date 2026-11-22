@@ -2268,6 +2268,37 @@ async fn me_returns_person_org_orgs_and_flags() {
 
 #[tokio::test]
 #[ignore]
+async fn signing_in_again_ends_the_old_session() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let tenant = tenant_of(&u.memberships[0].org);
+    let old = signed_in(&h, &u).await;
+    let again = |cookie: &str, password: &str| {
+        let body = json!({ "email": u.email, "password": password });
+        h.app.clone().oneshot(with_cookie(
+            auth_post("/v1/auth/password", &h.ip, body),
+            cookie,
+        ))
+    };
+    let (store, tenant) = (&h.store, &tenant);
+    let live = |cookie: String| async move {
+        let mut tx = store.begin(tenant).await.unwrap();
+        session::profile(&mut tx, &cookie).await.unwrap().is_some()
+    };
+    // A failed attempt leaves the session alone.
+    let r = again(&old, "wrong password").await.unwrap();
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    assert!(live(old.clone()).await);
+    let r = again(&old, &u.password).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let new = session_cookie(&r).unwrap();
+    assert_ne!(new, old);
+    assert!(!live(old).await, "the session the request carried is gone");
+    assert!(live(new).await);
+}
+
+#[tokio::test]
+#[ignore]
 async fn sign_out_deletes_session_and_clears_cookie() {
     let h = Harness::new().await;
     let u = h.user("member");

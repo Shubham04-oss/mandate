@@ -8,8 +8,8 @@ use crate::ids::{MemberId, TenantId};
 use crate::store::{self, StoreError, Tx};
 use async_trait::async_trait;
 use axum::Router;
-use axum::extract::{Path, RawQuery, State};
-use axum::middleware;
+use axum::extract::{Path, RawQuery, Request, State};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use http::{HeaderMap, StatusCode, header};
@@ -394,6 +394,10 @@ pub(crate) fn routes(state: &Arc<ApiState>) -> Router<Arc<ApiState>> {
         .route("/v1/auth/invite/{token}", get(invite))
         .route("/v1/auth/invite/{token}/accept", post(invite_accept))
         .route("/v1/auth/sign-out", post(sign_out))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            replace_session,
+        ))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             ratelimit::limit,
@@ -1016,17 +1020,47 @@ async fn me_route(
     Ok(axum::Json(me))
 }
 
+/// Deletes the session a cookie names, in whichever tenant it is.
+async fn end_session(s: &ApiState, token: &str) -> Result<(), ApiError> {
+    if let Some(tenant) = session::token_tenant(token) {
+        let mut tx = s.store.begin(&tenant).await?;
+        session::delete(&mut tx, token).await?;
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
+/// A response that signs someone in ends the session the request carried, so the previous
+/// person's (or this person's other org's) session does not live on unseen in this browser.
+async fn replace_session(State(s): State<Arc<ApiState>>, req: Request, next: Next) -> Response {
+    let old = session::cookie(req.headers()).map(str::to_owned);
+    let r = next.run(req).await;
+    let signed_in = r
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| {
+            v.starts_with(&format!("{}=", session::COOKIE))
+                && !v.starts_with(&format!("{}=;", session::COOKIE))
+        });
+    match old {
+        Some(old) if signed_in => match end_session(&s, &old).await {
+            Ok(()) => r,
+            // Fail closed: the new cookie is not handed out while the old session may live.
+            Err(e) => e.into_response(),
+        },
+        _ => r,
+    }
+}
+
 /// Ends this browser's session at once; 204 even without one, so a stale tab can sign out.
 async fn sign_out(
     State(s): State<Arc<ApiState>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if let Some(token) = session::cookie(&headers)
-        && let Some(tenant) = session::token_tenant(token)
-    {
-        let mut tx = s.store.begin(&tenant).await?;
-        session::delete(&mut tx, token).await?;
-        tx.commit().await?;
+    if let Some(token) = session::cookie(&headers) {
+        end_session(&s, token).await?;
     }
     let mut r = StatusCode::NO_CONTENT.into_response();
     r.headers_mut()
