@@ -28,8 +28,8 @@ fn var(name: &str) -> Option<String> {
 }
 
 /// With `MANDATE_EVENT_BUS` set, publishes to that bus and runs each consumer on its own SQS
-/// queue; otherwise delivers to the consumers in this process. Without
-/// `MANDATE_EVENT_SIGNING_KEY` nothing is published: events wait in the outbox unsigned.
+/// queue, and refuses to start without `MANDATE_EVENT_SIGNING_KEY`; otherwise delivers to the
+/// consumers in this process, and without a signing key events wait in the outbox unsigned.
 pub async fn start(
     store: &Store,
     aws: &aws_config::SdkConfig,
@@ -46,6 +46,10 @@ pub async fn start(
     let mut tasks = Vec::new();
     let sink: Arc<dyn Sink> = match var("MANDATE_EVENT_BUS") {
         Some(bus) => {
+            // A bus without a signer would let events age past the consumers' 24 h window unseen.
+            if signer.is_none() {
+                return Err(StartError::Missing("MANDATE_EVENT_SIGNING_KEY".into()));
+            }
             if keys.is_empty() && !consumers.is_empty() {
                 return Err(StartError::NoKeys);
             }
