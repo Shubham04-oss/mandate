@@ -1019,6 +1019,8 @@ fn auth_state(store: Store, auth: Arc<dyn AuthProvider>) -> Arc<ApiState> {
         auth,
         web_origin: WEB.into(),
         sso_redirect_uri: "http://localhost:8080/v1/auth/sso/callback".into(),
+        // Each test sends its own `CF-Connecting-IP`, as Cloudflare would, so buckets stay apart.
+        trust_cf_ip: true,
     })
 }
 

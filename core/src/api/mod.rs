@@ -31,6 +31,8 @@ pub struct ApiState {
     pub auth: Arc<dyn AuthProvider>,
     /// Where WorkOS sends the browser after SSO: this API's `/v1/auth/sso/callback`.
     pub sso_redirect_uri: String,
+    /// `MANDATE_TRUST_CF_IP=1`: rate limits key on `CF-Connecting-IP`; only behind Cloudflare.
+    pub trust_cf_ip: bool,
 }
 
 /// A JSON body (an empty one reads as `{}`); a malformed one is `invalid_input`, never serde's

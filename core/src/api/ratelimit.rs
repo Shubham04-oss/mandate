@@ -7,7 +7,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use time::OffsetDateTime;
 
@@ -44,21 +44,30 @@ pub async fn hit(
     Ok((count > limit).then(|| (WINDOW_SECS - t.rem_euclid(WINDOW_SECS)).max(1)))
 }
 
-/// Cloudflare's `CF-Connecting-IP` (the ALB only accepts Cloudflare), else the peer address.
-fn client_ip(req: &Request) -> String {
-    let cf = req
-        .headers()
-        .get("cf-connecting-ip")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<IpAddr>().ok());
+/// Cloudflare's `CF-Connecting-IP` when `trust_cf` (anyone else could forge it), else the peer
+/// address. IPv6 counts per /64, the block one host is usually given.
+fn client_ip(req: &Request, trust_cf: bool) -> String {
+    let cf = || {
+        req.headers()
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+    };
     let peer = || {
         req.extensions()
             .get::<ConnectInfo<SocketAddr>>()
             .map(|c| c.0.ip())
     };
+    let ip = if trust_cf { cf().or_else(peer) } else { peer() };
     // ponytail: without either (tests, a misconfigured server) all callers share one bucket.
-    cf.or_else(peer)
-        .map_or_else(|| "unknown".into(), |ip| ip.to_string())
+    match ip.map(|ip| ip.to_canonical()) {
+        Some(IpAddr::V6(v6)) => format!(
+            "{}/64",
+            Ipv6Addr::from(v6.to_bits() & !u128::from(u64::MAX))
+        ),
+        Some(v4) => v4.to_string(),
+        None => "unknown".into(),
+    }
 }
 
 /// What one person is trying to get into: the email, else the pending step, else the token.
@@ -75,7 +84,7 @@ fn subject(body: &[u8]) -> Option<String> {
 /// Layer for `/v1/auth/*`: 429 with `Retry-After` once either the caller's IP or the subject
 /// of the request is over its limit. Every attempt counts against both.
 pub async fn limit(State(s): State<Arc<ApiState>>, req: Request, next: Next) -> Response {
-    let ip = client_ip(&req);
+    let ip = client_ip(&req, s.trust_cf_ip);
     let (parts, body) = req.into_parts();
     let Ok(bytes) = to_bytes(body, super::MAX_BODY_BYTES).await else {
         return ApiError::invalid_input().into_response();
@@ -105,4 +114,52 @@ pub async fn limit(State(s): State<Arc<ApiState>>, req: Request, next: Next) -> 
     }
     next.run(Request::from_parts(parts, Body::from(bytes)))
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(cf: Option<&str>, peer: &str) -> Request {
+        let mut b = Request::builder();
+        if let Some(ip) = cf {
+            b = b.header("cf-connecting-ip", ip);
+        }
+        let mut r = b.body(Body::empty()).unwrap();
+        r.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(peer.parse().unwrap(), 443)));
+        r
+    }
+
+    #[test]
+    fn cf_header_ignored_without_the_flag() {
+        assert_eq!(
+            client_ip(&req(Some("1.2.3.4"), "10.0.0.9"), false),
+            "10.0.0.9"
+        );
+    }
+
+    #[test]
+    fn cf_header_used_with_the_flag() {
+        assert_eq!(
+            client_ip(&req(Some("1.2.3.4"), "10.0.0.9"), true),
+            "1.2.3.4"
+        );
+        // A header that is not an address falls back to the peer.
+        assert_eq!(client_ip(&req(Some("nope"), "10.0.0.9"), true), "10.0.0.9");
+    }
+
+    #[test]
+    fn ipv6_in_one_slash_64_share_a_bucket() {
+        let a = client_ip(&req(None, "2001:db8:1:2::1"), false);
+        let b = client_ip(
+            &req(Some("2001:db8:1:2:ffff:eeee:dddd:cccc"), "10.0.0.9"),
+            true,
+        );
+        assert_eq!(a, "2001:db8:1:2::/64");
+        assert_eq!(a, b);
+        assert_ne!(a, client_ip(&req(None, "2001:db8:1:3::1"), false));
+        // An IPv4-mapped peer is its IPv4 address, not a /64 of all of IPv4.
+        assert_eq!(client_ip(&req(None, "::ffff:10.0.0.9"), false), "10.0.0.9");
+    }
 }

@@ -223,6 +223,7 @@ fn web_api(store: &Store) -> Option<axum::Router> {
         web_origin,
         auth: Arc::new(WorkosAuth::new(client)),
         sso_redirect_uri: format!("{}/v1/auth/sso/callback", api_origin.trim_end_matches('/')),
+        trust_cf_ip: std::env::var("MANDATE_TRUST_CF_IP").as_deref() == Ok("1"),
     })))
 }
 
