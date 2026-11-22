@@ -567,6 +567,9 @@ async fn verify_email(
     Input(b): Input<PendingCode>,
 ) -> Result<Response, ApiError> {
     let p = find_pending(&s, &b.pending.0, &["verify_email", "sign_up"]).await?;
+    // Per email too: a new step (a new sign-up, another password sign-in) must not mean new guesses.
+    let email = p.email.as_deref().ok_or_else(pending_expired)?;
+    ratelimit::charge(&s, &ratelimit::email_key(email)).await?;
     if p.kind == "verify_email" {
         let token = p.workos_token.ok_or_else(pending_expired)?;
         let r = s
@@ -649,9 +652,15 @@ async fn mfa_verify(
     Input(b): Input<PendingCode>,
 ) -> Result<Response, ApiError> {
     let p = find_pending(&s, &b.pending.0, &["mfa"]).await?;
-    let (Some(token), Some(challenge)) = (p.workos_token, p.data["challenge"].as_str()) else {
+    let (Some(token), Some(challenge), Some(factor)) = (
+        p.workos_token,
+        p.data["challenge"].as_str(),
+        p.data["factor"].as_str(),
+    ) else {
         return Err(pending_expired());
     };
+    // The factor is the user's own: a fresh step per guess draws on the same bucket.
+    ratelimit::charge(&s, &format!("factor:{factor}")).await?;
     let r = s
         .auth
         .authenticate_with_totp(&token, challenge, &b.code.0)
@@ -705,7 +714,7 @@ async fn mfa_setup(
             kind: "mfa_enable",
             workos_token: token.as_deref(),
             email: None,
-            data: json!({ "challenge": e.challenge, "member": member }),
+            data: json!({ "challenge": e.challenge, "member": member, "user": user }),
             tenant: tenant.as_ref(),
         },
         now,
@@ -727,9 +736,15 @@ async fn mfa_enable(
 ) -> Result<Response, ApiError> {
     if b.pending.is_some() {
         let p = find_pending(&s, &b.challenge.0, &["mfa_enable"]).await?;
-        let (Some(token), Some(challenge)) = (p.workos_token, p.data["challenge"].as_str()) else {
+        let (Some(token), Some(challenge), Some(user)) = (
+            p.workos_token,
+            p.data["challenge"].as_str(),
+            p.data["user"].as_str(),
+        ) else {
             return Err(pending_expired());
         };
+        // Per WorkOS user: setting up again gives a new challenge, not new guesses.
+        ratelimit::charge(&s, &format!("user:{user}")).await?;
         let r = s
             .auth
             .authenticate_with_totp(&token, challenge, &b.code.0)
@@ -742,10 +757,17 @@ async fn mfa_enable(
     let p = session::pending(&mut tx, &b.challenge.0, &["mfa_enable"], now).await?;
     tx.commit().await?;
     let p = p.ok_or_else(pending_expired)?;
-    let challenge = match (p.data["member"].as_str(), p.data["challenge"].as_str()) {
-        (Some(m), Some(c)) if m == me.member.as_str() && p.workos_token.is_none() => c,
+    let (challenge, user) = match (
+        p.data["member"].as_str(),
+        p.data["challenge"].as_str(),
+        p.data["user"].as_str(),
+    ) {
+        (Some(m), Some(c), Some(u)) if m == me.member.as_str() && p.workos_token.is_none() => {
+            (c, u)
+        }
         _ => return Err(pending_expired()),
     };
+    ratelimit::charge(&s, &format!("user:{user}")).await?;
     if !s.auth.verify_challenge(challenge, &b.code.0).await? {
         return Err(AuthError::CodeInvalid.into());
     }
@@ -998,6 +1020,8 @@ async fn invite_accept(
     Input(b): Input<Accept>,
 ) -> Result<Response, ApiError> {
     let inv = pending_invitation(&s, &token).await?;
+    // The layer counted the token; another invitation for the same email must not mean new guesses.
+    ratelimit::charge(&s, &ratelimit::email_key(&inv.email)).await?;
     let r = match (b.password, b.name, b.code) {
         (Some(password), Some(name), None) => {
             match s.auth.create_user(&inv.email, &password.0, &name.0).await {
@@ -1131,7 +1155,8 @@ async fn next(s: &ApiState, step: Step) -> Result<Response, ApiError> {
     let (next, kind, token, email, data) = match step {
         Step::Mfa { token, factor } => {
             let challenge = s.auth.challenge_factor(&factor).await?;
-            ("mfa", "mfa", token, None, json!({ "challenge": challenge }))
+            let data = json!({ "challenge": challenge, "factor": factor });
+            ("mfa", "mfa", token, None, data)
         }
         Step::MfaSetup { token, user } => (
             "mfa_setup",

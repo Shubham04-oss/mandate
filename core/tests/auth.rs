@@ -2466,3 +2466,47 @@ async fn personal_operator_only_through_the_narrow_function() {
             .all(|(_, kind, disabled)| kind == "personal" && *disabled)
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn invite_accept_codes_are_limited_per_email() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let invitee = h.user("member");
+    h.fake.update(&invitee.id, |u| u.memberships.clear());
+    let accept = |code: &str| {
+        // A fresh invitation token and IP every time: only the email stays the same.
+        let token = invite_to(&h, &inviter, &invitee.email);
+        auth_post(
+            &format!("/v1/auth/invite/{token}/accept"),
+            &random_ip(),
+            json!({ "code": code }),
+        )
+    };
+    fresh_minute().await;
+    for i in 0..5 {
+        let r = h.app.clone().oneshot(accept("000000")).await.unwrap();
+        assert_eq!(
+            body_json(r).await["error"]["code"],
+            "code_invalid",
+            "attempt {}",
+            i + 1
+        );
+    }
+    let r = h.app.clone().oneshot(accept(GOOD_CODE)).await.unwrap();
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(r.headers().contains_key(header::RETRY_AFTER));
+    assert!(session_cookie(&r).is_none());
+    // `/code/verify` for that email draws on the same bucket.
+    let r = h
+        .app
+        .clone()
+        .oneshot(auth_post(
+            "/v1/auth/code/verify",
+            &random_ip(),
+            json!({ "email": invitee.email.to_uppercase(), "code": GOOD_CODE }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+}
