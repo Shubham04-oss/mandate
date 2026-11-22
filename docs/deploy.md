@@ -124,7 +124,7 @@ openssl genpkey -algorithm ed25519 -out "$d/events.pem"
 put core/assertion-private-key "$(cat "$d/assertion.pem")"
 put eve/assertion-public-key   "$(cat "$d/assertion.pub.pem")"
 put core/event-signing-key     "$(cat "$d/events.pem")"
-openssl pkey -in "$d/events.pem" -pubout   # the mandate.core public key; consumers ship it
+put core/event-public-key      "$(openssl pkey -in "$d/events.pem" -pubout)"
 rm -rf "$d"; unset APP_PW EVE_PW MIGRATOR_PW
 ```
 

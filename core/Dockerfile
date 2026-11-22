@@ -32,6 +32,12 @@ for var in MANDATE_ASSERTION_PRIVATE_KEY MANDATE_EVENT_SIGNING_KEY; do
   fi
   unset "${var}_PEM"
 done
+# The consumers verify mandate.core events with its public key (MANDATE_EVENT_PUBLIC_KEYS).
+if [ -n "${MANDATE_EVENT_PUBLIC_KEY_PEM:-}" ]; then
+  printf '%s\n' "$MANDATE_EVENT_PUBLIC_KEY_PEM" > /run/mandate/event-public-key.pem
+  export MANDATE_EVENT_PUBLIC_KEYS="mandate.core=/run/mandate/event-public-key.pem"
+fi
+unset MANDATE_EVENT_PUBLIC_KEY_PEM
 exec /usr/local/bin/mandate "$@"
 SH
 USER 10001

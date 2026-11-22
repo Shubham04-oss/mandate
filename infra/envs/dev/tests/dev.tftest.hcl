@@ -78,6 +78,10 @@ override_resource {
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/event-signing-key" }
 }
 override_resource {
+  target = aws_secretsmanager_secret.this["core/event-public-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/event-public-key" }
+}
+override_resource {
   target = aws_secretsmanager_secret.this["migrate/database-url"]
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/migrate/database-url" }
 }
@@ -229,7 +233,7 @@ run "secrets_are_containers_under_the_cmk" {
   assert {
     condition = toset(keys(aws_secretsmanager_secret.this)) == toset([
       "core/database-url", "core/workos-api-key", "core/workos-client-id",
-      "core/assertion-private-key", "core/event-signing-key",
+      "core/assertion-private-key", "core/event-signing-key", "core/event-public-key",
       "migrate/database-url", "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key",
     ])
     error_message = "one secret per value a task needs, named by who reads it"
@@ -319,6 +323,13 @@ run "each_task_reads_only_its_own_secrets" {
       for st in jsondecode(aws_iam_role_policy.execution["migrate"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
     ])) == toset([aws_secretsmanager_secret.this["migrate/database-url"].arn])
     error_message = "the migrate task reads only the migration URL"
+  }
+  assert {
+    condition = toset([for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.name]) == toset([
+      "DATABASE_URL", "WORKOS_API_KEY", "WORKOS_CLIENT_ID", "MANDATE_ASSERTION_PRIVATE_KEY_PEM",
+      "MANDATE_EVENT_SIGNING_KEY_PEM", "MANDATE_EVENT_PUBLIC_KEY_PEM",
+    ])
+    error_message = "the core signs events and verifies its own (lane F's MANDATE_EVENT_PUBLIC_KEYS)"
   }
   assert {
     condition     = !strcontains(aws_ecs_task_definition.core.container_definitions, "MANDATE_ENV")

@@ -36,6 +36,7 @@ locals {
     "core/workos-client-id"      = "WORKOS_CLIENT_ID"
     "core/assertion-private-key" = "MANDATE_ASSERTION_PRIVATE_KEY_PEM"
     "core/event-signing-key"     = "MANDATE_EVENT_SIGNING_KEY_PEM"
+    "core/event-public-key"      = "MANDATE_EVENT_PUBLIC_KEY_PEM"
     "migrate/database-url"       = "MANDATE_MIGRATION_DATABASE_URL"
     "eve/database-url"           = "WORKFLOW_POSTGRES_URL"
     "eve/ai-gateway-key"         = "AI_GATEWAY_API_KEY"
