@@ -45,10 +45,18 @@ jobs:
         env:
           REPO: ${{ steps.ecr.outputs.registry }}/mandate-dev/core
         run: |
-          docker build -f core/Dockerfile -t "$REPO:$TAG" .
-          docker build -f core/Dockerfile --target migrate -t "$REPO:migrate-$TAG" .
-          docker push "$REPO:$TAG"
-          docker push "$REPO:migrate-$TAG"
+          set -euo pipefail
+          # Tags are immutable, so a rerun of the same commit reuses what an earlier run pushed.
+          build() {
+            if aws ecr describe-images --repository-name mandate-dev/core --image-ids imageTag="$1" >/dev/null 2>&1; then
+              echo "$1 already pushed"
+              return
+            fi
+            docker build -f core/Dockerfile "${@:2}" -t "$REPO:$1" .
+            docker push "$REPO:$1"
+          }
+          build "$TAG"
+          build "migrate-$TAG" --target migrate
 
       # eve (agents/) lands in its own lane; until then the eve service is left as it is.
       - name: Build and push the eve image
@@ -56,6 +64,11 @@ jobs:
         env:
           REPO: ${{ steps.ecr.outputs.registry }}/mandate-dev/eve
         run: |
+          set -euo pipefail
+          if aws ecr describe-images --repository-name mandate-dev/eve --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "eve image for $TAG already pushed"
+            exit 0
+          fi
           docker build -f agents/Dockerfile -t "$REPO:$TAG" agents
           docker push "$REPO:$TAG"
 
@@ -81,6 +94,13 @@ jobs:
             td="$(render "mandate-dev-$1" "$2")"
             aws ecs update-service --cluster "$CLUSTER" --service "$1" --task-definition "$td" >/dev/null
             aws ecs wait services-stable --cluster "$CLUSTER" --services "$1"
+            # The circuit breaker's rollback also ends stable, on the old revision.
+            live="$(aws ecs describe-services --cluster "$CLUSTER" --services "$1" \
+              --query 'services[0].deployments[0].taskDefinition' --output text)"
+            if [ "$live" != "$td" ]; then
+              echo "::error::$1 runs $live, not $td: the deployment failed and was rolled back"
+              exit 1
+            fi
             echo "$1 is on $td"
           }
 

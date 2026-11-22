@@ -176,7 +176,9 @@ and pushes the images (tagged with the commit), runs the migrate task (migration
 `agents/` exists) and waits for them to be stable.
 
 Each step takes the newest revision of the task definition and swaps in the new image, so after a
-`tofu apply` that changes a task definition, run the workflow again to roll it out.
+`tofu apply` that changes a task definition, run the workflow again to roll it out. A rerun of the
+same commit skips images already pushed (tags are immutable). If the circuit breaker rolls a service
+back, the job fails, naming the revision still running.
 
 ## 10. The web app
 
