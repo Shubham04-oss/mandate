@@ -2,6 +2,7 @@ import { TanStackDevtools } from "@tanstack/react-devtools";
 import { createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { Toaster } from "#/components/ui/sonner.tsx";
+import { motionScript } from "#/lib/preferences.ts";
 import { themeScript } from "#/lib/theme.ts";
 
 import appCss from "../styles.css?url";
@@ -27,7 +28,7 @@ export const Route = createRootRoute({
 			},
 		],
 		// Runs before the first paint, so the page never flashes the other theme.
-		scripts: [{ children: themeScript }],
+		scripts: [{ children: themeScript }, { children: motionScript }],
 	}),
 	shellComponent: RootDocument,
 });

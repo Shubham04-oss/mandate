@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Icon } from "#/components/icons/icon.tsx";
 import { AppLogo } from "#/components/settings/app-logo.tsx";
 import { ConnectKeyDialog } from "#/components/settings/connect-key-dialog.tsx";
+import { SettingsHeader } from "#/components/settings/parts.tsx";
 import { Badge } from "#/components/ui/badge.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import {
@@ -65,16 +66,10 @@ export function ToolsSection() {
 
 	return (
 		<div className="flex flex-col gap-8">
-			<header className="flex flex-col gap-3">
-				<span className="eyebrow">Connections</span>
-				<h2 className="m-0 font-semibold text-[22px] tracking-[-0.016em]">
-					Tools
-				</h2>
-				<p className="m-0 max-w-[560px] text-[13.5px] text-soft-foreground leading-normal">
-					Agents use a tool only with the access its person already has, and
-					only for the people you allow here.
-				</p>
-			</header>
+			<SettingsHeader eyebrow="Connections" title="Tools">
+				Agents use a tool only with the access its person already has, and only
+				for the people you allow here.
+			</SettingsHeader>
 
 			<section aria-labelledby="connected-h" className="flex flex-col gap-2.5">
 				<div className="flex flex-wrap items-center gap-2">

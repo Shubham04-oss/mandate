@@ -1,4 +1,5 @@
 import type { Activity, Approval } from "#/lib/api/index.ts";
+import { type Clock, formatTime } from "#/lib/preferences.ts";
 
 /** How a tool reads in a sentence, for what happened and for what was only tried. */
 const phrases: Record<string, { did: string; tried: string; wants: string }> = {
@@ -34,16 +35,10 @@ export type ActivityRow = {
 	when: string;
 };
 
-const time = (iso: string) =>
-	new Date(iso).toLocaleTimeString([], {
-		hour: "2-digit",
-		minute: "2-digit",
-		hour12: false,
-	});
-
-/** One activity entry as a row on Home's "Recent" panel. */
-export function activityRow(a: Activity): ActivityRow {
+/** One activity entry as a row on Home's "Recent" panel, its time in the person's chosen format. */
+export function activityRow(a: Activity, clock: Clock = "system"): ActivityRow {
 	const p = phrase(a.tool);
+	const time = (iso: string) => formatTime(iso, clock);
 	if (a.decision === "refuse") {
 		return {
 			id: a.id,

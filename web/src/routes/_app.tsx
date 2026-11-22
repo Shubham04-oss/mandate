@@ -6,16 +6,20 @@ import {
 	useRouter,
 } from "@tanstack/react-router";
 import { AppShell } from "#/components/app/app-shell.tsx";
+import {
+	isSettingsSection,
+	type SettingsSection,
+} from "#/components/settings/settings-dialog.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import { ApiError, api } from "#/lib/api/index.ts";
 
-type AppSearch = { settings?: "tools" };
+type AppSearch = { settings?: SettingsSection };
 
 export const Route = createFileRoute("/_app")({
 	// The session cookie belongs to the API host, so only the browser can load this data.
 	ssr: false,
 	validateSearch: (search: Record<string, unknown>): AppSearch =>
-		search.settings === "tools" ? { settings: "tools" } : {},
+		isSettingsSection(search.settings) ? { settings: search.settings } : {},
 	loader: async () => {
 		try {
 			const [me, pending] = await Promise.all([

@@ -90,6 +90,18 @@ the web app assumes for now.
    the Tools pop-up (connections), and activity entries for access that ended.
 10. **Approval `effect`.** The values aren't listed; the app shows a plain description built from
     the tool name and arguments instead.
+11. **No event stream.** Settings → Notifications lets a person turn on desktop notifications in
+    their browser, but the contract has no way for the core to tell the web app that something new
+    needs them (no stream, no polling endpoint for changes). Until there is, only the test
+    notification is sent.
+
+## Settings kept on this device
+
+Settings → Appearance (theme, reduce motion, time format) and Settings → Notifications (desktop
+notifications) belong to the web app, not the core. They are kept in the browser's local storage
+(`mandate.theme`, `mandate.reduce-motion`, `mandate.clock`, `mandate.notify`), so each device keeps
+its own and the core never sees them. Theme and reduce motion are applied in the page head before
+the first paint.
 
 # Getting Started
 

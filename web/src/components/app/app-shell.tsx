@@ -9,7 +9,10 @@ import {
 import { type ReactNode, useState } from "react";
 import { PersonAvatar } from "#/components/auth/parts.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
-import { SettingsDialog } from "#/components/settings/settings-dialog.tsx";
+import {
+	SettingsDialog,
+	type SettingsSection,
+} from "#/components/settings/settings-dialog.tsx";
 import { AvatarGroup } from "#/components/ui/avatar.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import {
@@ -334,14 +337,19 @@ export function AppShell({ children }: { children: ReactNode }) {
 		select: (matches) =>
 			[...matches].reverse().find((m) => m.staticData.title)?.staticData.title,
 	});
-	// Settings is a pop-up kept in the address (?settings=tools), so it survives a reload and Back closes it.
+	// Settings is a pop-up kept in the address (?settings=appearance), so it survives a reload and
+	// Back closes it.
 	const settings = useSearch({ strict: false, select: (s) => s.settings });
 	const navigate = useNavigate();
-	const setSettings = (open: boolean) =>
+	// Moving between sections replaces the entry, so Back still closes Settings in one step.
+	const showSettings = (section: SettingsSection | undefined) =>
 		navigate({
 			to: ".",
-			search: (prev) => ({ ...prev, settings: open ? "tools" : undefined }),
+			search: (prev) => ({ ...prev, settings: section }),
+			replace: settings !== undefined && section !== undefined,
 		});
+	const setSettings = (open: boolean) =>
+		showSettings(open ? "appearance" : undefined);
 
 	return (
 		<TooltipProvider>
@@ -392,7 +400,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 					</main>
 				</div>
 			</div>
-			<SettingsDialog open={settings === "tools"} onOpenChange={setSettings} />
+			<SettingsDialog section={settings} onSection={showSettings} />
 		</TooltipProvider>
 	);
 }

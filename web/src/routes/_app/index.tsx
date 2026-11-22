@@ -27,6 +27,7 @@ import { Kbd } from "#/components/ui/kbd.tsx";
 import { activityRow, handledToday } from "#/lib/activity.ts";
 import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
+import { clock, usePref } from "#/lib/preferences.ts";
 import { sample } from "#/lib/sample.ts";
 
 export const Route = createFileRoute("/_app/")({
@@ -42,6 +43,7 @@ const notWired = (e: FormEvent) => e.preventDefault();
 
 function Home() {
 	const { activity } = Route.useLoaderData();
+	const timeFormat = usePref(clock);
 	const handled = handledToday(activity);
 	return (
 		<div className="home-grid">
@@ -63,7 +65,9 @@ function Home() {
 				</p>
 			</div>
 			<WorkingNow />
-			<Recent rows={activity.slice(0, 3).map(activityRow)} />
+			<Recent
+				rows={activity.slice(0, 3).map((a) => activityRow(a, timeFormat))}
+			/>
 		</div>
 	);
 }
