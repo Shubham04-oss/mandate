@@ -175,7 +175,12 @@ pub trait AuthProvider: Send + Sync {
         redirect_uri: &str,
     ) -> Result<String, AuthError>;
     async fn create_password_reset(&self, email: &str) -> Result<(), AuthError>;
-    async fn confirm_password_reset(&self, token: &str, password: &str) -> Result<(), AuthError>;
+    /// The user whose password was reset.
+    async fn confirm_password_reset(
+        &self,
+        token: &str,
+        password: &str,
+    ) -> Result<AuthUser, AuthError>;
     async fn invitation(&self, token: &str) -> Result<Invitation, AuthError>;
     async fn user(&self, id: &str) -> Result<AuthUser, AuthError>;
     async fn create_user(
@@ -940,17 +945,33 @@ async fn reset(
     State(s): State<Arc<ApiState>>,
     Input(b): Input<Reset>,
 ) -> Result<StatusCode, ApiError> {
-    match s
+    let user = match s
         .auth
         .confirm_password_reset(&b.token.0, &b.password.0)
         .await
     {
-        // ponytail: Mandate sessions outlive a reset (7 days at most); ending them needs the
-        // user's tenants from WorkOS.
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(AuthError::NotFound) => Err(AuthError::CodeInvalid.into()),
-        Err(e) => Err(e.into()),
+        Ok(user) => user,
+        Err(AuthError::NotFound) => return Err(AuthError::CodeInvalid.into()),
+        Err(e) => return Err(e.into()),
+    };
+    end_user_sessions(&s, &user.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ends every Mandate session of this WorkOS user, one tenant transaction at a time (RLS stays on).
+async fn end_user_sessions(s: &ApiState, user: &str) -> Result<(), ApiError> {
+    // Paused memberships too: a session lives as long as its member row, whatever WorkOS says.
+    for m in s.auth.memberships(user).await? {
+        let Some(tenant) = s.store.tenant_for_org(&m.org).await? else {
+            continue;
+        };
+        let mut tx = s.store.begin(&tenant).await?;
+        if let Some(member) = store::member_for_workos_user(&mut tx, user).await? {
+            session::delete_member(&mut tx, &member).await?;
+        }
+        tx.commit().await?;
     }
+    Ok(())
 }
 
 /// A pending invitation, or 404 for anything else (unknown, used, revoked, malformed).
@@ -1664,7 +1685,11 @@ impl AuthProvider for WorkosAuth {
         r.map(|_| ()).map_err(classify)
     }
 
-    async fn confirm_password_reset(&self, token: &str, password: &str) -> Result<(), AuthError> {
+    async fn confirm_password_reset(
+        &self,
+        token: &str,
+        password: &str,
+    ) -> Result<AuthUser, AuthError> {
         let p =
             workos::user_management::ConfirmPasswordResetParams::new(workos::CreatePasswordReset {
                 token: token.into(),
@@ -1675,7 +1700,7 @@ impl AuthProvider for WorkosAuth {
             .user_management()
             .confirm_password_reset(p)
             .await;
-        r.map(|_| ()).map_err(classify)
+        r.map(|r| auth_user(r.user)).map_err(classify)
     }
 
     async fn invitation(&self, token: &str) -> Result<Invitation, AuthError> {

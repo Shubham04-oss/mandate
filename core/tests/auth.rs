@@ -792,13 +792,22 @@ impl AuthProvider for Fake {
         self.by_email(email).map(|_| ()).ok_or(AuthError::NotFound)
     }
 
-    async fn confirm_password_reset(&self, token: &str, password: &str) -> Result<(), AuthError> {
+    async fn confirm_password_reset(
+        &self,
+        token: &str,
+        password: &str,
+    ) -> Result<AuthUser, AuthError> {
         self.call(format!("reset-confirm {token}"));
-        let Some(id) = token.strip_prefix("reset_") else {
-            return Err(AuthError::CodeInvalid);
-        };
-        self.update(id, |u| u.password = password.to_owned());
-        Ok(())
+        let u = token
+            .strip_prefix("reset_")
+            .and_then(|id| self.by_id(id))
+            .ok_or(AuthError::NotFound)?;
+        // WorkOS: a reset also verifies the email.
+        self.update(&u.id, |u| {
+            u.password = password.to_owned();
+            u.verified = true;
+        });
+        Ok(Self::auth_user(&u))
     }
 
     async fn invitation(&self, token: &str) -> Result<Invitation, AuthError> {
@@ -2465,6 +2474,49 @@ async fn personal_operator_only_through_the_narrow_function() {
             .iter()
             .all(|(_, kind, disabled)| kind == "personal" && *disabled)
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn reset_ends_every_session_of_that_user() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let a = signed_in(&h, &u).await;
+    // The same person in a second org; the first membership paused, which a reset still covers.
+    let beta = OrgRef {
+        id: format!("org_{}", Uuid::new_v4().simple()),
+        name: "Beta".into(),
+    };
+    h.fake.orgs.lock().unwrap().push(beta.clone());
+    h.fake.update(&u.id, |u| {
+        u.memberships[0].active = false;
+        u.memberships.push(Membership {
+            org: beta.id.clone(),
+            org_name: beta.name.clone(),
+            role: "member".into(),
+            active: true,
+        });
+    });
+    let b = signed_in(&h, &u).await;
+    assert_ne!(a.split('.').next(), b.split('.').next(), "two tenants");
+    let other = signed_in(&h, &h.user("member")).await;
+    for c in [&a, &b, &other] {
+        assert_eq!(h.get("/v1/me", Some(c)).await.status(), StatusCode::OK);
+    }
+    let r = h
+        .post(
+            "/v1/auth/password/reset",
+            json!({ "token": format!("reset_{}", u.id), "password": "new password 1" }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    for c in [&a, &b] {
+        assert_eq!(
+            h.get("/v1/me", Some(c)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(h.get("/v1/me", Some(&other)).await.status(), StatusCode::OK);
 }
 
 #[tokio::test]
