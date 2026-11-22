@@ -1358,62 +1358,21 @@ async fn code_verify_signs_in() {
     assert_eq!(v["me"]["is_admin"], false);
 }
 
-/// Every log line of this test binary, through one global subscriber: thread-scoped
-/// subscribers can miss events while other tests run in parallel.
-#[derive(Clone, Default)]
-struct Logs(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Logs {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
-    type Writer = Logs;
-    fn make_writer(&'a self) -> Logs {
-        self.clone()
-    }
-}
-
-static LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
-
-impl Logs {
-    fn get() -> &'static Logs {
-        LOGS.get_or_init(|| {
-            let logs = Logs::default();
-            let sub = tracing_subscriber::fmt()
-                .json()
-                .with_writer(logs.clone())
-                .finish();
-            tracing::subscriber::set_global_default(sub).unwrap();
-            logs
-        })
-    }
-
-    /// `(type, member, actor)` of every event published about or by `id`.
-    fn events(&self, id: &str) -> Vec<(String, Option<String>, String)> {
-        let bytes = self.0.lock().unwrap().clone();
-        String::from_utf8_lossy(&bytes)
-            .lines()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .filter(|v| v["fields"]["message"] == "event published")
-            .map(|v| {
-                let f = &v["fields"];
-                let text = |k: &str| f[k].as_str().map(str::to_owned);
-                (
-                    text("event").unwrap(),
-                    text("member"),
-                    text("actor").unwrap(),
-                )
-            })
-            .filter(|(_, member, actor)| member.as_deref() == Some(id) || actor == id)
-            .collect()
-    }
+/// `(type, member, actor_kind, actor_member)` of the tenant's lifecycle events, each with its
+/// outbox row, in publish order.
+async fn lifecycle(
+    store: &Store,
+    t: &TenantId,
+) -> Vec<(String, Option<String>, String, Option<String>)> {
+    let mut tx = store.begin(t).await.unwrap();
+    sqlx::query_as(
+        "select l.type, l.member, l.actor_kind, l.actor_member from lifecycle_log l \
+         join outbox o on o.tenant_id = l.tenant_id and o.id = l.event_id and o.type = l.type \
+         order by o.seq",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap()
 }
 
 fn sign_up_body(email: &str) -> Value {
@@ -1594,7 +1553,6 @@ async fn resend_is_202() {
 #[ignore]
 async fn sign_up_records_org_and_member_created() {
     let h = Harness::new().await;
-    let logs = Logs::get();
     let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
     let v = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
     let r = h
@@ -1603,15 +1561,25 @@ async fn sign_up_records_org_and_member_created() {
             json!({ "pending": v["pending"], "code": GOOD_CODE }),
         )
         .await;
-    let member = body_json(r).await["me"]["person"]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let me = body_json(r).await["me"].clone();
+    let member = me["person"]["id"].as_str().unwrap().to_owned();
+    let tenant = TenantId::parse(me["org"]["id"].as_str().unwrap()).unwrap();
+    let by_member = ("member".to_owned(), Some(member.clone()));
     assert_eq!(
-        logs.events(&member),
+        lifecycle(&h.store, &tenant).await,
         vec![
-            ("organization.created.v1".into(), None, member.clone()),
-            ("member.created.v1".into(), Some(member.clone()), member),
+            (
+                "organization.created.v1".into(),
+                None,
+                by_member.0.clone(),
+                by_member.1.clone()
+            ),
+            (
+                "member.created.v1".into(),
+                Some(member),
+                by_member.0,
+                by_member.1
+            ),
         ]
     );
 }
@@ -1620,25 +1588,24 @@ async fn sign_up_records_org_and_member_created() {
 #[ignore]
 async fn first_sign_in_records_member_created() {
     let h = Harness::new().await;
-    let logs = Logs::get();
     let u = h.user("member");
+    let tenant = tenant_of(&u.memberships[0].org);
     let body = json!({ "email": u.email, "password": u.password });
     let r = h.post("/v1/auth/password", body.clone()).await;
     let member = body_json(r).await["me"]["person"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(
-        logs.events(&member),
-        vec![(
-            "member.created.v1".into(),
-            Some(member.clone()),
-            "system".into()
-        )]
-    );
+    let created = vec![(
+        "member.created.v1".to_owned(),
+        Some(member),
+        "system".to_owned(),
+        None,
+    )];
+    assert_eq!(lifecycle(&h.store, &tenant).await, created);
     // The second sign-in creates nobody.
     h.post("/v1/auth/password", body).await;
-    assert_eq!(logs.events(&member).len(), 1);
+    assert_eq!(lifecycle(&h.store, &tenant).await, created);
 }
 
 /// Signs `u` in by password and returns the session cookie.

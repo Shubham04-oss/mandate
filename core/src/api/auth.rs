@@ -3,6 +3,7 @@
 //! a WorkOS token, and WorkOS's error text never leaves this module.
 use super::session::{self, NewPending, Session};
 use super::{ApiError, ApiState, Input, ratelimit};
+use crate::events;
 use crate::identity::slug;
 use crate::ids::{MemberId, TenantId};
 use crate::store::{self, StoreError, Tx};
@@ -1354,45 +1355,6 @@ pub(crate) async fn me(
         // ponytail: team names arrive with lane C's `teams.name`; the id stands in until then.
         "teams": teams.iter().map(|t| json!({ "id": t, "name": t })).collect::<Vec<_>>(),
     }))
-}
-
-/// ponytail: stands in for lane F's `events::publish` (an outbox row and, for lifecycle events,
-/// a `lifecycle_log` row in the caller's transaction) until it merges; logs the event only.
-pub mod events {
-    use crate::ids::MemberId;
-    use crate::store::{StoreError, Tx};
-
-    pub enum Actor {
-        Member(MemberId),
-        System,
-    }
-
-    pub enum Event {
-        MemberCreated { member: MemberId, actor: Actor },
-        OrganizationCreated { actor: Actor },
-    }
-
-    impl Event {
-        pub fn event_type(&self) -> &'static str {
-            match self {
-                Event::MemberCreated { .. } => "member.created.v1",
-                Event::OrganizationCreated { .. } => "organization.created.v1",
-            }
-        }
-    }
-
-    pub async fn publish(_tx: &mut Tx, event: Event) -> Result<(), StoreError> {
-        let (member, actor) = match &event {
-            Event::MemberCreated { member, actor } => (Some(member.as_str()), actor),
-            Event::OrganizationCreated { actor } => (None, actor),
-        };
-        let actor = match actor {
-            Actor::Member(m) => m.as_str(),
-            Actor::System => "system",
-        };
-        tracing::info!(event = event.event_type(), member, actor, "event published");
-        Ok(())
-    }
 }
 
 /// The production `AuthProvider`: WorkOS's User Management API.
