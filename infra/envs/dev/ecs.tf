@@ -47,8 +47,11 @@ locals {
     AWS_REGION         = var.region
     MANDATE_READ_HOSTS = var.read_hosts
     MANDATE_WEB_ORIGIN = "https://app.${var.domain}"
-    MANDATE_EVE_URL    = "http://eve.${local.internal}:3000"
-    MANDATE_EVENT_BUS  = awscc_eventsv2_event_bus.main.event_bus_arn
+    MANDATE_API_ORIGIN = "https://${local.api_host}"
+    # Safe only because the ALB forwards nothing without Cloudflare's secret origin header (edge.tf).
+    MANDATE_TRUST_CF_IP = "1"
+    MANDATE_EVE_URL     = "http://eve.${local.internal}:3000"
+    MANDATE_EVENT_BUS   = awscc_eventsv2_event_bus.main.event_bus_arn
     # One MANDATE_QUEUE_<NAME> per consumer (lane F's consumer kit).
     MANDATE_QUEUE_AGENT_RESUME = aws_sqs_queue.consumer["agent-resume"].url
     MANDATE_BROWSER_ID         = aws_bedrockagentcore_browser.main.browser_id

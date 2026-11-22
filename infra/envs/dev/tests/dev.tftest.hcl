@@ -278,6 +278,40 @@ run "the_edge_forwards_the_web_api_only" {
   }
 }
 
+run "only_this_zone_reaches_the_core_so_cf_connecting_ip_is_trusted" {
+  command = apply
+
+  assert {
+    condition = one(flatten([
+      for c in aws_lb_listener_rule.api.condition : [for h in c.http_header : h if h.http_header_name == "X-Mandate-Origin-Auth"]
+    ])).values == toset([random_password.origin.result])
+    error_message = "the ALB forwards only requests carrying the secret origin header"
+  }
+  assert {
+    condition     = length(random_password.origin.result) == 48 && !random_password.origin.special
+    error_message = "a 48-character alphanumeric origin secret (ALB header values allow no specials)"
+  }
+  assert {
+    condition = (
+      cloudflare_ruleset.origin_header.phase == "http_request_late_transform"
+      && cloudflare_ruleset.origin_header.rules[0].expression == "(http.host eq \"api.example.test\")"
+      && cloudflare_ruleset.origin_header.rules[0].action_parameters.headers["X-Mandate-Origin-Auth"].value == random_password.origin.result
+    )
+    error_message = "Cloudflare sets the origin header on the API host"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name => e.value
+      if contains(["MANDATE_TRUST_CF_IP", "MANDATE_API_ORIGIN", "MANDATE_WEB_ORIGIN"], e.name)
+      } == {
+      MANDATE_TRUST_CF_IP = "1"
+      MANDATE_API_ORIGIN  = "https://api.example.test"
+      MANDATE_WEB_ORIGIN  = "https://app.example.test"
+    }
+    error_message = "the core trusts CF-Connecting-IP and has both origins, so its web API starts"
+  }
+}
+
 run "eve_is_private_and_reachable_only_from_the_core" {
   command = apply
 

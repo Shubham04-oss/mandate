@@ -9,10 +9,10 @@ What it builds (`infra/envs/dev`, OpenTofu):
 | Piece | What |
 | --- | --- |
 | Network | VPC, two AZs, private subnets behind one regional NAT gateway; endpoints for ECR, logs, Secrets Manager, S3 |
-| Database | Aurora PostgreSQL serverless v2 (scales to zero), TLS forced, KMS-encrypted, RDS-managed master password |
+| Database | Aurora PostgreSQL serverless v2 (min capacity 0, but see Known limits), TLS forced, KMS-encrypted, RDS-managed master password |
 | Secrets | Secrets Manager containers per task; values set by you (step 4), never in tofu state |
 | Services | ECS Fargate: `core` behind an ALB that admits only Cloudflare, `eve` private and reachable only from the core, a one-off `migrate` task |
-| Edge | Cloudflare: `api.<domain>` proxied to the ALB, ACM certificate, WAF rate limit on `/v1/auth/*` |
+| Edge | Cloudflare: `api.<domain>` proxied to the ALB with a secret origin header, ACM certificate, WAF rate limit on `/v1/auth/*` |
 | Events | EventBridge enhanced bus `mandate-dev`; per consumer a FIFO subscriber, SQS FIFO queue and DLQ (`agent-resume` first) |
 | Tools | AgentCore browser (PUBLIC mode, recordings to S3), Bedrock guardrail |
 | CI | IAM role for the deploy workflow through GitHub OIDC (no long-lived keys) |
@@ -74,8 +74,9 @@ tofu apply dev.tfplan
 
 - If the account already has the GitHub OIDC provider, import it first:
   `tofu import -var-file=dev.tfvars aws_iam_openid_connect_provider.github arn:aws:iam::$ACCOUNT:oidc-provider/token.actions.githubusercontent.com`.
-- If the zone already has an `http_ratelimit` ruleset, fold its rules into
-  `cloudflare_ruleset.auth_rate_limit` or import it; a zone has one per phase.
+- If the zone already has an `http_ratelimit` or `http_request_late_transform` ruleset, fold its
+  rules into `cloudflare_ruleset.auth_rate_limit` or `cloudflare_ruleset.origin_header`, or import
+  it; a zone has one ruleset per phase.
 - The services start on the tag `bootstrap`, which does not exist: ECS fails those first
   deployments and stops. The first deploy (step 9) brings them up.
 
@@ -196,11 +197,27 @@ with `AWS_PROFILE=mumbai` and the values from `tofu output`.
 - **Infrastructure:** revert the commit and `tofu apply`. The cluster has deletion protection;
   `tofu destroy` needs it turned off first and leaves a final snapshot.
 
+## Origin secret
+
+Cloudflare adds `X-Mandate-Origin-Auth` to every request for `api.<domain>` (a late transform
+rule), and the ALB forwards only requests carrying it; anything else gets the 404. That keeps out
+the ALB's own address and other Cloudflare zones, and is why the core trusts `CF-Connecting-IP` for
+its per-IP sign-in limit (`MANDATE_TRUST_CF_IP=1`).
+
+- The value is a `random_password` and lives in tofu state: the state bucket must stay private,
+  versioned and encrypted (step 1), and only the owner may read it.
+- Rotate: `tofu apply -var-file=dev.tfvars -replace=random_password.origin` (the same as
+  `tofu taint random_password.origin`, then apply). Cloudflare and the ALB change in the same apply;
+  requests in the seconds between the two get a 404.
+- Upgrade path: per-hostname Authenticated Origin Pulls (mTLS from Cloudflare to the origin), with
+  the ALB verifying the client certificate, so no shared secret is needed.
+
 ## Known limits (dev)
 
 - One NAT gateway and interface endpoints in one AZ: cheap, not highly available.
-- The ALB admits all of Cloudflare's ranges, so another Cloudflare zone could point at it;
-  authenticated origin pulls would close that.
+- The origin is guarded by a shared secret header, not mTLS (see Origin secret).
+- Aurora never auto-pauses: the core's outbox polls the database every second, so budget for
+  0.5 ACU around the clock.
 - eve reaches the core's MCP server, and the core reaches eve, over plain HTTP inside the VPC;
   the bearer assertion is short-lived.
 - Server-sent events: Cloudflare closes a proxied response that sends nothing for 100 s, so the

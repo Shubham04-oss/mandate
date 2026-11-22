@@ -1,5 +1,12 @@
 locals {
-  api_host = "api.${var.domain}"
+  api_host      = "api.${var.domain}"
+  origin_header = "X-Mandate-Origin-Auth"
+}
+
+# Cloudflare sends it and the ALB requires it, so only this zone reaches the core (value in state).
+resource "random_password" "origin" {
+  length  = 48
+  special = false
 }
 
 resource "aws_acm_certificate" "api" {
@@ -85,6 +92,12 @@ resource "aws_lb_listener_rule" "api" {
       values = ["/v1/*", "/healthz"]
     }
   }
+  condition {
+    http_header {
+      http_header_name = local.origin_header
+      values           = [random_password.origin.result]
+    }
+  }
 }
 
 resource "cloudflare_dns_record" "api" {
@@ -113,6 +126,25 @@ resource "cloudflare_ruleset" "auth_rate_limit" {
       period              = 10
       requests_per_period = 20
       mitigation_timeout  = 10
+    }
+  }]
+}
+
+# A zone has one ruleset per phase: if http_request_late_transform exists already, import it.
+resource "cloudflare_ruleset" "origin_header" {
+  zone_id = var.cloudflare_zone_id
+  name    = "${local.name} origin header"
+  kind    = "zone"
+  phase   = "http_request_late_transform"
+  rules = [{
+    description = "Prove to the ALB that the request came through this zone"
+    expression  = "(http.host eq \"${local.api_host}\")"
+    action      = "rewrite"
+    enabled     = true
+    action_parameters = {
+      headers = {
+        (local.origin_header) = { operation = "set", value = random_password.origin.result }
+      }
     }
   }]
 }
