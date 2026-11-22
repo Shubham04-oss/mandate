@@ -52,7 +52,7 @@ impl Tool for Fake {
     }
 }
 
-const WEB: &str = "http://localhost:3000";
+pub const WEB: &str = "http://localhost:3000";
 
 pub struct App {
     router: axum::Router,
@@ -61,7 +61,13 @@ pub struct App {
 
 /// The web API router, exactly as served.
 pub fn app(store: Store) -> App {
-    let state = Arc::new(ApiState {
+    let router = api::router(state(store.clone()));
+    App { router, store }
+}
+
+/// The web API's state, with a catalog whose tools only report their effects.
+pub fn state(store: Store) -> Arc<ApiState> {
+    Arc::new(ApiState {
         store: store.clone(),
         web_origin: WEB.into(),
         // These routes never sign anyone in, so WorkOS is never called.
@@ -80,11 +86,23 @@ pub fn app(store: Store) -> App {
                 Effect::External,
             )),
         ]),
-    });
-    App {
-        router: api::router(state),
-        store,
-    }
+    })
+}
+
+/// A fresh session cookie value: signed in as `m` in `t`, as the browser would be.
+pub async fn sign_in(s: &Store, t: &TenantId, m: &str) -> String {
+    let mut tx = s.begin(t).await.unwrap();
+    let token = session::create(
+        &mut tx,
+        t,
+        &member(m),
+        &Value::Null,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    token
 }
 
 /// One request as `who` (`None`: no session); the JSON body, or `Null` when there is none.
@@ -101,18 +119,8 @@ pub async fn call(
         .header("x-mandate", "1")
         .header(http::header::ORIGIN, WEB);
     if let Some((t, m)) = who {
-        // A fresh session per call: signed in as `m` in `t`, as the browser would be.
-        let mut tx = app.store.begin(t).await.unwrap();
-        let token = session::create(
-            &mut tx,
-            t,
-            &member(m),
-            &Value::Null,
-            OffsetDateTime::now_utc(),
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
+        // A fresh session per call.
+        let token = sign_in(&app.store, t, m).await;
         req = req.header(http::header::COOKIE, format!("mandate_session={token}"));
     }
     let req = match body {

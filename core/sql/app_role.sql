@@ -50,3 +50,9 @@ grant select, insert on lifecycle_log to :"role";
 -- RLS-free consumer bookkeeping: the core only records; `on conflict do nothing` needs no SELECT.
 grant insert on events_inbox, events_quarantine to :"role";
 grant usage on sequence events_quarantine_id_seq to :"role";
+
+-- Conversations (RLS forced). The core moves only a conversation's state, eve session and cursor;
+-- relayed events, approval links and calls are append-only.
+grant select, insert on conversations to :"role";
+grant update (state, eve_session, eve_cursor, updated_at) on conversations to :"role";
+grant select, insert on conversation_events, conversation_approvals, conversation_calls to :"role";

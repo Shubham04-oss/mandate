@@ -292,6 +292,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-bedrockruntime"
+version = "1.157.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1cd120cc746e32388787009be64a82213f1bd7bcdc3e366f3a4e53236b5eaf1"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-sigv4",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http",
+ "http-body-util",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-eventbridgev2"
 version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2417,6 +2445,7 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-bedrockagentcore",
+ "aws-sdk-bedrockruntime",
  "aws-sdk-eventbridgev2",
  "aws-sdk-sqs",
  "aws-sigv4",
@@ -2433,6 +2462,7 @@ dependencies = [
  "http-body-util",
  "jsonwebtoken 12.0.0",
  "qrcode",
+ "reqwest 0.12.28",
  "rmcp",
  "rustls",
  "schemars 1.2.3",
