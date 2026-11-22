@@ -122,6 +122,10 @@ override_resource {
   values = { id = "sg-endpoints" }
 }
 override_resource {
+  target = aws_vpc_endpoint.s3
+  values = { prefix_list_id = "pl-s3" }
+}
+override_resource {
   target = aws_sqs_queue.consumer["agent-resume"]
   values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-agent-resume.fifo" }
 }
@@ -400,6 +404,23 @@ run "api_is_proxied_and_auth_is_rate_limited_at_the_edge" {
   assert {
     condition     = cloudflare_ruleset.auth_rate_limit.phase == "http_ratelimit" && strcontains(cloudflare_ruleset.auth_rate_limit.rules[0].expression, "/v1/auth/")
     error_message = "WAF rate limit on /v1/auth/*"
+  }
+}
+
+run "the_migrate_task_reaches_only_the_endpoints_and_the_database" {
+  command = apply
+
+  assert {
+    condition     = !contains(keys(aws_vpc_security_group_egress_rule.https), "migrate")
+    error_message = "the migrate task has no route to the internet"
+  }
+  assert {
+    condition = (
+      aws_vpc_security_group_egress_rule.migrate_to_endpoints.referenced_security_group_id == aws_security_group.endpoints.id
+      && aws_vpc_security_group_egress_rule.migrate_to_s3.prefix_list_id == aws_vpc_endpoint.s3.prefix_list_id
+      && aws_vpc_security_group_egress_rule.to_db["migrate"].referenced_security_group_id == aws_security_group.db.id
+    )
+    error_message = "migrate: HTTPS to the interface and S3 endpoints, Postgres to the database"
   }
 }
 

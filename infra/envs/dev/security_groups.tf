@@ -92,9 +92,27 @@ locals {
 
 # HTTPS out: AWS APIs through the endpoints, WorkOS and AgentCore (core), the AI gateway (eve).
 resource "aws_vpc_security_group_egress_rule" "https" {
-  for_each          = local.task_security_groups
+  for_each          = { for k, v in local.task_security_groups : k => v if k != "migrate" }
   security_group_id = each.value
   cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+}
+
+# The migrate task talks to nothing on the internet: ECR, logs and secrets through the interface
+# endpoints, image layers through the S3 gateway endpoint.
+resource "aws_vpc_security_group_egress_rule" "migrate_to_endpoints" {
+  security_group_id            = aws_security_group.migrate.id
+  referenced_security_group_id = aws_security_group.endpoints.id
+  ip_protocol                  = "tcp"
+  from_port                    = 443
+  to_port                      = 443
+}
+
+resource "aws_vpc_security_group_egress_rule" "migrate_to_s3" {
+  security_group_id = aws_security_group.migrate.id
+  prefix_list_id    = aws_vpc_endpoint.s3.prefix_list_id
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
