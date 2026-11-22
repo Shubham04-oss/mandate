@@ -65,6 +65,8 @@ not built yet.
 | `MANDATE_BROWSER_ID` | serve | AgentCore browser id; the browser must use PUBLIC network mode |
 | `MANDATE_READ_HOSTS` | serve | Comma-separated hosts a page read may reach without approval |
 | `WORKOS_API_KEY`, `WORKOS_CLIENT_ID` | serve | WorkOS; without them `/v1/assertions` answers 503 and directory sync is off |
+| `MANDATE_WEB_ORIGIN`, `MANDATE_API_ORIGIN` | serve | The web app's origin (the only one CORS and CSRF accept) and this API's public origin (for the SSO callback); with WorkOS set, they turn on the web API under `/v1` |
+| `MANDATE_TRUST_CF_IP` | serve | `1` only behind Cloudflare: sign-in rate limits key on its `CF-Connecting-IP`; otherwise the peer address |
 | `MANDATE_BIND` | serve | Listen address (default `127.0.0.1:8080`) |
 | `MANDATE_POLICY_DIR` | serve | Cedar policies (default `policies`) |
 | `RUST_LOG` | all | Log filter (default `info`) |
