@@ -240,6 +240,17 @@ pub async fn dead_letter(
     Ok(())
 }
 
+/// The member's personal operator (`op-` + a hash of the member id), created if they have none;
+/// a disabled one stays disabled. The app role cannot insert agents: a narrow database function
+/// does it.
+pub async fn ensure_personal_agent(tx: &mut Tx, member: &MemberId) -> Result<(), StoreError> {
+    sqlx::query("select ensure_personal_agent($1)")
+        .bind(member.as_str())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// A person who left: no membership, no grants from or to them, no unspent approval they
 /// asked for or gave, and their personal agent disabled. Others' requests stay: a teammate
 /// can still approve them.
@@ -255,6 +266,7 @@ pub async fn remove_member(tx: &mut Tx, member: &MemberId) -> Result<(), StoreEr
              and ((principal_kind = 'member' and principal_id = $1) or granted_by = $1)"
         ),
         format!("delete from team_members where tenant_id = {t} and member_id = $1"),
+        format!("delete from sessions where tenant_id = {t} and member = $1"),
         format!("delete from members where tenant_id = {t} and id = $1"),
         format!(
             "update agents set disabled = true where tenant_id = {t} and kind = 'personal' and owner_member = $1"
@@ -297,24 +309,33 @@ pub async fn delete_team(tx: &mut Tx, team: &TeamId) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Leaving also drops the unspent approvals the member asked for or gave on the team's agents.
 pub async fn set_team_member(
     tx: &mut Tx,
     team: &TeamId,
     member: &MemberId,
     present: bool,
 ) -> Result<(), StoreError> {
-    let q = if present {
-        "insert into team_members (tenant_id, team_id, member_id) \
-         values (current_setting('mandate.tenant'), $1, $2) on conflict do nothing"
+    let qs: &[&str] = if present {
+        &["insert into team_members (tenant_id, team_id, member_id) \
+           values (current_setting('mandate.tenant'), $1, $2) on conflict do nothing"]
     } else {
-        "delete from team_members where tenant_id = current_setting('mandate.tenant', true) \
-         and team_id = $1 and member_id = $2"
+        &[
+            "delete from team_members where tenant_id = current_setting('mandate.tenant', true) \
+             and team_id = $1 and member_id = $2",
+            "delete from approvals where tenant_id = current_setting('mandate.tenant', true) \
+             and used_at is null and (requested_by = $2 or approved_by = $2) \
+             and agent in (select id from agents where tenant_id = current_setting('mandate.tenant', true) \
+               and owner_team = $1)",
+        ]
     };
-    sqlx::query(q)
-        .bind(team.as_str())
-        .bind(member.as_str())
-        .execute(&mut **tx)
-        .await?;
+    for &q in qs {
+        sqlx::query(q)
+            .bind(team.as_str())
+            .bind(member.as_str())
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
 }
 
@@ -406,7 +427,8 @@ pub async fn live_grant(
 }
 
 /// Single use, and only by the member who asked: the UPDATE spends the row atomically, so
-/// concurrent callers cannot both win. Returns the spent approval and who gave it.
+/// concurrent callers cannot both win. The approver must still be allowed to use the agent
+/// (the `may_use_agent` rule). Returns the spent approval and who gave it.
 pub async fn consume_approval(
     tx: &mut Tx,
     agent: &AgentId,
@@ -417,9 +439,14 @@ pub async fn consume_approval(
 ) -> Result<Option<(Uuid, MemberId)>, StoreError> {
     let r: Option<(Uuid, String)> = sqlx::query_as(
         "update approvals set used_at = $4 where tenant_id = current_setting('mandate.tenant', true) and id = ( \
-           select id from approvals where agent = $1 and tool = $2 and args_hash = $3 and tenant_id = current_setting('mandate.tenant', true) \
-           and requested_by = $5 and approved_by is not null and used_at is null and expires_at > $4 \
-           limit 1 for update skip locked) \
+           select a.id from approvals a where a.agent = $1 and a.tool = $2 and a.args_hash = $3 and a.tenant_id = current_setting('mandate.tenant', true) \
+           and a.requested_by = $5 and a.approved_by is not null and a.used_at is null and a.expires_at > $4 \
+           and exists (select 1 from agents g where g.id = a.agent and not g.disabled \
+             and g.tenant_id = current_setting('mandate.tenant', true) \
+             and (g.owner_member = a.approved_by or exists (select 1 from team_members tm \
+               where tm.tenant_id = current_setting('mandate.tenant', true) \
+               and tm.team_id = g.owner_team and tm.member_id = a.approved_by))) \
+           limit 1 for update of a skip locked) \
          returning id, approved_by",
     )
     .bind(agent.as_str())
@@ -449,7 +476,7 @@ pub async fn request_approval(
     let pending: Option<Uuid> = sqlx::query_scalar(
         "select id from approvals where tenant_id = current_setting('mandate.tenant', true) \
          and agent = $1 and tool = $2 and args_hash = $3 and requested_by = $4 \
-         and approved_by is null and used_at is null and expires_at > $5 limit 1",
+         and approved_by is null and denied_by is null and used_at is null and expires_at > $5 limit 1",
     )
     .bind(agent.as_str())
     .bind(tool.as_str())
@@ -506,26 +533,6 @@ pub async fn approval_details(
         requested_by: MemberId::parse(&requested_by)?,
         expires_at,
     }))
-}
-
-/// Only the owner of a personal agent, or a member of the owning team, may approve; false
-/// (and no change) otherwise, or if the approval is not pending and unexpired.
-pub async fn approve(tx: &mut Tx, approval: Uuid, approver: &MemberId) -> Result<bool, StoreError> {
-    let r = sqlx::query(
-        "update approvals set approved_by = $2 from agents g \
-         where approvals.id = $1 and approvals.tenant_id = current_setting('mandate.tenant', true) and approvals.approved_by is null and approvals.used_at is null \
-         and approvals.expires_at > now() \
-         and g.tenant_id = approvals.tenant_id and g.tenant_id = current_setting('mandate.tenant', true) and g.id = approvals.agent \
-         and (g.owner_member = $2 or exists ( \
-              select 1 from team_members tm where tm.tenant_id = g.tenant_id and tm.tenant_id = current_setting('mandate.tenant', true) \
-              and tm.team_id = g.owner_team and tm.member_id = $2)) \
-         returning approvals.id",
-    )
-    .bind(approval)
-    .bind(approver.as_str())
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(r.is_some())
 }
 
 pub async fn audit(tx: &mut Tx, e: &AuditEntry) -> Result<(), StoreError> {

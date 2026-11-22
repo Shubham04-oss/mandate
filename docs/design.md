@@ -124,7 +124,9 @@ Owns every decision and every credential path. Modes of one binary (`mandate ser
   users are linked to members once, through a WorkOS sign-in.
   *Owner's decision (2026-11-21):* the sign-in UI is Mandate's own, built on WorkOS's headless APIs
   called through the core: an email magic code, and SSO through the customer's identity provider.
-  No passwords in v1 and no custom domain. The web app never calls WorkOS directly.
+  No custom domain. The web app never calls WorkOS directly. *Updated by the owner (2026-11-21):*
+  passwords, password reset and two-step (TOTP) are in v1 too, matching the designed screens; the
+  core passes typed passwords to WorkOS and never stores them.
 - **Policy layers.** Platform policies are Cedar files in the repo, proven by SymCC in CI. Tenant
   settings are data chosen from templates (no raw Cedar in v1) and enter evaluation as entities and
   context. Grants are data, not policy. SymCC proves the platform invariants hold for any grant or

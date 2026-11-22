@@ -90,6 +90,26 @@ fn parse_fields(args: &Value) -> Result<BTreeMap<String, String>, ToolError> {
         .collect()
 }
 
+/// NUL in any key or string would be cut short or rejected by C-string APIs downstream.
+fn reject_nul(v: &Value) -> Result<(), ToolError> {
+    let bad = || {
+        Err(ToolError::InvalidArgs(
+            "arguments must not contain NUL".into(),
+        ))
+    };
+    match v {
+        Value::String(s) if s.contains('\0') => bad(),
+        Value::Array(a) => a.iter().try_for_each(reject_nul),
+        Value::Object(o) => o.iter().try_for_each(|(k, v)| {
+            if k.contains('\0') {
+                return bad();
+            }
+            reject_nul(v)
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// The one host of an already checked URL.
 fn own_host(url: &Url) -> Vec<String> {
     url.host_str().map(str::to_owned).into_iter().collect()
@@ -168,6 +188,7 @@ impl Tool for ReadPage {
         })
     }
     fn validate(&self, args: &Value) -> Result<(), ToolError> {
+        reject_nul(args)?;
         parse_url(args).map(drop)
     }
     async fn call(&self, _: &Assertion, args: Value) -> Result<Value, ToolError> {
@@ -205,6 +226,7 @@ impl Tool for SubmitForm {
         })
     }
     fn validate(&self, args: &Value) -> Result<(), ToolError> {
+        reject_nul(args)?;
         parse_url(args)?;
         parse_fields(args).map(drop)
     }

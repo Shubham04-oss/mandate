@@ -1,6 +1,6 @@
 //! Live tests: need DATABASE_URL (a superuser), run with `--ignored`.
 mod common;
-use common::app_store;
+use common::{admin_pool, app_store};
 use mandate::ids::{AgentId, MemberId, TenantId, ToolId};
 use mandate::policy::Parent;
 use mandate::store::{self, AuditEntry, Store, Tx};
@@ -29,9 +29,17 @@ async fn exec(tx: &mut Tx, t: &TenantId, sql: &'static str, binds: &[&str]) {
     q.execute(&mut **tx).await.unwrap();
 }
 
-async fn personal_agent(tx: &mut Tx, t: &TenantId, a: &str, owner: &str) {
-    exec(
-        tx,
+/// Runs as the superuser: the app role cannot create agents or grants.
+async fn seed(t: &TenantId, sql: &'static str, binds: &[&str]) {
+    let mut q = sqlx::query(sql).bind(t.as_str());
+    for b in binds {
+        q = q.bind(*b);
+    }
+    q.execute(&admin_pool().await).await.unwrap();
+}
+
+async fn personal_agent(t: &TenantId, a: &str, owner: &str) {
+    seed(
         t,
         "insert into agents (tenant_id, id, kind, owner_member) values ($1, $2, 'personal', $3)",
         &[a, owner],
@@ -40,7 +48,6 @@ async fn personal_agent(tx: &mut Tx, t: &TenantId, a: &str, owner: &str) {
 }
 
 async fn grant(
-    tx: &mut Tx,
     t: &TenantId,
     kind: &str,
     who: &str,
@@ -58,7 +65,7 @@ async fn grant(
     .bind(tl)
     .bind(standing)
     .bind(expires)
-    .execute(&mut **tx)
+    .execute(&admin_pool().await)
     .await
     .unwrap();
 }
@@ -68,9 +75,7 @@ async fn grant(
 async fn rows_of_another_tenant_are_invisible() {
     let s = app_store().await;
     let (a, b) = (tenant(), tenant());
-    let mut tx = s.begin(&a).await.unwrap();
-    personal_agent(&mut tx, &a, "bot", "ann").await;
-    tx.commit().await.unwrap();
+    personal_agent(&a, "bot", "ann").await;
 
     let mut tx = s.begin(&b).await.unwrap();
     assert!(
@@ -102,8 +107,8 @@ async fn expired_grant_grants_nothing() {
     let t = tenant();
     let now = OffsetDateTime::now_utc();
     let mut tx = s.begin(&t).await.unwrap();
-    personal_agent(&mut tx, &t, "bot", "ann").await;
-    grant(&mut tx, &t, "agent", "bot", "mail.send", false, now).await;
+    personal_agent(&t, "bot", "ann").await;
+    grant(&t, "agent", "bot", "mail.send", false, now).await;
     let g = store::live_grant(&mut tx, &agent("bot"), &[], &tool("mail.send"), now)
         .await
         .unwrap();
@@ -127,9 +132,8 @@ async fn team_grant_reaches_the_team_bot() {
     let t = tenant();
     let now = OffsetDateTime::now_utc();
     let mut tx = s.begin(&t).await.unwrap();
-    exec(&mut tx, &t, "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'teambot', 'team', 'ops')", &[]).await;
+    seed(&t, "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'teambot', 'team', 'ops')", &[]).await;
     grant(
-        &mut tx,
         &t,
         "team",
         "ops",
@@ -154,7 +158,7 @@ async fn team_grant_reaches_the_team_bot() {
 
 async fn approved(s: &Store, t: &TenantId, now: OffsetDateTime, hash: &[u8; 32]) -> Uuid {
     let mut tx = s.begin(t).await.unwrap();
-    personal_agent(&mut tx, t, "bot", "ann").await;
+    personal_agent(t, "bot", "ann").await;
     let id = store::request_approval(
         &mut tx,
         &agent("bot"),
@@ -166,7 +170,7 @@ async fn approved(s: &Store, t: &TenantId, now: OffsetDateTime, hash: &[u8; 32])
     )
     .await
     .unwrap();
-    assert!(store::approve(&mut tx, id, &member("ann")).await.unwrap());
+    assert!(common::approve(&mut tx, id, &member("ann")).await.unwrap());
     tx.commit().await.unwrap();
     id
 }
@@ -254,8 +258,8 @@ async fn only_the_owner_can_approve() {
     let t = tenant();
     let now = OffsetDateTime::now_utc();
     let mut tx = s.begin(&t).await.unwrap();
-    personal_agent(&mut tx, &t, "bot", "ann").await;
-    exec(&mut tx, &t, "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'teambot', 'team', 'ops')", &[]).await;
+    personal_agent(&t, "bot", "ann").await;
+    seed(&t, "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'teambot', 'team', 'ops')", &[]).await;
     exec(
         &mut tx,
         &t,
@@ -276,12 +280,12 @@ async fn only_the_owner_can_approve() {
     .await
     .unwrap();
     assert!(
-        !store::approve(&mut tx, id, &member("mallory"))
+        !common::approve(&mut tx, id, &member("mallory"))
             .await
             .unwrap()
     );
-    assert!(!store::approve(&mut tx, id, &member("bob")).await.unwrap());
-    assert!(store::approve(&mut tx, id, &member("ann")).await.unwrap());
+    assert!(!common::approve(&mut tx, id, &member("bob")).await.unwrap());
+    assert!(common::approve(&mut tx, id, &member("ann")).await.unwrap());
 
     let tid = store::request_approval(
         &mut tx,
@@ -295,11 +299,11 @@ async fn only_the_owner_can_approve() {
     .await
     .unwrap();
     assert!(
-        !store::approve(&mut tx, tid, &member("mallory"))
+        !common::approve(&mut tx, tid, &member("mallory"))
             .await
             .unwrap()
     );
-    assert!(store::approve(&mut tx, tid, &member("bob")).await.unwrap());
+    assert!(common::approve(&mut tx, tid, &member("bob")).await.unwrap());
 
     // An unapproved or unknown approval is never consumable; expired ones cannot be approved.
     let old = store::request_approval(
@@ -313,9 +317,9 @@ async fn only_the_owner_can_approve() {
     )
     .await
     .unwrap();
-    assert!(!store::approve(&mut tx, old, &member("ann")).await.unwrap());
+    assert!(!common::approve(&mut tx, old, &member("ann")).await.unwrap());
     assert!(
-        !store::approve(&mut tx, Uuid::new_v4(), &member("ann"))
+        !common::approve(&mut tx, Uuid::new_v4(), &member("ann"))
             .await
             .unwrap()
     );
@@ -380,4 +384,93 @@ async fn approval_details_show_the_exact_args_to_the_tenant_only() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn app_role_cannot_insert_agents_or_rewrite_grants() {
+    let s = app_store().await;
+    let t = tenant();
+    // Grants are created (by admins, through the API) and revoked, never rewritten; agents are
+    // created by admins, and personal operators only through `ensure_personal_agent`.
+    for q in [
+        "update grants set expires_at = now() + interval '1 year' where tenant_id = $1",
+        "insert into agents (tenant_id, id, kind, owner_team) values ($1, 'bot', 'team', 'eng')",
+        "insert into agents (tenant_id, id, kind, owner_member) values ($1, 'bot', 'personal', 'ann')",
+    ] {
+        let mut tx = s.begin(&t).await.unwrap();
+        let err = sqlx::query(q)
+            .bind(t.as_str())
+            .execute(&mut *tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("permission denied"), "{q}: {err}");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn leaving_a_team_drops_your_unspent_approvals() {
+    let s = app_store().await;
+    let t = tenant();
+    let now = OffsetDateTime::now_utc();
+    for (id, team) in [("opsbot", "ops"), ("devbot", "dev")] {
+        seed(
+            &t,
+            "insert into agents (tenant_id, id, kind, owner_team) values ($1, $2, 'team', $3)",
+            &[id, team],
+        )
+        .await;
+    }
+    let mut tx = s.begin(&t).await.unwrap();
+    exec(
+        &mut tx,
+        &t,
+        "insert into team_members (tenant_id, team_id, member_id) values ($1, 'ops', 'ann'), ($1, 'ops', 'bob'), ($1, 'dev', 'ann')",
+        &[],
+    )
+    .await;
+    // (agent, requested_by, approved_by, spent)
+    let rows = [
+        ("opsbot", "ann", None, false),        // she asked: dropped
+        ("opsbot", "bob", Some("ann"), false), // she approved: dropped
+        ("opsbot", "bob", None, false),        // not hers: stays
+        ("opsbot", "ann", Some("bob"), true),  // spent, history: stays
+        ("devbot", "ann", None, false),        // another team's agent: stays
+    ];
+    let mut ids = Vec::new();
+    for (i, (a, req, appr, spent)) in rows.iter().enumerate() {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "insert into approvals (tenant_id, id, agent, tool, args, args_hash, requested_by, approved_by, expires_at, used_at) \
+             values ($1, $2, $3, 'mail.send', '{}', $4, $5, $6, $7, $8)",
+        )
+        .bind(t.as_str())
+        .bind(id)
+        .bind(*a)
+        .bind(vec![i as u8; 32])
+        .bind(*req)
+        .bind(*appr)
+        .bind(now + Duration::hours(1))
+        .bind(spent.then_some(now))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    store::set_team_member(&mut tx, &store_team("ops"), &member("ann"), false)
+        .await
+        .unwrap();
+    let mut left: Vec<Uuid> = sqlx::query_scalar("select id from approvals")
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+    left.sort();
+    let mut want = vec![ids[2], ids[3], ids[4]];
+    want.sort();
+    assert_eq!(left, want);
+}
+
+fn store_team(s: &str) -> mandate::ids::TeamId {
+    mandate::ids::TeamId::parse(s).unwrap()
 }
