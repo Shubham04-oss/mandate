@@ -493,6 +493,18 @@ async fn find_pending(
     p.ok_or_else(pending_expired)
 }
 
+/// `find_pending`, spent in the same statement: a double submit gets `pending_expired`.
+async fn take_pending(
+    s: &ApiState,
+    id: &str,
+    kinds: &[&str],
+) -> Result<session::Pending, ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    let p = session::take_pending(&mut tx, id, kinds, OffsetDateTime::now_utc()).await?;
+    tx.commit().await?;
+    p.ok_or_else(pending_expired)
+}
+
 async fn drop_pending(s: &ApiState, id: &str) -> Result<(), ApiError> {
     let mut tx = s.store.begin_untenanted().await?;
     session::delete_pending(&mut tx, id).await?;
@@ -566,8 +578,9 @@ async fn verify_email(
     else {
         return Err(AuthError::CodeInvalid.into());
     };
+    // A wrong code keeps the step; a right one spends it before an org is made.
     let user = s.auth.verify_email(user, &b.code.0).await?;
-    drop_pending(&s, &b.pending.0).await?;
+    take_pending(&s, &b.pending.0, &["sign_up"]).await?;
     create_org(&s, user, org_name).await?.into_json()
 }
 
@@ -840,11 +853,10 @@ async fn sso_finish(s: &ApiState, headers: &HeaderMap, query: &str) -> Result<Si
     if session::named_cookie(headers, session::SSO_COOKIE) != Some(state.as_str()) {
         return Err(ApiError::forbidden());
     }
-    find_pending(s, &state, &["sso"])
+    // Single use, whatever happens next.
+    take_pending(s, &state, &["sso"])
         .await
         .map_err(|_| ApiError::forbidden())?;
-    // Single use, whatever happens next.
-    drop_pending(s, &state).await?;
     match s.auth.authenticate_with_code(&code).await {
         Ok(a) => finish(s, a).await,
         Err(AuthError::Step(step)) => Err(step_error(&step)),

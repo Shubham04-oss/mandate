@@ -300,6 +300,37 @@ pub async fn pending(
     }))
 }
 
+/// Like `pending`, but deletes the step in the same statement: of two concurrent callers, one
+/// gets it and the other `None`.
+pub async fn take_pending(
+    tx: &mut Tx,
+    id: &str,
+    kinds: &[&str],
+    now: OffsetDateTime,
+) -> Result<Option<Pending>, StoreError> {
+    if id.is_empty() || id.len() > MAX_TOKEN_LEN {
+        return Ok(None);
+    }
+    let kinds: Vec<String> = kinds.iter().map(|k| (*k).to_owned()).collect();
+    let row: Option<PendingRow> = sqlx::query_as(
+        "delete from auth_pending \
+         where id_hash = $1 and kind = any($2) and expires_at > $3 \
+         and tenant_id is not distinct from nullif(current_setting('mandate.tenant', true), '') \
+         returning kind, workos_token, email, data",
+    )
+    .bind(hash(id).as_slice())
+    .bind(&kinds)
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|(kind, workos_token, email, data)| Pending {
+        kind,
+        workos_token,
+        email,
+        data: data.0,
+    }))
+}
+
 /// Single use: a finished or superseded step is removed.
 pub async fn delete_pending(tx: &mut Tx, id: &str) -> Result<(), StoreError> {
     sqlx::query("delete from auth_pending where id_hash = $1")

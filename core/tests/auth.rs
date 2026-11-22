@@ -557,6 +557,8 @@ struct Fake {
     sso_codes: Mutex<HashMap<String, String>>,
     invitations: Mutex<HashMap<String, Invitation>>,
     orgs: Mutex<Vec<OrgRef>>,
+    /// When set, `verify_email` waits here: lets a test line up two submits of one step.
+    verify_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl Fake {
@@ -844,6 +846,10 @@ impl AuthProvider for Fake {
 
     async fn verify_email(&self, user: &str, code: &str) -> Result<AuthUser, AuthError> {
         self.call(format!("verify-email {user}"));
+        let barrier = self.verify_barrier.lock().unwrap().clone();
+        if let Some(b) = barrier {
+            b.wait().await;
+        }
         if code != GOOD_CODE {
             return Err(AuthError::CodeInvalid);
         }
@@ -1527,6 +1533,33 @@ async fn verify_email_creates_org_and_admin_member() {
 
 #[tokio::test]
 #[ignore]
+async fn sign_up_step_is_spent_once() {
+    let h = Harness::new().await;
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let v = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
+    // A double submit: both codes check out at WorkOS before either finishes.
+    *h.fake.verify_barrier.lock().unwrap() = Some(Arc::new(tokio::sync::Barrier::new(2)));
+    let body = json!({ "pending": v["pending"], "code": GOOD_CODE });
+    let (a, b) = tokio::join!(
+        h.post("/v1/auth/verify-email", body.clone()),
+        h.post("/v1/auth/verify-email", body)
+    );
+    let mut codes = [a.status(), b.status()];
+    codes.sort();
+    assert_eq!(codes, [StatusCode::OK, StatusCode::BAD_REQUEST]);
+    let orgs = h
+        .fake
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.starts_with("create-org"))
+        .count();
+    assert_eq!(orgs, 1, "one organization");
+}
+
+#[tokio::test]
+#[ignore]
 async fn resend_is_202() {
     let h = Harness::new().await;
     let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
@@ -1974,6 +2007,35 @@ async fn sso_callback_sets_cookie_and_redirects() {
         .iter()
         .any(|v| v.to_str().unwrap().starts_with("mandate_sso=;"));
     assert!(cleared);
+}
+
+#[tokio::test]
+#[ignore]
+async fn sso_state_is_spent_once() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let state = sso_state(&h, &u, "code_ok").await;
+    let go = || {
+        h.app.clone().oneshot(callback(
+            &format!("code=code_ok&state={state}"),
+            Some(&state),
+        ))
+    };
+    let (a, b) = tokio::join!(go(), go());
+    let signed = [a.unwrap(), b.unwrap()]
+        .iter()
+        .filter(|r| session_cookie(r).is_some())
+        .count();
+    assert_eq!(signed, 1);
+    let codes = h
+        .fake
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| *c == "code")
+        .count();
+    assert_eq!(codes, 1, "WorkOS is asked once");
 }
 
 #[tokio::test]
