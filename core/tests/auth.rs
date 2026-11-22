@@ -561,6 +561,8 @@ struct Fake {
     verify_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// When set, `set_password` fails as WorkOS being down would.
     set_password_fails: Mutex<bool>,
+    /// One-shot: the next `set_password` waits at the first barrier (arrived), then the second.
+    set_password_gate: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
 }
 
 impl Fake {
@@ -815,6 +817,11 @@ impl AuthProvider for Fake {
     async fn set_password(&self, user: &str, password: &str) -> Result<(), AuthError> {
         // The id only: a password never goes into the call log.
         self.call(format!("set-password {user}"));
+        let gate = self.set_password_gate.lock().unwrap().take();
+        if let Some((arrived, release)) = gate {
+            arrived.wait().await;
+            release.wait().await;
+        }
         if *self.set_password_fails.lock().unwrap() {
             return Err(AuthError::Upstream("status 500".into()));
         }
@@ -2488,14 +2495,16 @@ async fn personal_operator_only_through_the_narrow_function() {
     );
 }
 
-/// Whether our sign-up still holds an unconfirmed password for this WorkOS user.
-async fn unconfirmed(h: &Harness, user: &str) -> bool {
+/// Our sign-up's row for this WorkOS user: `Some(neutralised)`, or `None` once settled.
+async fn sign_up_row(h: &Harness, user: &str) -> Option<bool> {
     let mut tx = h.store.begin_untenanted().await.unwrap();
-    sqlx::query_scalar("select exists (select 1 from sign_up_passwords where workos_user_id = $1)")
-        .bind(user)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap()
+    sqlx::query_scalar(
+        "select neutralised_at is not null from sign_up_passwords where workos_user_id = $1",
+    )
+    .bind(user)
+    .fetch_optional(&mut *tx)
+    .await
+    .unwrap()
 }
 
 /// The password `sign_up_body` sets: the attacker's, in the pre-hijacking tests.
@@ -2507,7 +2516,7 @@ async fn pre_hijacked(h: &Harness) -> FakeUser {
     let r = h.post("/v1/auth/sign-up", sign_up_body(&email)).await;
     assert_eq!(r.status(), StatusCode::ACCEPTED);
     let u = h.fake.by_email(&email).unwrap();
-    assert!(unconfirmed(h, &u.id).await);
+    assert_eq!(sign_up_row(h, &u.id).await, Some(false));
     u
 }
 
@@ -2543,7 +2552,11 @@ async fn another_sign_in_neutralises_an_unconfirmed_sign_up_password() {
         .await;
     assert_eq!(body_json(r).await["status"], "signed_in");
     assert_neutralised(&h, &victim.id);
-    assert!(!unconfirmed(&h, &victim.id).await);
+    assert_eq!(
+        sign_up_row(&h, &victim.id).await,
+        Some(true),
+        "kept, marked"
+    );
     let r = h
         .post(
             "/v1/auth/password",
@@ -2566,7 +2579,11 @@ async fn magic_code_neutralises_even_without_an_org() {
         .await;
     assert_eq!(body_json(r).await["error"]["code"], "no_access");
     assert_neutralised(&h, &victim.id);
-    assert!(!unconfirmed(&h, &victim.id).await);
+    assert_eq!(
+        sign_up_row(&h, &victim.id).await,
+        Some(true),
+        "kept, marked"
+    );
 }
 
 #[tokio::test]
@@ -2593,7 +2610,11 @@ async fn unconfirmed_sign_up_password_never_signs_in() {
     assert!(session_cookie(&r).is_none());
     assert_eq!(body_json(r).await["error"]["code"], "invalid_credentials");
     assert_neutralised(&h, &victim.id);
-    assert!(!unconfirmed(&h, &victim.id).await);
+    assert_eq!(
+        sign_up_row(&h, &victim.id).await,
+        Some(true),
+        "kept, marked"
+    );
 }
 
 #[tokio::test]
@@ -2612,7 +2633,11 @@ async fn failed_neutralisation_issues_no_session() {
         .await;
     assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
     assert!(session_cookie(&r).is_none());
-    assert!(unconfirmed(&h, &victim.id).await, "still to be neutralised");
+    assert_eq!(
+        sign_up_row(&h, &victim.id).await,
+        Some(false),
+        "still to be neutralised"
+    );
 }
 
 #[tokio::test]
@@ -2629,7 +2654,7 @@ async fn sign_up_verify_confirms_its_password() {
         )
         .await;
     assert_eq!(body_json(r).await["status"], "signed_in");
-    assert!(!unconfirmed(&h, &u.id).await);
+    assert_eq!(sign_up_row(&h, &u.id).await, None);
     let r = h
         .post(
             "/v1/auth/password",
@@ -2657,7 +2682,7 @@ async fn password_and_emailed_code_confirm_a_sign_up_password() {
         )
         .await;
     assert_eq!(body_json(r).await["status"], "signed_in");
-    assert!(!unconfirmed(&h, &u.id).await);
+    assert_eq!(sign_up_row(&h, &u.id).await, None);
     assert!(!h.fake.called("set-password"));
     assert_eq!(h.fake.by_id(&u.id).unwrap().password, SIGN_UP_PASSWORD);
 }
@@ -2675,7 +2700,7 @@ async fn reset_settles_an_unconfirmed_sign_up_password() {
         )
         .await;
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
-    assert!(!unconfirmed(&h, &u.id).await);
+    assert_eq!(sign_up_row(&h, &u.id).await, None);
     // The owner's new password keeps working.
     let org = inviter.memberships[0].clone();
     h.fake.update(&u.id, |u| u.memberships.push(org));
@@ -2695,25 +2720,36 @@ async fn reset_ends_every_session_of_that_user() {
     let h = Harness::new().await;
     let u = h.user("member");
     let a = signed_in(&h, &u).await;
-    // The same person in a second org; the first membership paused, which a reset still covers.
-    let beta = OrgRef {
-        id: format!("org_{}", Uuid::new_v4().simple()),
-        name: "Beta".into(),
-    };
-    h.fake.orgs.lock().unwrap().push(beta.clone());
-    h.fake.update(&u.id, |u| {
-        u.memberships[0].active = false;
-        u.memberships.push(Membership {
-            org: beta.id.clone(),
-            org_name: beta.name.clone(),
-            role: "member".into(),
-            active: true,
+    // The same person in two more orgs, signed into each with only that membership active.
+    let mut cookies = vec![a];
+    for name in ["Beta", "Gamma"] {
+        let org = OrgRef {
+            id: format!("org_{}", Uuid::new_v4().simple()),
+            name: name.into(),
+        };
+        h.fake.orgs.lock().unwrap().push(org.clone());
+        h.fake.update(&u.id, |u| {
+            u.memberships.iter_mut().for_each(|m| m.active = false);
+            u.memberships.push(Membership {
+                org: org.id.clone(),
+                org_name: org.name.clone(),
+                role: "member".into(),
+                active: true,
+            });
         });
+        cookies.push(signed_in(&h, &u).await);
+    }
+    let tenants: std::collections::HashSet<_> = cookies
+        .iter()
+        .map(|c| c.split('.').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(tenants.len(), 3);
+    // WorkOS no longer lists the third org at all; its member row (and session) is still here.
+    h.fake.update(&u.id, |u| {
+        u.memberships.pop();
     });
-    let b = signed_in(&h, &u).await;
-    assert_ne!(a.split('.').next(), b.split('.').next(), "two tenants");
     let other = signed_in(&h, &h.user("member")).await;
-    for c in [&a, &b, &other] {
+    for c in cookies.iter().chain([&other]) {
         assert_eq!(h.get("/v1/me", Some(c)).await.status(), StatusCode::OK);
     }
     let r = h
@@ -2723,7 +2759,7 @@ async fn reset_ends_every_session_of_that_user() {
         )
         .await;
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
-    for c in [&a, &b] {
+    for c in &cookies {
         assert_eq!(
             h.get("/v1/me", Some(c)).await.status(),
             StatusCode::UNAUTHORIZED
@@ -2774,4 +2810,259 @@ async fn invite_accept_codes_are_limited_per_email() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// The victim's org and a verified email, as if they proved it somewhere; the attacker's
+/// password is what WorkOS still holds (its answer raced our scramble).
+fn victim_ready(h: &Harness, inviter: &FakeUser, victim: &FakeUser) {
+    let org = inviter.memberships[0].clone();
+    h.fake.update(&victim.id, |u| {
+        u.verified = true;
+        u.password = SIGN_UP_PASSWORD.into();
+        if u.memberships.is_empty() {
+            u.memberships.push(Membership {
+                role: "member".into(),
+                ..org
+            });
+        }
+    });
+}
+
+#[tokio::test]
+#[ignore]
+async fn password_accepted_after_neutralisation_gets_no_session() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let victim = pre_hijacked(&h).await;
+    let token = invite_to(&h, &inviter, &victim.email);
+    let r = h
+        .post(
+            &format!("/v1/auth/invite/{token}/accept"),
+            json!({ "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    // WorkOS answers the attacker's password as if the scramble had not landed yet.
+    victim_ready(&h, &inviter, &victim);
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": victim.email, "password": SIGN_UP_PASSWORD }),
+        )
+        .await;
+    assert!(session_cookie(&r).is_none());
+    assert_eq!(body_json(r).await["error"]["code"], "invalid_credentials");
+}
+
+#[tokio::test]
+#[ignore]
+async fn password_accepted_during_neutralisation_gets_no_session() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let victim = pre_hijacked(&h).await;
+    let token = invite_to(&h, &inviter, &victim.email);
+    let (arrived, release) = (
+        Arc::new(tokio::sync::Barrier::new(2)),
+        Arc::new(tokio::sync::Barrier::new(2)),
+    );
+    *h.fake.set_password_gate.lock().unwrap() = Some((arrived.clone(), release.clone()));
+    let owner = tokio::spawn(h.app.clone().oneshot(auth_post(
+        &format!("/v1/auth/invite/{token}/accept"),
+        &random_ip(),
+        json!({ "code": GOOD_CODE }),
+    )));
+    // The owner's scramble is in flight; WorkOS still takes the attacker's password.
+    arrived.wait().await;
+    victim_ready(&h, &inviter, &victim);
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": victim.email, "password": SIGN_UP_PASSWORD }),
+        )
+        .await;
+    assert!(session_cookie(&r).is_none());
+    assert_eq!(body_json(r).await["error"]["code"], "invalid_credentials");
+    release.wait().await;
+    let r = owner.await.unwrap().unwrap();
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    assert_eq!(sign_up_row(&h, &victim.id).await, Some(true));
+}
+
+#[tokio::test]
+#[ignore]
+async fn guard_finds_the_row_by_user_not_typed_email() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let victim = pre_hijacked(&h).await;
+    // WorkOS now knows the user by another email than the one sign-up recorded.
+    let renamed = format!("renamed-{}@acme.test", Uuid::new_v4().simple());
+    h.fake.update(&victim.id, |u| u.email = renamed.clone());
+    victim_ready(&h, &inviter, &victim);
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": renamed, "password": SIGN_UP_PASSWORD }),
+        )
+        .await;
+    assert!(session_cookie(&r).is_none());
+    assert_eq!(body_json(r).await["error"]["code"], "invalid_credentials");
+    assert_neutralised(&h, &victim.id);
+}
+
+#[tokio::test]
+#[ignore]
+async fn sign_up_for_an_existing_account_records_nothing() {
+    let h = Harness::new().await;
+    let existing = h.user("member");
+    let r = h
+        .post("/v1/auth/sign-up", sign_up_body(&existing.email))
+        .await;
+    assert_eq!(r.status(), StatusCode::ACCEPTED);
+    let mut tx = h.store.begin_untenanted().await.unwrap();
+    let rows: i64 =
+        sqlx::query_scalar("select count(*) from sign_up_passwords where email = lower($1)")
+            .bind(&existing.email)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn untagged_verify_email_step_leaves_the_row() {
+    let h = Harness::new().await;
+    let inviter = h.user("admin");
+    let victim = pre_hijacked(&h).await;
+    let org = inviter.memberships[0].clone();
+    h.fake.update(&victim.id, |u| u.memberships.push(org));
+    // A verify-email step that no password started (here, after a magic code).
+    h.fake.force(AuthError::Step(Step::VerifyEmail {
+        token: Secret(format!("pat_{}", victim.id)),
+        email: victim.email.clone(),
+        user: Some(victim.id.clone()),
+    }));
+    let r = h
+        .post(
+            "/v1/auth/code/verify",
+            json!({ "email": victim.email, "code": GOOD_CODE }),
+        )
+        .await;
+    let v = body_json(r).await;
+    assert_eq!(v["next"], "verify_email", "{v}");
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": v["pending"], "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    // Not a confirmation of the password: neutralised, and the row stays.
+    assert_neutralised(&h, &victim.id);
+    assert_eq!(sign_up_row(&h, &victim.id).await, Some(true));
+}
+
+#[tokio::test]
+#[ignore]
+async fn verify_email_codes_are_limited_per_email() {
+    let h = Harness::new().await;
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    fresh_minute().await;
+    // Sign-up counts once against the email; then two guesses on its step.
+    let first = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
+    for _ in 0..2 {
+        let r = h
+            .post(
+                "/v1/auth/verify-email",
+                json!({ "pending": first["pending"], "code": "000000" }),
+            )
+            .await;
+        assert_eq!(body_json(r).await["error"]["code"], "code_invalid");
+    }
+    // A second sign-up (4th) gives a fresh step; one guess (5th) is fine, the next is not.
+    let second = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
+    let guess = || {
+        h.post(
+            "/v1/auth/verify-email",
+            json!({ "pending": second["pending"], "code": "000000" }),
+        )
+    };
+    assert_eq!(
+        body_json(guess().await).await["error"]["code"],
+        "code_invalid"
+    );
+    assert_eq!(guess().await.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+#[ignore]
+async fn totp_guesses_are_limited_per_factor_across_steps() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    h.fake.update(&u.id, |u| u.totp = true);
+    fresh_minute().await;
+    let guess = |pending: String| {
+        h.post(
+            "/v1/auth/mfa/verify",
+            json!({ "pending": pending, "code": "000000" }),
+        )
+    };
+    // Three guesses on one step, two on a fresh one: the factor's five.
+    let a = pending_for(&h, &u, "mfa").await;
+    for _ in 0..3 {
+        assert_eq!(
+            body_json(guess(a.clone()).await).await["error"]["code"],
+            "code_invalid"
+        );
+    }
+    let b = pending_for(&h, &u, "mfa").await;
+    for _ in 0..2 {
+        assert_eq!(
+            body_json(guess(b.clone()).await).await["error"]["code"],
+            "code_invalid"
+        );
+    }
+    assert_eq!(guess(b).await.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+#[ignore]
+async fn totp_setup_guesses_are_limited_per_user_across_challenges() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let cookie = signed_in(&h, &u).await;
+    fresh_minute().await;
+    let send = |uri: &str, body: Value| {
+        h.app
+            .clone()
+            .oneshot(with_cookie(auth_post(uri, &h.ip, body), &cookie))
+    };
+    let challenge = || async {
+        let v = body_json(send("/v1/auth/mfa/setup", json!({})).await.unwrap()).await;
+        v["challenge"].as_str().unwrap().to_owned()
+    };
+    let guess = |c: String| {
+        send(
+            "/v1/auth/mfa/enable",
+            json!({ "challenge": c, "code": "000000" }),
+        )
+    };
+    let c1 = challenge().await;
+    for _ in 0..3 {
+        assert_eq!(
+            body_json(guess(c1.clone()).await.unwrap()).await["error"]["code"],
+            "code_invalid"
+        );
+    }
+    let c2 = challenge().await;
+    for _ in 0..2 {
+        assert_eq!(
+            body_json(guess(c2.clone()).await.unwrap()).await["error"]["code"],
+            "code_invalid"
+        );
+    }
+    assert_eq!(
+        guess(c2).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
 }

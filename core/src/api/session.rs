@@ -216,15 +216,6 @@ pub async fn delete(tx: &mut Tx, token: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Ends every session of `member` in the transaction's tenant.
-pub async fn delete_member(tx: &mut Tx, member: &MemberId) -> Result<(), StoreError> {
-    sqlx::query("delete from sessions where tenant_id = current_setting('mandate.tenant', true) and member = $1")
-        .bind(member.as_str())
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
 pub struct NewPending<'a> {
     pub kind: &'static str,
     /// WorkOS's pending authentication token; stays in the database.
