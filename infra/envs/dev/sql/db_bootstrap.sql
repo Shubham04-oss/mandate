@@ -33,13 +33,17 @@ select substring(:'app_url' from '^postgres(?:ql)?://mandate_app:([^@/]+)@') as 
   alter role mandate_eve login password :'eve_pw';
 \endif
 
+-- mandate: only mandate_app (and the master) may connect; app_role.sql grants its table rights.
+revoke all on database mandate from public;
 revoke all on schema public from public;
-revoke connect on database mandate from public;
 grant connect on database mandate to mandate_app;
 
+-- eve: only mandate_eve; it creates its own schemas (workflow, graphile_worker) and tables in public.
 \if :new_eve_db
   create database eve;
 \endif
+revoke all on database eve from public;
+grant connect, temporary, create on database eve to mandate_eve;
 \connect eve
-grant create on database eve to mandate_eve;
+revoke all on schema public from public;
 grant usage, create on schema public to mandate_eve;
