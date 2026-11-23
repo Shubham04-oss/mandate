@@ -1,10 +1,18 @@
--- Run once by the db-bootstrap task (docs/deploy.md step 4) as the master user; safe to rerun.
--- Each role's password is read from its own URL (core/database-url, eve/database-url). The runbook
--- generates hex passwords, so no URL decoding is needed. Nothing here echoes a password.
+-- Run by the db-bootstrap task (docs/deploy.md step 4) as the master user; safe to rerun.
+-- Each role's password comes from its own URL secret and must be lowercase hex, 32+ characters
+-- (the runbook's `openssl rand -hex 24`), so it needs no URL decoding. Nothing here echoes one.
 \getenv app_url APP_DATABASE_URL
 \getenv eve_url EVE_DATABASE_URL
-select substring(:'app_url' from '^postgres(?:ql)?://mandate_app:([^@/]+)@') as app_pw,
-       substring(:'eve_url' from '^postgres(?:ql)?://mandate_eve:([^@/]+)@') as eve_pw,
+\if :{?app_url}
+\else
+  do $$ begin raise exception 'APP_DATABASE_URL (core/database-url) is not set'; end $$;
+\endif
+\if :{?eve_url}
+\else
+  do $$ begin raise exception 'EVE_DATABASE_URL (eve/database-url) is not set'; end $$;
+\endif
+select substring(:'app_url' from '^postgres(?:ql)?://mandate_app:([0-9a-f]{32,})@') as app_pw,
+       substring(:'eve_url' from '^postgres(?:ql)?://mandate_eve:([0-9a-f]{32,})@') as eve_pw,
        not exists (select from pg_roles where rolname = 'mandate_app') as new_app,
        not exists (select from pg_roles where rolname = 'mandate_eve') as new_eve,
        not exists (select from pg_database where datname = 'eve') as new_eve_db
@@ -13,11 +21,11 @@ select substring(:'app_url' from '^postgres(?:ql)?://mandate_app:([^@/]+)@') as 
 -- Fail before any statement that would carry a password the URL did not hold.
 \if :{?app_pw}
 \else
-  do $$ begin raise exception 'core/database-url is not postgres://mandate_app:<password>@...'; end $$;
+  do $$ begin raise exception 'core/database-url is not postgres://mandate_app:<hex password>@...'; end $$;
 \endif
 \if :{?eve_pw}
 \else
-  do $$ begin raise exception 'eve/database-url is not postgres://mandate_eve:<password>@...'; end $$;
+  do $$ begin raise exception 'eve/database-url is not postgres://mandate_eve:<hex password>@...'; end $$;
 \endif
 
 -- A rerun resets each password to what its secret holds (rotation is: put the new URL, rerun).
