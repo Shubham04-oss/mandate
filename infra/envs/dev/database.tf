@@ -19,6 +19,11 @@ resource "aws_db_parameter_group" "main" {
   }
 }
 
+# A full destroy and re-apply gets a new suffix, so the next final snapshot never clashes with this one.
+resource "random_id" "db_final_snapshot" {
+  byte_length = 4
+}
+
 resource "aws_db_instance" "main" {
   identifier     = local.name
   engine         = "postgres"
@@ -43,5 +48,7 @@ resource "aws_db_instance" "main" {
   backup_retention_period       = 7
   deletion_protection           = var.db_deletion_protection
   skip_final_snapshot           = var.db_skip_final_snapshot
-  final_snapshot_identifier     = "${local.name}-final"
+  final_snapshot_identifier     = "${local.name}-final-${random_id.db_final_snapshot.hex}"
+  # Pinned so a change of RDS default CA cannot break verify-full (rds-ca/ holds this root).
+  ca_cert_identifier = "rds-ca-rsa2048-g1"
 }

@@ -32,7 +32,7 @@ locals {
   db_bootstrap_image_digest = "sha256:e80acae3f1109e8e4533618b594918936f2858c63afc7204c4773148a673add8"
   # The RDS root CAs for ap-south-1 (truststore.pki.rds.amazonaws.com); tests pin its SHA-256.
   # Every database client writes it to a file and connects with sslmode=verify-full.
-  rds_ca_pem = file("${path.module}/rds-ca/ap-south-1-bundle.pem")
+  rds_ca_pem = file("${path.module}/rds-ca/ap-south-1-bundle.crt")
   internal   = aws_service_discovery_private_dns_namespace.main.name
   # Secret env names per task. The core entrypoint turns *_PEM values into 0600 files; eve reads
   # MANDATE_ASSERTION_PUBLIC_KEY as PEM text (lane D).
@@ -43,7 +43,6 @@ locals {
     "core/assertion-private-key" = "MANDATE_ASSERTION_PRIVATE_KEY_PEM"
     "core/event-signing-key"     = "MANDATE_EVENT_SIGNING_KEY_PEM"
     "core/event-public-key"      = "MANDATE_EVENT_PUBLIC_KEY_PEM"
-    "migrate/database-url"       = "MANDATE_MIGRATION_DATABASE_URL"
     "eve/database-url"           = "WORKFLOW_POSTGRES_URL"
     "eve/ai-gateway-key"         = "MANDATE_AI_GATEWAY_KEY"
     "eve/assertion-public-key"   = "MANDATE_ASSERTION_PUBLIC_KEY"
@@ -79,7 +78,9 @@ locals {
       name      = task
       essential = true
       image     = "${aws_ecr_repository.this[task == "eve" ? "eve" : "core"].repository_url}:${task == "migrate" ? "migrate-" : ""}${var.image_tag}"
-      secrets   = [for k, arn in local.task_secrets[task] : { name = local.secret_env[k], valueFrom = arn }]
+      # migrate reads the master password live from the RDS-managed secret, so rotation never stales it.
+      secrets = concat([for k, arn in local.task_secrets[task] : { name = local.secret_env[k], valueFrom = arn }],
+      task == "migrate" ? [{ name = "PGPASSWORD", valueFrom = "${local.db_master_secret_arn}:password::" }] : [])
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -140,7 +141,11 @@ resource "aws_ecs_task_definition" "migrate" {
     cpu_architecture        = "X86_64"
   }
   container_definitions = jsonencode([merge(local.container["migrate"], {
-    environment = [{ name = "RDS_CA_PEM", value = local.rds_ca_pem }]
+    environment = [for k, v in {
+      RDS_CA_PEM = local.rds_ca_pem
+      # No password: sqlx and psql take it from PGPASSWORD.
+      MANDATE_MIGRATION_DATABASE_URL = "postgres://${aws_db_instance.main.username}@${aws_db_instance.main.address}:5432/${aws_db_instance.main.db_name}?sslmode=verify-full&sslrootcert=/run/mandate/rds-ca.pem"
+    } : { name = k, value = v }]
   })])
 }
 
@@ -160,6 +165,8 @@ resource "aws_ecs_task_definition" "db_bootstrap" {
   container_definitions = jsonencode([{
     name      = "db-bootstrap"
     essential = true
+    # The image's unprivileged user; /tmp stays writable for the CA file.
+    user = "postgres"
     # Pinned by digest: the official postgres image mirrored into the core repository (deploy.md step 4).
     image   = "${aws_ecr_repository.this["core"].repository_url}@${local.db_bootstrap_image_digest}"
     command = ["sh", "-c", "printf '%s\\n' \"$RDS_CA_PEM\" > /tmp/rds-ca.pem && printf '%s\\n' \"$BOOTSTRAP_SQL\" | psql -v ON_ERROR_STOP=1 -f -"]

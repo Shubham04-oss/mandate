@@ -83,8 +83,8 @@ tofu apply dev.tfplan
 
 ## 4. Database roles
 
-The database is private and has no Data API. Mirror the bootstrap image once, put the three
-database URLs, then run the one-off `db-bootstrap` task in the private subnets: it logs in as the
+The database is private and has no Data API. Mirror the bootstrap image once, put the two role
+URLs, then run the one-off `db-bootstrap` task in the private subnets: it logs in as the
 master user with the RDS-managed secret over `verify-full` TLS, reads each role's password from its
 own URL secret, creates `mandate_app`, `mandate_eve` and the `eve` database, and exits. No password
 is printed, logged or in tofu state; you generate them here and they go straight into Secrets Manager.
@@ -104,22 +104,21 @@ docker buildx imagetools create --tag "$REGISTRY/mandate-dev/core:db-bootstrap-p
 docker buildx imagetools inspect "$REGISTRY/mandate-dev/core:db-bootstrap-postgres-17.12" | grep Digest   # = $DIGEST
 ```
 
-The repository's lifecycle policy keeps the last two `db-bootstrap-*` images apart from the deploy
-images. To move to a newer postgres, update the digest in `ecs.tf`, mirror it under a new tag, and
-`tofu apply`.
+Tags are immutable, so `imagetools create` fails if the tag already exists: if `inspect` shows the
+pinned digest there, the mirror is already done; otherwise use a new tag. The repository's lifecycle
+policy keeps the last two `db-bootstrap-*` images apart from the deploy images. The deploy role can
+push to this repository and so could evict the mirror (a denial of service only: the digest pin
+stops a substitute from running); mirror it again if a pull fails. To move to a newer postgres,
+update the digest in `ecs.tf`, mirror it under a new tag, and `tofu apply`.
 
 ```sh
 put() { aws secretsmanager put-secret-value --secret-id "mandate-dev/$1" --secret-string "$2" >/dev/null; }
 HOST=$(tofu output -raw database_endpoint)
-MASTER=$(tofu output -raw database_master_secret_arn)
-MIGRATOR_PW=$(aws secretsmanager get-secret-value --secret-id "$MASTER" --query SecretString --output text | jq -r .password)
-enc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
-APP_PW=$(openssl rand -hex 24); EVE_PW=$(openssl rand -hex 24)   # hex: the task reads them without URL decoding
+APP_PW=$(openssl rand -hex 24); EVE_PW=$(openssl rand -hex 24)   # required: lowercase hex, 32+ characters
 
 put core/database-url    "postgres://mandate_app:$APP_PW@$HOST:5432/mandate?sslmode=verify-full&sslrootcert=/run/mandate/rds-ca.pem"
 put eve/database-url     "postgres://mandate_eve:$EVE_PW@$HOST:5432/eve?sslmode=verify-full&sslrootcert=/tmp/rds-ca.pem"
-put migrate/database-url "postgres://mandate_migrator:$(enc "$MIGRATOR_PW")@$HOST:5432/mandate?sslmode=verify-full&sslrootcert=/run/mandate/rds-ca.pem"
-unset APP_PW EVE_PW MIGRATOR_PW
+unset APP_PW EVE_PW
 
 TASK=$(aws ecs run-task --cluster mandate-dev --launch-type FARGATE --task-definition mandate-dev-db-bootstrap \
   --network-configuration "$(tofu output -raw db_bootstrap_network_configuration)" \
@@ -133,7 +132,10 @@ aws logs tail /mandate-dev/db-bootstrap --since 1h   # CREATE ROLE, CREATE DATAB
 The SQL is `infra/envs/dev/sql/db_bootstrap.sql`. It is safe to rerun: a rerun resets each role's
 password to what its URL secret holds, so rotating one is `put` a new URL, rerun the task, then
 redeploy the service that uses it. A non-zero exit with nothing in the log usually means the image
-pull failed (not mirrored, or a different digest); `stoppedReason` says why.
+pull failed (not mirrored, or a different digest); `stoppedReason` says why. The task refuses a
+password that is not lowercase hex of 32 or more characters, before any role statement runs.
+A role statement that fails can put its password in the RDS server log (log exports are off, so it
+stays inside RDS); if one fails, fix the cause, `put` a URL with a new password, and rerun.
 
 `mandate_app` gets its privileges from `core/sql/app_role.sql`, which the migrate task re-applies
 after every migration, so a new table never runs without its grants. eve's workflow store (the
@@ -141,7 +143,9 @@ Postgres world: its own types in `public`, plus the `workflow` and `graphile_wor
 in its own database, `eve`, on the same instance. `PUBLIC` has no rights on either database or its
 `public` schema: only `mandate_app` connects to `mandate`, only `mandate_eve` to `eve`.
 The eve image runs the world's migrations (`bootstrap`) before it starts. The migration role is the
-instance's master user (`mandate_migrator`).
+instance's master user (`mandate_migrator`): the migrate task takes its password live from the
+RDS-managed secret (`PGPASSWORD`) and its URL, without a password, from the task definition, so the
+7-day rotation of that secret needs nothing from you.
 
 ## 5. Secrets
 
@@ -164,9 +168,8 @@ put core/event-public-key      "$(openssl pkey -in "$d/events.pem" -pubout)"
 rm -rf "$d"
 ```
 
-If RDS rotates the master password, update `migrate/database-url` the same way (step 4).
 Every database client uses `sslmode=verify-full` against the RDS root CAs for ap-south-1
-(`infra/envs/dev/rds-ca/ap-south-1-bundle.pem`, from truststore.pki.rds.amazonaws.com; the tests pin
+(`infra/envs/dev/rds-ca/ap-south-1-bundle.crt`, from truststore.pki.rds.amazonaws.com; the tests pin
 its SHA-256). The task definitions pass it as `RDS_CA_PEM` and each container writes it to the file
 its URL's `sslrootcert` names (the core and migrate: `/run/mandate/rds-ca.pem`, eve:
 `/tmp/rds-ca.pem`). If RDS adds a new root CA, fetch the bundle again, check it, and update the hash.

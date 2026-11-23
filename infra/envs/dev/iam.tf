@@ -49,7 +49,7 @@ resource "aws_iam_role_policy" "execution" {
       {
         Effect   = "Allow"
         Action   = "secretsmanager:GetSecretValue"
-        Resource = values(local.task_secrets[each.key])
+        Resource = concat(values(local.task_secrets[each.key]), each.key == "migrate" ? [local.db_master_secret_arn] : [])
       },
       {
         Effect    = "Allow"

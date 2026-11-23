@@ -82,10 +82,6 @@ override_resource {
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/event-public-key" }
 }
 override_resource {
-  target = aws_secretsmanager_secret.this["migrate/database-url"]
-  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/migrate/database-url" }
-}
-override_resource {
   target = aws_secretsmanager_secret.this["eve/database-url"]
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/database-url" }
 }
@@ -233,6 +229,10 @@ run "database_is_private_encrypted_and_never_holds_a_password_in_state" {
     error_message = "connections must use TLS"
   }
   assert {
+    condition     = aws_db_instance.main.ca_cert_identifier == "rds-ca-rsa2048-g1"
+    error_message = "the server certificate chains to the RSA2048 G1 root in rds-ca/"
+  }
+  assert {
     condition     = var.db_instance_class == "db.t4g.micro" && aws_db_instance.main.instance_class == var.db_instance_class
     error_message = "dev runs on db.t4g.micro unless the variable says otherwise"
   }
@@ -245,6 +245,10 @@ run "database_is_private_encrypted_and_never_holds_a_password_in_state" {
 run "db_bootstrap_takes_role_passwords_from_secrets_only" {
   command = apply
 
+  assert {
+    condition     = jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].user == "postgres"
+    error_message = "the shell holding the master password does not run as root"
+  }
   assert {
     condition = toset([for s in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].secrets : s.valueFrom]) == toset([
       "${one(aws_db_instance.main.master_user_secret[*].secret_arn)}:password::",
@@ -262,7 +266,7 @@ run "db_bootstrap_takes_role_passwords_from_secrets_only" {
     error_message = "the bootstrap verifies the server certificate and host name"
   }
   assert {
-    condition     = one([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.value if e.name == "RDS_CA_PEM"]) == file("${path.module}/rds-ca/ap-south-1-bundle.pem")
+    condition     = one([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.value if e.name == "RDS_CA_PEM"]) == file("${path.module}/rds-ca/ap-south-1-bundle.crt")
     error_message = "the bootstrap trusts exactly the RDS CA bundle"
   }
   assert {
@@ -275,16 +279,29 @@ run "db_bootstrap_takes_role_passwords_from_secrets_only" {
   }
 }
 
+run "migrate_reads_the_master_password_live" {
+  command = apply
+
+  assert {
+    condition     = [for s in jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].secrets : s if s.name == "PGPASSWORD"] == [{ name = "PGPASSWORD", valueFrom = "${one(aws_db_instance.main.master_user_secret[*].secret_arn)}:password::" }]
+    error_message = "migrate takes the password from the RDS-managed secret, so rotation never stales it"
+  }
+  assert {
+    condition     = one([for e in jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].environment : e.value if e.name == "MANDATE_MIGRATION_DATABASE_URL"]) == "postgres://mandate_migrator@mandate-dev.mock.ap-south-1.rds.amazonaws.com:5432/mandate?sslmode=verify-full&sslrootcert=/run/mandate/rds-ca.pem"
+    error_message = "the migration URL holds no password and verifies the server"
+  }
+}
+
 run "every_database_client_gets_the_pinned_rds_ca" {
   command = apply
 
   assert {
-    condition     = filesha256("${path.module}/rds-ca/ap-south-1-bundle.pem") == "ca4a9dc14e06c3f84274eff3ffed0e5d4d3463141593e1159eb4a0904df6cd74"
+    condition     = filesha256("${path.module}/rds-ca/ap-south-1-bundle.crt") == "ca4a9dc14e06c3f84274eff3ffed0e5d4d3463141593e1159eb4a0904df6cd74"
     error_message = "the RDS CA bundle is the one fetched from truststore.pki.rds.amazonaws.com; re-check before changing the hash"
   }
   assert {
     condition = alltrue([for td in [aws_ecs_task_definition.core, aws_ecs_task_definition.eve, aws_ecs_task_definition.migrate] :
-    one([for e in jsondecode(td.container_definitions)[0].environment : e.value if e.name == "RDS_CA_PEM"]) == file("${path.module}/rds-ca/ap-south-1-bundle.pem")])
+    one([for e in jsondecode(td.container_definitions)[0].environment : e.value if e.name == "RDS_CA_PEM"]) == file("${path.module}/rds-ca/ap-south-1-bundle.crt")])
     error_message = "the core, eve and migrate get the CA their verify-full URLs name"
   }
 }
@@ -305,7 +322,7 @@ run "secrets_are_containers_under_the_cmk" {
     condition = toset(keys(aws_secretsmanager_secret.this)) == toset([
       "core/database-url", "core/workos-api-key", "core/workos-client-id",
       "core/assertion-private-key", "core/event-signing-key", "core/event-public-key",
-      "migrate/database-url", "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key",
+      "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key",
     ])
     error_message = "one secret per value a task needs, named by who reads it"
   }
@@ -426,8 +443,8 @@ run "each_task_reads_only_its_own_secrets" {
   assert {
     condition = toset(flatten([
       for st in jsondecode(aws_iam_role_policy.execution["migrate"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
-    ])) == toset([aws_secretsmanager_secret.this["migrate/database-url"].arn])
-    error_message = "the migrate task reads only the migration URL"
+    ])) == toset([one(aws_db_instance.main.master_user_secret[*].secret_arn)])
+    error_message = "the migrate task reads only the RDS-managed master secret"
   }
   assert {
     condition = toset([for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.name]) == toset([
