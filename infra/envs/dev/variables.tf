@@ -60,6 +60,12 @@ variable "cloudflare_account_id" {
   type = string
 }
 
+# Core and eve on Fargate Spot (about 70% cheaper); false puts them back on on-demand Fargate.
+variable "use_fargate_spot" {
+  type    = bool
+  default = true
+}
+
 # MANDATE_READ_HOSTS: a data-egress allowlist (docs/security.md); list only hosts trusted with data.
 variable "read_hosts" {
   type    = string

@@ -2,6 +2,11 @@ resource "aws_ecs_cluster" "main" {
   name = local.name
 }
 
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+}
+
 resource "aws_cloudwatch_log_group" "this" {
   for_each          = toset(["core", "eve", "migrate", "db-bootstrap"])
   name              = "/${local.name}/${each.key}"
@@ -221,8 +226,12 @@ resource "aws_ecs_service" "core" {
   cluster                = aws_ecs_cluster.main.id
   task_definition        = aws_ecs_task_definition.core.arn
   desired_count          = 1
-  launch_type            = "FARGATE"
   enable_execute_command = false
+  # A Spot interruption only stops the task; the service starts a new one.
+  capacity_provider_strategy {
+    capacity_provider = var.use_fargate_spot ? "FARGATE_SPOT" : "FARGATE"
+    weight            = 1
+  }
   # Public subnets and a public IP instead of a NAT gateway; the security group admits no internet.
   network_configuration {
     subnets          = aws_subnet.public[*].id
@@ -240,6 +249,7 @@ resource "aws_ecs_service" "core" {
   lifecycle {
     ignore_changes = [task_definition]
   }
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
 }
 
 resource "aws_ecs_service" "eve" {
@@ -247,8 +257,12 @@ resource "aws_ecs_service" "eve" {
   cluster                = aws_ecs_cluster.main.id
   task_definition        = aws_ecs_task_definition.eve.arn
   desired_count          = 1
-  launch_type            = "FARGATE"
   enable_execute_command = false
+  # A Spot interruption only stops the task; the service starts a new one.
+  capacity_provider_strategy {
+    capacity_provider = var.use_fargate_spot ? "FARGATE_SPOT" : "FARGATE"
+    weight            = 1
+  }
   # Public subnets and a public IP instead of a NAT gateway; the security group admits no internet.
   network_configuration {
     subnets          = aws_subnet.public[*].id
@@ -265,4 +279,5 @@ resource "aws_ecs_service" "eve" {
   lifecycle {
     ignore_changes = [task_definition]
   }
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
 }

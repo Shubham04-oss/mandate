@@ -480,9 +480,19 @@ run "each_task_reads_only_its_own_secrets" {
   }
 }
 
-run "services_run_in_public_subnets_without_nat" {
+run "services_run_on_spot_in_public_subnets_without_nat" {
   command = apply
 
+  assert {
+    condition = alltrue([for svc in [aws_ecs_service.core, aws_ecs_service.eve] : (
+      length(svc.capacity_provider_strategy) == 1 && one(svc.capacity_provider_strategy).capacity_provider == "FARGATE_SPOT" && one(svc.capacity_provider_strategy).weight == 1
+    )])
+    error_message = "core and eve run on Fargate Spot when use_fargate_spot is true (the default)"
+  }
+  assert {
+    condition     = toset(aws_ecs_cluster_capacity_providers.main.capacity_providers) == toset(["FARGATE", "FARGATE_SPOT"])
+    error_message = "the cluster offers Spot and on-demand Fargate"
+  }
   assert {
     condition = alltrue([for svc in [aws_ecs_service.core, aws_ecs_service.eve] : (
       svc.network_configuration[0].assign_public_ip && toset(svc.network_configuration[0].subnets) == toset(aws_subnet.public[*].id)
@@ -492,6 +502,17 @@ run "services_run_in_public_subnets_without_nat" {
   assert {
     condition     = alltrue([for o in [output.migrate_network_configuration, output.db_bootstrap_network_configuration] : jsondecode(o).awsvpcConfiguration.assignPublicIp == "ENABLED" && toset(jsondecode(o).awsvpcConfiguration.subnets) == toset(aws_subnet.public[*].id)])
     error_message = "the one-off tasks run in the public subnets with a public IP"
+  }
+}
+
+run "spot_can_be_switched_off" {
+  command = plan
+  variables {
+    use_fargate_spot = false
+  }
+  assert {
+    condition     = alltrue([for svc in [aws_ecs_service.core, aws_ecs_service.eve] : one(svc.capacity_provider_strategy).capacity_provider == "FARGATE"])
+    error_message = "use_fargate_spot = false puts the services on on-demand Fargate"
   }
 }
 
