@@ -1,8 +1,8 @@
-import { createGateway } from "ai";
 import { defineAgent } from "eve";
 import { defineDynamic } from "eve/models";
 import { assertionOf, tokenOf } from "#lib/caller.ts";
 import { approvalFor, listTools } from "#lib/core.ts";
+import { gatewayModel } from "#lib/model.ts";
 
 function env(name: string): string {
   const v = process.env[name];
@@ -13,10 +13,11 @@ function env(name: string): string {
 export default defineAgent({
   // Model ids and the gateway come from the environment: nothing here names a provider or model.
   model: defineDynamic(() => ({
-    model: createGateway({
-      baseURL: env("MANDATE_AI_GATEWAY_URL"),
-      apiKey: env("MANDATE_AI_GATEWAY_KEY"),
-    })(env("MANDATE_MODEL_DEFAULT")),
+    model: gatewayModel(
+      env("MANDATE_AI_GATEWAY_URL"),
+      env("MANDATE_AI_GATEWAY_KEY"),
+      env("MANDATE_MODEL_DEFAULT"),
+    ),
     modelContextWindowTokens: Number(process.env.MANDATE_MODEL_CONTEXT_TOKENS ?? 128000),
   })),
   defaultTools: false,

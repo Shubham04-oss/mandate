@@ -43,13 +43,16 @@ variable "read_hosts" {
   default = ""
 }
 
+# MANDATE_AI_GATEWAY_URL: Cloudflare AI Gateway's OpenAI-compatible base; eve appends /chat/completions.
 variable "ai_gateway_url" {
-  type = string
+  type        = string
+  description = "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/compat"
 }
 
 # Model ids are configuration, never code (docs/design.md 8.6).
 variable "model_default" {
-  type = string
+  type        = string
+  description = "MANDATE_MODEL_DEFAULT as the gateway names it, e.g. dynamic/mandate-default"
 }
 
 # Tag of the first task definitions; the deploy workflow registers new revisions per commit.
