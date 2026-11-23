@@ -55,6 +55,11 @@ variable "cloudflare_zone_id" {
   type = string
 }
 
+# The account that owns the zone; the tunnel is an account resource.
+variable "cloudflare_account_id" {
+  type = string
+}
+
 # MANDATE_READ_HOSTS: a data-egress allowlist (docs/security.md); list only hosts trusted with data.
 variable "read_hosts" {
   type    = string

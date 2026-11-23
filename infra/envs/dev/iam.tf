@@ -49,7 +49,7 @@ resource "aws_iam_role_policy" "execution" {
       {
         Effect   = "Allow"
         Action   = "secretsmanager:GetSecretValue"
-        Resource = concat(values(local.task_secrets[each.key]), each.key == "migrate" ? [local.db_master_secret_arn] : [])
+        Resource = concat(values(local.task_secrets[each.key]), lookup(local.execution_extra_secrets, each.key, []))
       },
       {
         Effect    = "Allow"
@@ -63,6 +63,11 @@ resource "aws_iam_role_policy" "execution" {
 
 locals {
   db_master_secret_arn = one(aws_db_instance.main.master_user_secret[*].secret_arn)
+  # migrate takes the master password live; the core's cloudflared sidecar takes the tunnel token.
+  execution_extra_secrets = {
+    migrate = [local.db_master_secret_arn]
+    core    = [aws_secretsmanager_secret.tunnel_token.arn]
+  }
 }
 
 # db-bootstrap pulls its mirrored image from the core repository and reads the master secret and the two URLs.

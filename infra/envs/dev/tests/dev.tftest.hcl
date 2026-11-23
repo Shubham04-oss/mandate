@@ -11,20 +11,8 @@ mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::000000000000:role/mock" }
   }
-  mock_resource "aws_acm_certificate" {
-    defaults = { arn = "arn:aws:acm:ap-south-1:000000000000:certificate/mock" }
-  }
   mock_resource "aws_service_discovery_service" {
     defaults = { arn = "arn:aws:servicediscovery:ap-south-1:000000000000:service/srv-mock" }
-  }
-  mock_resource "aws_lb_target_group" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:targetgroup/mock/0" }
-  }
-  mock_resource "aws_lb_listener" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:listener/app/mock/0/0" }
-  }
-  mock_resource "aws_lb" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:loadbalancer/app/mock/0" }
   }
   mock_resource "aws_s3_bucket" {
     defaults = { bucket = "mandate-dev-recordings-mock", arn = "arn:aws:s3:::mandate-dev-recordings-mock" }
@@ -48,11 +36,11 @@ mock_provider "awscc" {
   }
 }
 mock_provider "cloudflare" {
-  mock_data "cloudflare_ip_ranges" {
-    defaults = {
-      ipv4_cidrs = ["173.245.48.0/20", "103.21.244.0/22"]
-      ipv6_cidrs = ["2400:cb00::/32"]
-    }
+  mock_resource "cloudflare_zero_trust_tunnel_cloudflared" {
+    defaults = { id = "00000000-0000-4000-8000-000000000001" }
+  }
+  mock_data "cloudflare_zero_trust_tunnel_cloudflared_token" {
+    defaults = { token = "mock-tunnel-token" }
   }
 }
 
@@ -102,8 +90,20 @@ override_resource {
   }
 }
 override_resource {
-  target = aws_security_group.alb
-  values = { id = "sg-alb" }
+  target = aws_subnet.public[0]
+  values = { id = "subnet-public-a" }
+}
+override_resource {
+  target = aws_subnet.public[1]
+  values = { id = "subnet-public-b" }
+}
+override_resource {
+  target = aws_subnet.private[0]
+  values = { id = "subnet-private-a" }
+}
+override_resource {
+  target = aws_subnet.private[1]
+  values = { id = "subnet-private-b" }
 }
 override_resource {
   target = aws_security_group.core
@@ -126,12 +126,8 @@ override_resource {
   values = { id = "sg-db-bootstrap" }
 }
 override_resource {
-  target = aws_security_group.endpoints
-  values = { id = "sg-endpoints" }
-}
-override_resource {
-  target = aws_vpc_endpoint.s3
-  values = { prefix_list_id = "pl-s3" }
+  target = aws_secretsmanager_secret.tunnel_token
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token" }
 }
 override_resource {
   target = aws_sqs_queue.consumer["agent-resume"]
@@ -164,13 +160,14 @@ override_resource {
 }
 
 variables {
-  domain             = "example.test"
-  cloudflare_zone_id = "0123456789abcdef0123456789abcdef"
-  ai_gateway_url     = "https://gateway.example.test"
-  model_default      = "model"
+  domain                = "example.test"
+  cloudflare_zone_id    = "0123456789abcdef0123456789abcdef"
+  cloudflare_account_id = "fedcba9876543210fedcba9876543210"
+  ai_gateway_url        = "https://gateway.example.test"
+  model_default         = "model"
 }
 
-run "private_subnets_have_no_public_ips_and_route_through_nat" {
+run "nothing_gives_the_database_a_public_route" {
   command = apply
 
   assert {
@@ -179,11 +176,24 @@ run "private_subnets_have_no_public_ips_and_route_through_nat" {
   }
   assert {
     condition     = length(aws_subnet.private) == 2 && length(aws_subnet.public) == 2
-    error_message = "two AZs: the RDS subnet group and the ALB both need two subnets"
+    error_message = "two AZs: the RDS subnet group needs two subnets"
   }
   assert {
-    condition     = aws_nat_gateway.egress.availability_mode == "regional"
-    error_message = "one regional NAT gateway for egress"
+    condition     = length(aws_route_table.private.route) == 0
+    error_message = "the private route table has no route out of the VPC (no NAT, no internet gateway)"
+  }
+  assert {
+    condition = (
+      toset(aws_db_subnet_group.main.subnet_ids) == toset(aws_subnet.private[*].id)
+      && toset([for a in aws_route_table_association.private : a.subnet_id]) == toset(aws_subnet.private[*].id)
+      && alltrue([for a in aws_route_table_association.private : a.route_table_id == aws_route_table.private.id])
+      && length(setintersection(toset([for a in aws_route_table_association.public : a.subnet_id]), toset(aws_subnet.private[*].id))) == 0
+    )
+    error_message = "the database lives only in the private subnets, which use only the private route table"
+  }
+  assert {
+    condition     = !aws_db_instance.main.publicly_accessible
+    error_message = "the database has no public address"
   }
 }
 
@@ -193,19 +203,6 @@ run "default_security_group_allows_nothing" {
   assert {
     condition     = length(aws_default_security_group.locked.ingress) == 0 && length(aws_default_security_group.locked.egress) == 0
     error_message = "the default security group must have no rules"
-  }
-}
-
-run "endpoints_cover_what_tasks_need_without_nat" {
-  command = apply
-
-  assert {
-    condition     = toset(keys(aws_vpc_endpoint.interface)) == toset(["ecr.api", "ecr.dkr", "logs", "secretsmanager"])
-    error_message = "interface endpoints: ECR, logs, Secrets Manager"
-  }
-  assert {
-    condition     = aws_vpc_endpoint.s3.vpc_endpoint_type == "Gateway"
-    error_message = "S3 (ECR layers) through the free gateway endpoint"
   }
 }
 
@@ -332,60 +329,35 @@ run "secrets_are_containers_under_the_cmk" {
   }
 }
 
-run "only_cloudflare_reaches_the_load_balancer" {
+run "the_tunnel_forwards_the_web_api_only" {
   command = apply
 
   assert {
-    condition     = toset([for r in aws_vpc_security_group_ingress_rule.alb_from_cloudflare : r.cidr_ipv4]) == toset(["173.245.48.0/20", "103.21.244.0/22"])
-    error_message = "the ALB admits Cloudflare's ranges and nothing else"
+    condition = jsonencode([for r in cloudflare_zero_trust_tunnel_cloudflared_config.api.config.ingress : [r.hostname, r.path, r.service]]) == jsonencode([
+      ["api.example.test", "^/(v1/.*|healthz)$", "http://localhost:8080"],
+      [null, null, "http_status:404"],
+    ])
+    error_message = "api.<domain> /v1/* and /healthz go to the core on localhost:8080; anything else is a 404 (the MCP server stays private)"
   }
   assert {
-    condition     = alltrue([for r in aws_vpc_security_group_ingress_rule.alb_from_cloudflare : r.from_port == 443 && r.to_port == 443])
-    error_message = "HTTPS only"
-  }
-  assert {
-    condition     = aws_lb.api.drop_invalid_header_fields
-    error_message = "drop malformed headers at the edge"
+    condition     = cloudflare_zero_trust_tunnel_cloudflared.api.config_src == "cloudflare" && cloudflare_zero_trust_tunnel_cloudflared_config.api.tunnel_id == cloudflare_zero_trust_tunnel_cloudflared.api.id
+    error_message = "a remotely managed tunnel, configured here"
   }
 }
 
-run "the_edge_forwards_the_web_api_only" {
+run "the_core_admits_only_eve_so_cf_connecting_ip_comes_from_the_sidecar" {
   command = apply
 
   assert {
-    condition     = aws_lb_listener.https.default_action[0].type == "fixed-response" && aws_lb_listener.https.default_action[0].fixed_response[0].status_code == "404"
-    error_message = "anything not listed is a 404 at the load balancer (the MCP server stays private)"
+    condition = [
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) :
+      r.referenced_security_group_id if r.security_group_id == aws_security_group.core.id
+    ] == [aws_security_group.eve.id]
+    error_message = "the core's only ingress is eve, by security group; nothing from the internet"
   }
   assert {
-    condition     = toset(flatten([for c in aws_lb_listener_rule.api.condition : [for p in c.path_pattern : p.values]])) == toset(["/v1/*", "/healthz"])
-    error_message = "forward only the web API and the health check"
-  }
-  assert {
-    condition     = toset(flatten([for c in aws_lb_listener_rule.api.condition : [for h in c.host_header : h.values]])) == toset(["api.example.test"])
-    error_message = "only the API host"
-  }
-}
-
-run "only_this_zone_reaches_the_core_so_cf_connecting_ip_is_trusted" {
-  command = apply
-
-  assert {
-    condition = one(flatten([
-      for c in aws_lb_listener_rule.api.condition : [for h in c.http_header : h if h.http_header_name == "X-Mandate-Origin-Auth"]
-    ])).values == toset([random_password.origin.result])
-    error_message = "the ALB forwards only requests carrying the secret origin header"
-  }
-  assert {
-    condition     = length(random_password.origin.result) == 48 && !random_password.origin.special
-    error_message = "a 48-character alphanumeric origin secret (ALB header values allow no specials)"
-  }
-  assert {
-    condition = (
-      cloudflare_ruleset.origin_header.phase == "http_request_late_transform"
-      && cloudflare_ruleset.origin_header.rules[0].expression == "(http.host eq \"api.example.test\")"
-      && cloudflare_ruleset.origin_header.rules[0].action_parameters.headers["X-Mandate-Origin-Auth"].value == random_password.origin.result
-    )
-    error_message = "Cloudflare sets the origin header on the API host"
+    condition     = length(aws_security_group.core.ingress) == 0 && aws_vpc_security_group_ingress_rule.core_from_eve.cidr_ipv4 == null
+    error_message = "no inline or address-based ingress on the core"
   }
   assert {
     condition = {
@@ -400,6 +372,49 @@ run "only_this_zone_reaches_the_core_so_cf_connecting_ip_is_trusted" {
   }
 }
 
+run "cloudflared_runs_beside_the_core_pinned_and_unprivileged" {
+  command = apply
+
+  assert {
+    condition     = [for c in jsondecode(aws_ecs_task_definition.core.container_definitions) : c.name] == ["core", "cloudflared"]
+    error_message = "the core stays first: the deploy workflow swaps containerDefinitions[0]'s image"
+  }
+  assert {
+    condition     = can(regex("^docker\\.io/cloudflare/cloudflared@sha256:[0-9a-f]{64}$", jsondecode(aws_ecs_task_definition.core.container_definitions)[1].image))
+    error_message = "the official cloudflared image, pinned by digest"
+  }
+  assert {
+    condition = (
+      jsondecode(aws_ecs_task_definition.core.container_definitions)[1].user == "65532:65532"
+      && jsondecode(aws_ecs_task_definition.core.container_definitions)[1].command == ["tunnel", "--no-autoupdate", "run"]
+      && jsondecode(aws_ecs_task_definition.core.container_definitions)[1].logConfiguration.options["awslogs-stream-prefix"] == "cloudflared"
+    )
+    error_message = "cloudflared runs non-root, never self-updates, and logs to its own stream"
+  }
+  assert {
+    condition     = jsondecode(aws_ecs_task_definition.core.container_definitions)[1].secrets == [{ name = "TUNNEL_TOKEN", valueFrom = aws_secretsmanager_secret.tunnel_token.arn }]
+    error_message = "the tunnel token arrives as a task secret"
+  }
+  assert {
+    condition     = !contains([for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.valueFrom], aws_secretsmanager_secret.tunnel_token.arn)
+    error_message = "the core container never sees the tunnel token"
+  }
+  assert {
+    condition     = aws_secretsmanager_secret.tunnel_token.kms_key_id == aws_kms_key.main.arn && aws_secretsmanager_secret_version.tunnel_token.secret_string == "mock-tunnel-token"
+    error_message = "the tunnel's own token, under the CMK"
+  }
+  assert {
+    condition = contains(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["core"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ]), aws_secretsmanager_secret.tunnel_token.arn)
+    error_message = "the core's execution role can inject the tunnel token"
+  }
+  assert {
+    condition     = toset([for r in aws_vpc_security_group_egress_rule.core_to_tunnel : "${r.ip_protocol}/${r.from_port}-${r.to_port}"]) == toset(["tcp/7844-7844", "udp/7844-7844"])
+    error_message = "cloudflared reaches Cloudflare's edge on 7844 only"
+  }
+}
+
 run "eve_is_private_and_reachable_only_from_the_core" {
   command = apply
 
@@ -408,8 +423,8 @@ run "eve_is_private_and_reachable_only_from_the_core" {
     error_message = "eve admits the core only"
   }
   assert {
-    condition     = length(aws_ecs_service.eve.load_balancer) == 0 && !aws_ecs_service.eve.network_configuration[0].assign_public_ip
-    error_message = "eve has no load balancer and no public IP"
+    condition     = length(aws_ecs_service.eve.load_balancer) == 0 && length(aws_security_group.eve.ingress) == 0
+    error_message = "eve has no load balancer and no ingress but the core's rule"
   }
   assert {
     condition     = aws_ecs_task_definition.eve.task_role_arn == null
@@ -465,13 +480,24 @@ run "each_task_reads_only_its_own_secrets" {
   }
 }
 
-run "services_take_no_public_ip_and_images_are_immutable" {
+run "services_run_in_public_subnets_without_nat" {
   command = apply
 
   assert {
-    condition     = !aws_ecs_service.core.network_configuration[0].assign_public_ip
-    error_message = "the core is reached through the ALB only"
+    condition = alltrue([for svc in [aws_ecs_service.core, aws_ecs_service.eve] : (
+      svc.network_configuration[0].assign_public_ip && toset(svc.network_configuration[0].subnets) == toset(aws_subnet.public[*].id)
+    )])
+    error_message = "the services egress through their own public IPs, not a NAT gateway"
   }
+  assert {
+    condition     = alltrue([for o in [output.migrate_network_configuration, output.db_bootstrap_network_configuration] : jsondecode(o).awsvpcConfiguration.assignPublicIp == "ENABLED" && toset(jsondecode(o).awsvpcConfiguration.subnets) == toset(aws_subnet.public[*].id)])
+    error_message = "the one-off tasks run in the public subnets with a public IP"
+  }
+}
+
+run "images_are_immutable" {
+  command = apply
+
   assert {
     condition     = alltrue([for r in aws_ecr_repository.this : r.image_tag_mutability == "IMMUTABLE"])
     error_message = "a deployed tag always names the same image"
@@ -482,8 +508,8 @@ run "api_is_proxied_and_auth_is_rate_limited_at_the_edge" {
   command = apply
 
   assert {
-    condition     = cloudflare_dns_record.api.proxied
-    error_message = "the API is proxied by Cloudflare"
+    condition     = cloudflare_dns_record.api.proxied && cloudflare_dns_record.api.type == "CNAME" && cloudflare_dns_record.api.content == "00000000-0000-4000-8000-000000000001.cfargotunnel.com"
+    error_message = "api.<domain> is a proxied CNAME to the tunnel"
   }
   assert {
     condition     = cloudflare_ruleset.auth_rate_limit.phase == "http_ratelimit" && strcontains(cloudflare_ruleset.auth_rate_limit.rules[0].expression, "/v1/auth/")
@@ -491,22 +517,17 @@ run "api_is_proxied_and_auth_is_rate_limited_at_the_edge" {
   }
 }
 
-run "the_one_off_tasks_reach_only_the_endpoints_and_the_database" {
+run "the_one_off_tasks_take_nothing_in_and_reach_https_and_the_database" {
   command = apply
 
   assert {
-    condition     = !contains(keys(aws_vpc_security_group_egress_rule.https), "migrate") && !contains(keys(aws_vpc_security_group_egress_rule.https), "db-bootstrap")
-    error_message = "migrate and db-bootstrap have no route to the internet"
-  }
-  assert {
-    condition = alltrue([for t, sg in { migrate = aws_security_group.migrate.id, "db-bootstrap" = aws_security_group.db_bootstrap.id } : (
-      aws_vpc_security_group_egress_rule.to_endpoints[t].security_group_id == sg
-      && aws_vpc_security_group_egress_rule.to_endpoints[t].referenced_security_group_id == aws_security_group.endpoints.id
-      && aws_vpc_security_group_egress_rule.to_s3[t].security_group_id == sg
-      && aws_vpc_security_group_egress_rule.to_s3[t].prefix_list_id == aws_vpc_endpoint.s3.prefix_list_id
+    condition = alltrue([for t, sg in { migrate = aws_security_group.migrate, "db-bootstrap" = aws_security_group.db_bootstrap } : (
+      length(sg.ingress) == 0
+      && aws_vpc_security_group_egress_rule.https[t].security_group_id == sg.id
+      && aws_vpc_security_group_egress_rule.https[t].from_port == 443 && aws_vpc_security_group_egress_rule.https[t].to_port == 443
       && aws_vpc_security_group_egress_rule.to_db[t].referenced_security_group_id == aws_security_group.db.id
     )])
-    error_message = "HTTPS to the interface and S3 endpoints, Postgres to the database"
+    error_message = "no ingress; HTTPS out (dev trade-off: no endpoints) and Postgres to the database"
   }
 }
 

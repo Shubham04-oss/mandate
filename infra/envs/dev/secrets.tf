@@ -1,5 +1,5 @@
-# Containers only: the owner sets each value with the AWS CLI (docs/deploy.md), so no secret is
-# ever in tofu state. Named by the task that reads it, so each role can be scoped to its own.
+# Containers only: the owner sets each value with the AWS CLI (docs/deploy.md), so none of these
+# is in tofu state. Named by the task that reads it, so each role can be scoped to its own.
 locals {
   secrets = {
     "core/database-url"          = "Postgres URL as the app role (core/sql/app_role.sql)"
@@ -19,4 +19,17 @@ resource "aws_secretsmanager_secret" "this" {
   name        = "${local.name}/${each.key}"
   description = each.value
   kms_key_id  = aws_kms_key.main.arn
+}
+
+# The exception: tofu creates the tunnel, so its token is in state anyway (like the tunnel secret).
+# Only cloudflared reads it; the core container never sees it.
+resource "aws_secretsmanager_secret" "tunnel_token" {
+  name        = "${local.name}/cloudflared/tunnel-token"
+  description = "Cloudflare Tunnel token for the cloudflared sidecar"
+  kms_key_id  = aws_kms_key.main.arn
+}
+
+resource "aws_secretsmanager_secret_version" "tunnel_token" {
+  secret_id     = aws_secretsmanager_secret.tunnel_token.id
+  secret_string = data.cloudflare_zero_trust_tunnel_cloudflared_token.api.token
 }

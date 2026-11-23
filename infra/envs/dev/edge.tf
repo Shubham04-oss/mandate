@@ -1,102 +1,34 @@
 locals {
-  api_host      = "api.${var.domain}"
-  origin_header = "X-Mandate-Origin-Auth"
+  api_host = "api.${var.domain}"
 }
 
-# Cloudflare sends it and the ALB requires it, so only this zone reaches the core (value in state).
-resource "random_password" "origin" {
-  length  = 48
-  special = false
+# A remotely managed tunnel: cloudflared in the core's task dials out to Cloudflare, so nothing
+# listens on the internet. The secret (and so the token) lives in tofu state (docs/deploy.md).
+resource "random_bytes" "tunnel_secret" {
+  length = 32
 }
 
-resource "aws_acm_certificate" "api" {
-  domain_name       = local.api_host
-  validation_method = "DNS"
-  lifecycle {
-    create_before_destroy = true
-  }
+resource "cloudflare_zero_trust_tunnel_cloudflared" "api" {
+  account_id    = var.cloudflare_account_id
+  name          = local.name
+  config_src    = "cloudflare"
+  tunnel_secret = random_bytes.tunnel_secret.base64
 }
 
-resource "cloudflare_dns_record" "api_validation" {
-  for_each = {
-    for o in aws_acm_certificate.api.domain_validation_options : o.domain_name => o
-  }
-  zone_id = var.cloudflare_zone_id
-  name    = trimsuffix(each.value.resource_record_name, ".")
-  type    = each.value.resource_record_type
-  content = trimsuffix(each.value.resource_record_value, ".")
-  ttl     = 60
-  proxied = false
-}
-
-resource "aws_acm_certificate_validation" "api" {
-  certificate_arn         = aws_acm_certificate.api.arn
-  validation_record_fqdns = [for r in cloudflare_dns_record.api_validation : r.name]
-}
-
-resource "aws_lb" "api" {
-  name                       = "${local.name}-api"
-  load_balancer_type         = "application"
-  internal                   = false
-  subnets                    = aws_subnet.public[*].id
-  security_groups            = [aws_security_group.alb.id]
-  drop_invalid_header_fields = true
-  # Server-sent events from /v1/conversations/*/events stay open between messages.
-  idle_timeout = 300
-}
-
-resource "aws_lb_target_group" "core" {
-  name                 = "${local.name}-core"
-  port                 = 8080
-  protocol             = "HTTP"
-  target_type          = "ip"
-  vpc_id               = aws_vpc.main.id
-  deregistration_delay = 30
-  health_check {
-    path    = "/healthz"
-    matcher = "200"
-  }
-}
-
-resource "aws_lb_listener" "https" {
-  load_balancer_arn = aws_lb.api.arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = aws_acm_certificate_validation.api.certificate_arn
-  default_action {
-    type = "fixed-response"
-    fixed_response {
-      content_type = "application/json"
-      status_code  = "404"
-      message_body = jsonencode({ error = { code = "not_found", message = "Not found." } })
-    }
-  }
+data "cloudflare_zero_trust_tunnel_cloudflared_token" "api" {
+  account_id = var.cloudflare_account_id
+  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.api.id
 }
 
 # Only the web API and the health check are public; /mcp is for eve over the private network.
-resource "aws_lb_listener_rule" "api" {
-  listener_arn = aws_lb_listener.https.arn
-  priority     = 10
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.core.arn
-  }
-  condition {
-    host_header {
-      values = [local.api_host]
-    }
-  }
-  condition {
-    path_pattern {
-      values = ["/v1/*", "/healthz"]
-    }
-  }
-  condition {
-    http_header {
-      http_header_name = local.origin_header
-      values           = [random_password.origin.result]
-    }
+resource "cloudflare_zero_trust_tunnel_cloudflared_config" "api" {
+  account_id = var.cloudflare_account_id
+  tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.api.id
+  config = {
+    ingress = [
+      { hostname = local.api_host, path = "^/(v1/.*|healthz)$", service = "http://localhost:8080" },
+      { service = "http_status:404" },
+    ]
   }
 }
 
@@ -104,7 +36,7 @@ resource "cloudflare_dns_record" "api" {
   zone_id = var.cloudflare_zone_id
   name    = local.api_host
   type    = "CNAME"
-  content = aws_lb.api.dns_name
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.api.id}.cfargotunnel.com"
   ttl     = 1
   proxied = true
 }
@@ -126,25 +58,6 @@ resource "cloudflare_ruleset" "auth_rate_limit" {
       period              = 10
       requests_per_period = 20
       mitigation_timeout  = 10
-    }
-  }]
-}
-
-# A zone has one ruleset per phase: if http_request_late_transform exists already, import it.
-resource "cloudflare_ruleset" "origin_header" {
-  zone_id = var.cloudflare_zone_id
-  name    = "${local.name} origin header"
-  kind    = "zone"
-  phase   = "http_request_late_transform"
-  rules = [{
-    description = "Prove to the ALB that the request came through this zone"
-    expression  = "(http.host eq \"${local.api_host}\")"
-    action      = "rewrite"
-    enabled     = true
-    action_parameters = {
-      headers = {
-        (local.origin_header) = { operation = "set", value = random_password.origin.result }
-      }
     }
   }]
 }

@@ -28,6 +28,8 @@ resource "aws_service_discovery_service" "this" {
 }
 
 locals {
+  # cloudflare/cloudflared:2026.10.7, multi-arch index; ECS picks the linux/amd64 image.
+  cloudflared_image = "docker.io/cloudflare/cloudflared@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba"
   # postgres:17-alpine (17.12), linux/amd64 manifest; bump with the mirror step in docs/deploy.md.
   db_bootstrap_image_digest = "sha256:e80acae3f1109e8e4533618b594918936f2858c63afc7204c4773148a673add8"
   # The RDS root CAs for ap-south-1 (truststore.pki.rds.amazonaws.com); tests pin its SHA-256.
@@ -53,7 +55,9 @@ locals {
     MANDATE_READ_HOSTS = var.read_hosts
     MANDATE_WEB_ORIGIN = "https://app.${var.domain}"
     MANDATE_API_ORIGIN = "https://${local.api_host}"
-    # Safe only because the ALB forwards nothing without Cloudflare's secret origin header (edge.tf).
+    # The web API arrives only through cloudflared on localhost, which sets CF-Connecting-IP.
+    # ponytail: eve (untrusted) can reach :8080 directly and forge it to dodge the per-IP sign-in
+    # limit; the per-email limits still hold. Close it with a separate listener for /mcp.
     MANDATE_TRUST_CF_IP = "1"
     MANDATE_EVE_URL     = "http://eve.${local.internal}:3000"
     MANDATE_EVENT_BUS   = awscc_eventsv2_event_bus.main.event_bus_arn
@@ -105,10 +109,27 @@ resource "aws_ecs_task_definition" "core" {
     operating_system_family = "LINUX"
     cpu_architecture        = "X86_64"
   }
+  # The core stays first: the deploy workflow swaps the image of containerDefinitions[0].
   container_definitions = jsonencode([merge(local.container["core"], {
     portMappings = [{ containerPort = 8080, protocol = "tcp" }]
     environment  = [for k, v in local.core_environment : { name = k, value = v }]
-  })])
+    }), {
+    name      = "cloudflared"
+    essential = true
+    image     = local.cloudflared_image
+    # The image's own nonroot user, stated so a retagged image cannot run as root.
+    user    = "65532:65532"
+    command = ["tunnel", "--no-autoupdate", "run"]
+    secrets = [{ name = "TUNNEL_TOKEN", valueFrom = aws_secretsmanager_secret.tunnel_token.arn }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.this["core"].name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "cloudflared"
+      }
+    }
+  }])
 }
 
 resource "aws_ecs_task_definition" "eve" {
@@ -202,15 +223,11 @@ resource "aws_ecs_service" "core" {
   desired_count          = 1
   launch_type            = "FARGATE"
   enable_execute_command = false
+  # Public subnets and a public IP instead of a NAT gateway; the security group admits no internet.
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.core.id]
-    assign_public_ip = false
-  }
-  load_balancer {
-    target_group_arn = aws_lb_target_group.core.arn
-    container_name   = "core"
-    container_port   = 8080
+    assign_public_ip = true
   }
   service_registries {
     registry_arn = aws_service_discovery_service.this["core"].arn
@@ -223,7 +240,6 @@ resource "aws_ecs_service" "core" {
   lifecycle {
     ignore_changes = [task_definition]
   }
-  depends_on = [aws_lb_listener.https]
 }
 
 resource "aws_ecs_service" "eve" {
@@ -233,10 +249,11 @@ resource "aws_ecs_service" "eve" {
   desired_count          = 1
   launch_type            = "FARGATE"
   enable_execute_command = false
+  # Public subnets and a public IP instead of a NAT gateway; the security group admits no internet.
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.eve.id]
-    assign_public_ip = false
+    assign_public_ip = true
   }
   service_registries {
     registry_arn = aws_service_discovery_service.this["eve"].arn

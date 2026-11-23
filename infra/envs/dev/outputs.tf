@@ -1,4 +1,5 @@
 # Values the runbook (docs/deploy.md) and the deploy workflow's repository variables need.
+# The one-off tasks run like the services: public subnets and a public IP, no NAT.
 output "deploy_role_arn" {
   value = aws_iam_role.deploy.arn
 }
@@ -7,9 +8,9 @@ output "migrate_network_configuration" {
   description = "Value for the MANDATE_MIGRATE_NETWORK repository variable"
   value = jsonencode({
     awsvpcConfiguration = {
-      subnets        = aws_subnet.private[*].id
+      subnets        = aws_subnet.public[*].id
       securityGroups = [aws_security_group.migrate.id]
-      assignPublicIp = "DISABLED"
+      assignPublicIp = "ENABLED"
     }
   })
 }
@@ -18,9 +19,9 @@ output "db_bootstrap_network_configuration" {
   description = "--network-configuration for the one-off db-bootstrap task (docs/deploy.md step 4)"
   value = jsonencode({
     awsvpcConfiguration = {
-      subnets        = aws_subnet.private[*].id
+      subnets        = aws_subnet.public[*].id
       securityGroups = [aws_security_group.db_bootstrap.id]
-      assignPublicIp = "DISABLED"
+      assignPublicIp = "ENABLED"
     }
   })
 }

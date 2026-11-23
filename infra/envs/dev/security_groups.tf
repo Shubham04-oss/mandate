@@ -1,43 +1,12 @@
-# Every rule names its peer; egress is explicit so a task reaches only what it uses.
-data "cloudflare_ip_ranges" "this" {}
-
-resource "aws_security_group" "alb" {
-  name        = "${local.name}-alb"
-  description = "API load balancer: HTTPS from Cloudflare only"
-  vpc_id      = aws_vpc.main.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "alb_from_cloudflare" {
-  for_each          = toset(data.cloudflare_ip_ranges.this.ipv4_cidrs)
-  security_group_id = aws_security_group.alb.id
-  cidr_ipv4         = each.key
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-}
-
-resource "aws_vpc_security_group_egress_rule" "alb_to_core" {
-  security_group_id            = aws_security_group.alb.id
-  referenced_security_group_id = aws_security_group.core.id
-  ip_protocol                  = "tcp"
-  from_port                    = 8080
-  to_port                      = 8080
-}
-
+# Every rule names its peer; egress is explicit so a task reaches only what it uses. The tasks have
+# public IPs (no NAT), so these groups are their only inbound guard: none admits the internet.
 resource "aws_security_group" "core" {
   name        = "${local.name}-core"
-  description = "The core: the ALB (web API) and eve (MCP) in; HTTPS, Postgres and eve out"
+  description = "The core: eve (MCP) in; HTTPS, the tunnel, Postgres and eve out"
   vpc_id      = aws_vpc.main.id
 }
 
-resource "aws_vpc_security_group_ingress_rule" "core_from_alb" {
-  security_group_id            = aws_security_group.core.id
-  referenced_security_group_id = aws_security_group.alb.id
-  ip_protocol                  = "tcp"
-  from_port                    = 8080
-  to_port                      = 8080
-}
-
+# The web API arrives through cloudflared on localhost, so eve is the only network peer.
 resource "aws_vpc_security_group_ingress_rule" "core_from_eve" {
   security_group_id            = aws_security_group.core.id
   referenced_security_group_id = aws_security_group.eve.id
@@ -52,6 +21,16 @@ resource "aws_vpc_security_group_egress_rule" "core_to_eve" {
   ip_protocol                  = "tcp"
   from_port                    = 3000
   to_port                      = 3000
+}
+
+# cloudflared dials Cloudflare's edge on 7844 (QUIC over UDP, falling back to HTTP/2 over TCP).
+resource "aws_vpc_security_group_egress_rule" "core_to_tunnel" {
+  for_each          = toset(["tcp", "udp"])
+  security_group_id = aws_security_group.core.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = each.key
+  from_port         = 7844
+  to_port           = 7844
 }
 
 resource "aws_security_group" "eve" {
@@ -84,7 +63,7 @@ resource "aws_security_group" "migrate" {
 
 resource "aws_security_group" "db_bootstrap" {
   name        = "${local.name}-db-bootstrap"
-  description = "The one-off db-bootstrap task: nothing in; HTTPS to the endpoints and Postgres out"
+  description = "The one-off db-bootstrap task: nothing in; HTTPS and Postgres out"
   vpc_id      = aws_vpc.main.id
 }
 
@@ -95,48 +74,18 @@ locals {
     migrate        = aws_security_group.migrate.id
     "db-bootstrap" = aws_security_group.db_bootstrap.id
   }
-  # One-off tasks that touch the database never reach the internet.
-  endpoint_only_tasks = ["migrate", "db-bootstrap"]
 }
 
-# HTTPS out: AWS APIs through the endpoints, WorkOS and AgentCore (core), the AI gateway (eve).
+# HTTPS out over the public IP: AWS APIs (ECR, logs, Secrets Manager) for every task, WorkOS and
+# AgentCore (core), the AI gateway (eve). ponytail: the one-off tasks get internet egress too, the
+# price of no NAT and no endpoints; fine for dev, endpoints again if prod needs them sealed.
 resource "aws_vpc_security_group_egress_rule" "https" {
-  for_each          = { for k, v in local.task_security_groups : k => v if !contains(local.endpoint_only_tasks, k) }
+  for_each          = local.task_security_groups
   security_group_id = each.value
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
-}
-
-# The one-off tasks talk to nothing on the internet: ECR, logs and secrets through the interface
-# endpoints, image layers through the S3 gateway endpoint.
-resource "aws_vpc_security_group_egress_rule" "to_endpoints" {
-  for_each                     = toset(local.endpoint_only_tasks)
-  security_group_id            = local.task_security_groups[each.key]
-  referenced_security_group_id = aws_security_group.endpoints.id
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-}
-
-moved {
-  from = aws_vpc_security_group_egress_rule.migrate_to_endpoints
-  to   = aws_vpc_security_group_egress_rule.to_endpoints["migrate"]
-}
-
-resource "aws_vpc_security_group_egress_rule" "to_s3" {
-  for_each          = toset(local.endpoint_only_tasks)
-  security_group_id = local.task_security_groups[each.key]
-  prefix_list_id    = aws_vpc_endpoint.s3.prefix_list_id
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-}
-
-moved {
-  from = aws_vpc_security_group_egress_rule.migrate_to_s3
-  to   = aws_vpc_security_group_egress_rule.to_s3["migrate"]
 }
 
 resource "aws_vpc_security_group_egress_rule" "to_db" {
