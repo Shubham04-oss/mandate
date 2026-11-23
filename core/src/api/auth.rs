@@ -175,7 +175,14 @@ pub trait AuthProvider: Send + Sync {
         redirect_uri: &str,
     ) -> Result<String, AuthError>;
     async fn create_password_reset(&self, email: &str) -> Result<(), AuthError>;
-    async fn confirm_password_reset(&self, token: &str, password: &str) -> Result<(), AuthError>;
+    /// The user whose password was reset.
+    async fn confirm_password_reset(
+        &self,
+        token: &str,
+        password: &str,
+    ) -> Result<AuthUser, AuthError>;
+    /// Replaces the user's password (used only to neutralise an unconfirmed sign-up password).
+    async fn set_password(&self, user: &str, password: &str) -> Result<(), AuthError>;
     async fn invitation(&self, token: &str) -> Result<Invitation, AuthError>;
     async fn user(&self, id: &str) -> Result<AuthUser, AuthError>;
     async fn create_user(
@@ -422,7 +429,7 @@ async fn code_verify(
         .auth
         .authenticate_with_magic_auth(b.email.as_str(), &b.code.0, None)
         .await;
-    outcome(&s, r).await
+    outcome(&s, r, false).await
 }
 
 async fn password(
@@ -433,7 +440,102 @@ async fn password(
         .auth
         .authenticate_with_password(b.email.as_str(), &b.password.0, None)
         .await;
-    outcome(&s, r).await
+    let r = guard_password(&s, b.email.as_str(), r).await?;
+    outcome(&s, r, true).await
+}
+
+/// Whether WorkOS took the credentials: signed in, or a further step other than proving the email.
+fn accepted(r: &Result<Authenticated, AuthError>) -> bool {
+    match r {
+        Ok(_) => true,
+        Err(AuthError::Step(step)) => !matches!(step, Step::VerifyEmail { .. }),
+        Err(_) => false,
+    }
+}
+
+/// Our sign-up's row for this WorkOS user or email: its user id (unknown if WorkOS never
+/// answered) and whether its password was already neutralised.
+async fn sign_up_row(
+    s: &ApiState,
+    user: Option<&str>,
+    email: &str,
+) -> Result<Option<(Option<String>, bool)>, ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    let row = sqlx::query_as(
+        "select workos_user_id, neutralised_at is not null from sign_up_passwords \
+         where workos_user_id = $1 or email = lower($2) order by workos_user_id = $1 desc nulls last limit 1",
+    )
+    .bind(user)
+    .bind(email.trim())
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row)
+}
+
+/// Deletes the row: its password was confirmed (only while not neutralised) or, with `all`,
+/// replaced by its owner through a reset.
+async fn forget_sign_up_password(
+    s: &ApiState,
+    user: Option<&str>,
+    email: &str,
+    all: bool,
+) -> Result<(), ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    sqlx::query(
+        "delete from sign_up_passwords where (workos_user_id = $1 or email = lower($2)) \
+         and ($3 or neutralised_at is null)",
+    )
+    .bind(user)
+    .bind(email.trim())
+    .bind(all)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Sets 256 random bits as the user's password through WorkOS (nobody ever learns it), then
+/// marks the row. The row stays: a password WorkOS took before the new one landed is still refused.
+async fn neutralise(s: &ApiState, user: &str) -> Result<(), ApiError> {
+    s.auth.set_password(user, &session::secret()?).await?;
+    let mut tx = s.store.begin_untenanted().await?;
+    sqlx::query(
+        "update sign_up_passwords set neutralised_at = now() \
+         where workos_user_id = $1 and neutralised_at is null",
+    )
+    .bind(user)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// A password WorkOS took while our sign-up row exists for that user (confirmed by nobody, or
+/// already neutralised) is refused; an unneutralised password is neutralised first.
+async fn guard_password(
+    s: &ApiState,
+    typed_email: &str,
+    r: Result<Authenticated, AuthError>,
+) -> Result<Result<Authenticated, AuthError>, ApiError> {
+    if !accepted(&r) {
+        return Ok(r);
+    }
+    // By the user WorkOS names; only a step that names nobody falls back to the typed email.
+    let (user, email) = match &r {
+        Ok(a) => (Some(a.user.id.as_str()), a.user.email.as_str()),
+        Err(_) => (None, typed_email),
+    };
+    let Some((row_user, neutralised)) = sign_up_row(s, user, email).await? else {
+        return Ok(r);
+    };
+    if !neutralised
+        && let Some(row_user) = &row_user
+        && user.is_none_or(|u| u == row_user)
+    {
+        neutralise(s, row_user).await?;
+    }
+    Ok(Err(AuthError::InvalidCredentials))
 }
 
 /// A new session and the `Me` it shows; becomes the JSON answer or the SSO redirect.
@@ -452,10 +554,15 @@ impl SignedIn {
 }
 
 /// Spec 4.2: signed in, another step, or an error.
-async fn outcome(s: &ApiState, r: Result<Authenticated, AuthError>) -> Result<Response, ApiError> {
+/// `via_password`: the sign-in began with a password (directly or through the step it left).
+async fn outcome(
+    s: &ApiState,
+    r: Result<Authenticated, AuthError>,
+    via_password: bool,
+) -> Result<Response, ApiError> {
     match r {
-        Ok(a) => finish(s, a).await?.into_json(),
-        Err(AuthError::Step(step)) => next(s, step).await,
+        Ok(a) => finish(s, a, via_password).await?.into_json(),
+        Err(AuthError::Step(step)) => next(s, step, via_password).await,
         Err(e) => Err(e.into()),
     }
 }
@@ -515,10 +622,16 @@ async fn drop_pending(s: &ApiState, id: &str) -> Result<(), ApiError> {
 
 /// The outcome of finishing a step: a wrong code may be retried on the same step (the rate
 /// limit caps guesses); anything else uses the step up.
+/// Whether a stored step was left by a password sign-in.
+fn via_password(data: &Value) -> bool {
+    data["via"] == "password"
+}
+
 async fn settle(
     s: &ApiState,
     pending: &str,
     r: Result<Authenticated, AuthError>,
+    via_password: bool,
 ) -> Result<Response, ApiError> {
     if !matches!(
         r,
@@ -526,7 +639,7 @@ async fn settle(
     ) {
         drop_pending(s, pending).await?;
     }
-    outcome(s, r).await
+    outcome(s, r, via_password).await
 }
 
 /// WorkOS's own password rules apply too; this floor is checked first, for every email alike.
@@ -540,12 +653,16 @@ async fn sign_up(
     if b.password.0.chars().count() < MIN_PASSWORD {
         return Err(ApiError::invalid_input());
     }
+    // Recorded before WorkOS has the user, so any failure later leaves the guard in place.
+    let recorded = record_sign_up_email(&s, b.email.as_str()).await?;
     let data = match s
         .auth
         .create_user(b.email.as_str(), &b.password.0, &b.name.0)
         .await
     {
         Ok(user) => {
+            // If this fails the row still guards by email.
+            claim_sign_up_row(&s, b.email.as_str(), &user.id).await?;
             quietly(
                 "verification email",
                 s.auth.send_verification_email(&user.id).await,
@@ -554,7 +671,13 @@ async fn sign_up(
         }
         // An existing account (or a password WorkOS refuses, whose answer could differ for
         // one): a step that never verifies, answered exactly like a new one.
-        Err(AuthError::Conflict | AuthError::Invalid) => json!({ "decoy": true }),
+        Err(AuthError::Conflict | AuthError::Invalid) => {
+            if recorded {
+                unrecord_sign_up_email(&s, b.email.as_str()).await?;
+            }
+            json!({ "decoy": true })
+        }
+        // Ambiguous (a timeout, a 5xx): WorkOS may have made the user, so the row stays.
         Err(e) => return Err(e.into()),
     };
     let pending = store_pending(&s, "sign_up", None, Some(b.email.as_str()), data).await?;
@@ -562,18 +685,67 @@ async fn sign_up(
     Ok((StatusCode::ACCEPTED, axum::Json(body)).into_response())
 }
 
+/// A row for this email with no user yet; `false` if one exists already (kept as it is).
+async fn record_sign_up_email(s: &ApiState, email: &str) -> Result<bool, ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    let made: Option<bool> = sqlx::query_scalar(
+        "insert into sign_up_passwords (email) values (lower($1)) on conflict do nothing returning true",
+    )
+    .bind(email.trim())
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(made.is_some())
+}
+
+/// The new WorkOS user owns the email's row (a stale row from a deleted user starts over). An
+/// upsert: a concurrent sign-up that got Conflict may have dropped the row this one relied on.
+async fn claim_sign_up_row(s: &ApiState, email: &str, user: &str) -> Result<(), ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    sqlx::query(
+        "insert into sign_up_passwords (email, workos_user_id) values (lower($1), $2) \
+         on conflict (email) do update set workos_user_id = excluded.workos_user_id, neutralised_at = null",
+    )
+    .bind(email.trim())
+    .bind(user)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Drops the row this sign-up just made, when WorkOS made no user for it.
+async fn unrecord_sign_up_email(s: &ApiState, email: &str) -> Result<(), ApiError> {
+    let mut tx = s.store.begin_untenanted().await?;
+    sqlx::query("delete from sign_up_passwords where email = lower($1) and workos_user_id is null")
+        .bind(email.trim())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn verify_email(
     State(s): State<Arc<ApiState>>,
     Input(b): Input<PendingCode>,
 ) -> Result<Response, ApiError> {
     let p = find_pending(&s, &b.pending.0, &["verify_email", "sign_up"]).await?;
+    // Per email too: a new step (a new sign-up, another password sign-in) must not mean new guesses.
+    let email = p.email.as_deref().ok_or_else(pending_expired)?;
+    ratelimit::charge(&s, &ratelimit::email_key(email)).await?;
     if p.kind == "verify_email" {
         let token = p.workos_token.ok_or_else(pending_expired)?;
         let r = s
             .auth
             .authenticate_with_email_verification(&token, &b.code.0)
             .await;
-        return settle(&s, &b.pending.0, r).await;
+        let via = via_password(&p.data);
+        // A password sign-in's step: the password and the emailed code together are as good as
+        // sign-up's own verify step. Any other step confirms nothing.
+        if via && accepted(&r) {
+            forget_sign_up_password(&s, None, email, false).await?;
+        }
+        return settle(&s, &b.pending.0, r, via).await;
     }
     let (Some(user), Some(org_name)) = (p.data["user"].as_str(), p.data["org_name"].as_str())
     else {
@@ -582,6 +754,7 @@ async fn verify_email(
     // A wrong code keeps the step; a right one spends it before an org is made.
     let user = s.auth.verify_email(user, &b.code.0).await?;
     take_pending(&s, &b.pending.0, &["sign_up"]).await?;
+    forget_sign_up_password(&s, Some(&user.id), &user.email, false).await?;
     create_org(&s, user, org_name).await?.into_json()
 }
 
@@ -649,14 +822,21 @@ async fn mfa_verify(
     Input(b): Input<PendingCode>,
 ) -> Result<Response, ApiError> {
     let p = find_pending(&s, &b.pending.0, &["mfa"]).await?;
-    let (Some(token), Some(challenge)) = (p.workos_token, p.data["challenge"].as_str()) else {
+    let via = via_password(&p.data);
+    let (Some(token), Some(challenge), Some(factor)) = (
+        p.workos_token,
+        p.data["challenge"].as_str(),
+        p.data["factor"].as_str(),
+    ) else {
         return Err(pending_expired());
     };
+    // The factor is the user's own: a fresh step per guess draws on the same bucket.
+    ratelimit::charge(&s, &format!("factor:{factor}")).await?;
     let r = s
         .auth
         .authenticate_with_totp(&token, challenge, &b.code.0)
         .await;
-    settle(&s, &b.pending.0, r).await
+    settle(&s, &b.pending.0, r, via).await
 }
 
 fn qr_svg(uri: &str) -> Result<String, ApiError> {
@@ -675,7 +855,7 @@ async fn mfa_setup(
     Input(b): Input<MfaSetup>,
 ) -> Result<Response, ApiError> {
     let now = OffsetDateTime::now_utc();
-    let (mut tx, user, token, member, tenant) = match &b.pending {
+    let (mut tx, user, token, member, tenant, via) = match &b.pending {
         Some(pending) => {
             let p = find_pending(&s, &pending.0, &["mfa_setup"]).await?;
             let user = p.data["user"]
@@ -683,7 +863,8 @@ async fn mfa_setup(
                 .ok_or_else(pending_expired)?
                 .to_owned();
             let tx = s.store.begin_untenanted().await?;
-            (tx, user, p.workos_token, None, None)
+            let via = via_password(&p.data);
+            (tx, user, p.workos_token, None, None, via)
         }
         None => {
             let me = session::current(&s, &headers).await?;
@@ -695,7 +876,7 @@ async fn mfa_setup(
             .fetch_one(&mut *tx)
             .await?;
             let user = user.ok_or_else(ApiError::signed_out)?;
-            (tx, user, None, Some(me.member), Some(me.tenant))
+            (tx, user, None, Some(me.member), Some(me.tenant), false)
         }
     };
     let e = s.auth.enroll_auth_factor(&user).await?;
@@ -705,7 +886,7 @@ async fn mfa_setup(
             kind: "mfa_enable",
             workos_token: token.as_deref(),
             email: None,
-            data: json!({ "challenge": e.challenge, "member": member }),
+            data: json!({ "challenge": e.challenge, "member": member, "user": user, "via": via.then_some("password") }),
             tenant: tenant.as_ref(),
         },
         now,
@@ -727,14 +908,21 @@ async fn mfa_enable(
 ) -> Result<Response, ApiError> {
     if b.pending.is_some() {
         let p = find_pending(&s, &b.challenge.0, &["mfa_enable"]).await?;
-        let (Some(token), Some(challenge)) = (p.workos_token, p.data["challenge"].as_str()) else {
+        let (Some(token), Some(challenge), Some(user)) = (
+            p.workos_token,
+            p.data["challenge"].as_str(),
+            p.data["user"].as_str(),
+        ) else {
             return Err(pending_expired());
         };
+        // Per WorkOS user: setting up again gives a new challenge, not new guesses.
+        ratelimit::charge(&s, &format!("user:{user}")).await?;
         let r = s
             .auth
             .authenticate_with_totp(&token, challenge, &b.code.0)
             .await;
-        return settle(&s, &b.challenge.0, r).await;
+        let via = via_password(&p.data);
+        return settle(&s, &b.challenge.0, r, via).await;
     }
     let me = session::current(&s, &headers).await?;
     let now = OffsetDateTime::now_utc();
@@ -742,10 +930,17 @@ async fn mfa_enable(
     let p = session::pending(&mut tx, &b.challenge.0, &["mfa_enable"], now).await?;
     tx.commit().await?;
     let p = p.ok_or_else(pending_expired)?;
-    let challenge = match (p.data["member"].as_str(), p.data["challenge"].as_str()) {
-        (Some(m), Some(c)) if m == me.member.as_str() && p.workos_token.is_none() => c,
+    let (challenge, user) = match (
+        p.data["member"].as_str(),
+        p.data["challenge"].as_str(),
+        p.data["user"].as_str(),
+    ) {
+        (Some(m), Some(c), Some(u)) if m == me.member.as_str() && p.workos_token.is_none() => {
+            (c, u)
+        }
         _ => return Err(pending_expired()),
     };
+    ratelimit::charge(&s, &format!("user:{user}")).await?;
     if !s.auth.verify_challenge(challenge, &b.code.0).await? {
         return Err(AuthError::CodeInvalid.into());
     }
@@ -788,7 +983,7 @@ async fn choose_org(
         .auth
         .authenticate_with_organization_selection(&token, &org)
         .await;
-    settle(&s, &b.pending.0, r).await
+    settle(&s, &b.pending.0, r, via_password(&p.data)).await
 }
 
 async fn sso_start(
@@ -859,7 +1054,7 @@ async fn sso_finish(s: &ApiState, headers: &HeaderMap, query: &str) -> Result<Si
         .await
         .map_err(|_| ApiError::forbidden())?;
     match s.auth.authenticate_with_code(&code).await {
-        Ok(a) => finish(s, a).await,
+        Ok(a) => finish(s, a, false).await,
         Err(AuthError::Step(step)) => Err(step_error(&step)),
         Err(e) => Err(e.into()),
     }
@@ -918,17 +1113,27 @@ async fn reset(
     State(s): State<Arc<ApiState>>,
     Input(b): Input<Reset>,
 ) -> Result<StatusCode, ApiError> {
-    match s
+    let user = match s
         .auth
         .confirm_password_reset(&b.token.0, &b.password.0)
         .await
     {
-        // ponytail: Mandate sessions outlive a reset (7 days at most); ending them needs the
-        // user's tenants from WorkOS.
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(AuthError::NotFound) => Err(AuthError::CodeInvalid.into()),
-        Err(e) => Err(e.into()),
-    }
+        Ok(user) => user,
+        Err(AuthError::NotFound) => return Err(AuthError::CodeInvalid.into()),
+        Err(e) => return Err(e.into()),
+    };
+    // First, while nothing else can fail first: every session in every tenant ends.
+    // ponytail: the password is changed and the token spent before this runs, so if it fails the
+    // reset cannot be retried and sessions live on; a failure here needs an operator.
+    let mut tx = s.store.begin_untenanted().await?;
+    sqlx::query("select end_sessions_for_workos_user($1)")
+        .bind(&user.id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    // The owner chose this password through the emailed link: nothing unconfirmed is left.
+    forget_sign_up_password(&s, Some(&user.id), &user.email, true).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// A pending invitation, or 404 for anything else (unknown, used, revoked, malformed).
@@ -998,15 +1203,20 @@ async fn invite_accept(
     Input(b): Input<Accept>,
 ) -> Result<Response, ApiError> {
     let inv = pending_invitation(&s, &token).await?;
+    // The layer counted the token; another invitation for the same email must not mean new guesses.
+    ratelimit::charge(&s, &ratelimit::email_key(&inv.email)).await?;
+    let via = b.password.is_some();
     let r = match (b.password, b.name, b.code) {
         (Some(password), Some(name), None) => {
             match s.auth.create_user(&inv.email, &password.0, &name.0).await {
                 Ok(_) | Err(AuthError::Conflict) => {}
                 Err(e) => return Err(e.into()),
             }
-            s.auth
+            let r = s
+                .auth
                 .authenticate_with_password(&inv.email, &password.0, Some(&token))
-                .await
+                .await;
+            guard_password(&s, &inv.email, r).await?
         }
         (None, None, Some(code)) => {
             s.auth
@@ -1015,7 +1225,7 @@ async fn invite_accept(
         }
         _ => return Err(ApiError::invalid_input()),
     };
-    outcome(&s, r).await
+    outcome(&s, r, via).await
 }
 
 async fn me_route(
@@ -1126,12 +1336,13 @@ async fn sso_redirect(
 }
 
 /// Stores the step (with WorkOS's token) and tells the browser what comes next.
-async fn next(s: &ApiState, step: Step) -> Result<Response, ApiError> {
+async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, ApiError> {
     let mut body = json!({ "status": "next" });
     let (next, kind, token, email, data) = match step {
         Step::Mfa { token, factor } => {
             let challenge = s.auth.challenge_factor(&factor).await?;
-            ("mfa", "mfa", token, None, json!({ "challenge": challenge }))
+            let data = json!({ "challenge": challenge, "factor": factor });
+            ("mfa", "mfa", token, None, data)
         }
         Step::MfaSetup { token, user } => (
             "mfa_setup",
@@ -1178,6 +1389,11 @@ async fn next(s: &ApiState, step: Step) -> Result<Response, ApiError> {
             ("method_required", "method_required", token, None, json!({}))
         }
     };
+    let mut data = data;
+    // Kept with the step, so whatever finishes it knows a password started this sign-in.
+    if via_password {
+        data["via"] = json!("password");
+    }
     let pending = store_pending(s, kind, Some(&token), email.as_deref(), data).await?;
     body["next"] = json!(next);
     body["pending"] = json!(pending);
@@ -1185,7 +1401,17 @@ async fn next(s: &ApiState, step: Step) -> Result<Response, ApiError> {
 }
 
 /// WorkOS proved the person: map the org to its tenant, the user to a member, and sign in.
-async fn finish(s: &ApiState, a: Authenticated) -> Result<SignedIn, ApiError> {
+async fn finish(s: &ApiState, a: Authenticated, via_password: bool) -> Result<SignedIn, ApiError> {
+    // First, whatever happens next: this sign-in may have just verified the email in WorkOS.
+    if let Some((row_user, neutralised)) = sign_up_row(s, Some(&a.user.id), &a.user.email).await? {
+        if !neutralised && row_user.as_deref() == Some(a.user.id.as_str()) {
+            neutralise(s, &a.user.id).await?;
+        }
+        // A password never signs in while our sign-up's password is unconfirmed.
+        if via_password {
+            return Err(AuthError::InvalidCredentials.into());
+        }
+    }
     let org = a.org.ok_or_else(no_access)?;
     let memberships = s.auth.memberships(&a.user.id).await?;
     let current = memberships
@@ -1639,7 +1865,11 @@ impl AuthProvider for WorkosAuth {
         r.map(|_| ()).map_err(classify)
     }
 
-    async fn confirm_password_reset(&self, token: &str, password: &str) -> Result<(), AuthError> {
+    async fn confirm_password_reset(
+        &self,
+        token: &str,
+        password: &str,
+    ) -> Result<AuthUser, AuthError> {
         let p =
             workos::user_management::ConfirmPasswordResetParams::new(workos::CreatePasswordReset {
                 token: token.into(),
@@ -1650,6 +1880,16 @@ impl AuthProvider for WorkosAuth {
             .user_management()
             .confirm_password_reset(p)
             .await;
+        r.map(|r| auth_user(r.user)).map_err(classify)
+    }
+
+    async fn set_password(&self, user: &str, password: &str) -> Result<(), AuthError> {
+        let mut body = workos::user_management::UpdateUserParamsBody::new();
+        body.password = Some(workos::user_management::Password::Plaintext {
+            password: password.to_owned(),
+        });
+        let p = workos::user_management::UpdateUserParams::new(body);
+        let r = self.client.user_management().update_user(user, p).await;
         r.map(|_| ()).map_err(classify)
     }
 

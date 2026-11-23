@@ -1,0 +1,7 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+# Per-owner values (domain, zone, model ids); the example shows the shape.
+*.tfvars
+!*.tfvars.example

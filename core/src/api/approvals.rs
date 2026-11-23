@@ -267,7 +267,7 @@ fn view(s: &ApiState, r: &sqlx::postgres::PgRow, now: OffsetDateTime) -> Result<
     }))
 }
 
-async fn view_one(
+pub(crate) async fn view_one(
     tx: &mut Tx,
     s: &ApiState,
     session: &Session,

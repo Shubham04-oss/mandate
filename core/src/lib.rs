@@ -1,7 +1,9 @@
 pub mod api;
 pub mod assertion;
+pub mod eve;
 pub mod events;
 pub mod gate;
+pub mod guard;
 pub mod identity;
 pub mod ids;
 pub mod mcp;

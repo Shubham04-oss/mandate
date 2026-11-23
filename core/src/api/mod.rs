@@ -4,6 +4,7 @@ pub mod activity;
 pub mod agents;
 pub mod approvals;
 pub mod auth;
+pub mod conversations;
 pub mod grants;
 pub mod org;
 pub mod ratelimit;

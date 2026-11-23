@@ -33,6 +33,12 @@ grant select, insert, update, delete on sessions to :"role";
 grant select, insert, delete on auth_pending to :"role";
 -- Sign-in rate counters (RLS-free, hashes only): upserted per attempt, old windows dropped.
 grant select, insert, update, delete on rate_limits to :"role";
+-- Unconfirmed sign-up passwords (RLS-free; an email and a WorkOS user id, never a password):
+-- recorded at sign-up, given the user id, marked when neutralised, deleted once settled.
+grant select, insert, delete on sign_up_passwords to :"role";
+grant update (workos_user_id, neutralised_at) on sign_up_passwords to :"role";
+-- A password reset ends the user's sessions in every tenant only through this narrow function.
+grant execute on function end_sessions_for_workos_user(text) to :"role";
 -- Sign-in gives a member their personal operator only through this narrow function.
 grant execute on function ensure_personal_agent(text) to :"role";
 -- Events. The outbox is written by `publish`; the publisher may only mark rows sent.
@@ -44,3 +50,9 @@ grant select, insert on lifecycle_log to :"role";
 -- RLS-free consumer bookkeeping: the core only records; `on conflict do nothing` needs no SELECT.
 grant insert on events_inbox, events_quarantine to :"role";
 grant usage on sequence events_quarantine_id_seq to :"role";
+
+-- Conversations (RLS forced). The core moves only a conversation's state, eve session and cursor;
+-- relayed events, approval links and calls are append-only.
+grant select, insert on conversations to :"role";
+grant update (state, eve_session, eve_cursor, updated_at) on conversations to :"role";
+grant select, insert on conversation_events, conversation_approvals, conversation_calls to :"role";

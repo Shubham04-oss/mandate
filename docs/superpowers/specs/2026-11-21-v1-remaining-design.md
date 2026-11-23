@@ -195,7 +195,7 @@ eve ──event stream──> core ──output guard per assistant message─�
 | GET `/v1/conversations/{id}/events` | `Last-Event-ID` header | 200 `text/event-stream` |
 | POST `/v1/conversations/{id}/cancel` | | 202 |
 
-`Conversation { id, title, created_at, updated_at, state: "working"|"waiting"|"idle" }`. Events:
+`Conversation { id, title, created_at, updated_at, state: "working"|"waiting"|"idle"|"failed" }` (`failed`: the agent never started it). Events:
 `message { role, text }`, `tool { name, status }`, `approval_wait { approval: Approval }`,
 `approval_done { approval_id, state }`, `done`, `error { code, message }`.
 
