@@ -25,12 +25,15 @@ section 4 of `docs/superpowers/specs/2026-11-21-v1-remaining-design.md`: it send
 `{ "error": { "code", "message" } }` format (with `Retry-After` on 429), and returns the sign-in
 outcomes as they are. Screens never call `fetch` themselves.
 
-The base URL comes from `VITE_MANDATE_API_URL`:
+The base URL comes from `VITE_MANDATE_API_URL`, fixed when the app is built:
 
-- **Unset (the default):** the module answers every call with stand-in responses from
+- **Unset, in `npm run dev` and tests:** the module answers every call with stand-in responses from
   `src/lib/api/standin.ts`, shaped exactly like the contract. Nothing leaves the browser.
 - **Set:** the module calls the core at that address. Nothing else changes; the screens stay as
   they are.
+- **A production build** (`npm run build`) fails without it, so a deployed app never shows the
+  stand-ins' made-up people; they aren't in a production bundle at all. Deploying is in
+  `docs/deploy.md` (the web app).
 
 Locally, both run on `localhost` so the session cookie works across them. Start the core with
 `MANDATE_WEB_ORIGIN=http://localhost:3000` and `MANDATE_API_ORIGIN=http://localhost:8080` (plus its

@@ -182,8 +182,20 @@ back, the job fails, naming the revision still running.
 
 ## 10. The web app
 
-In `web/wrangler.jsonc`, replace `example.com` in the `dev` environment with your domain, then
-from `web/`: `npx wrangler deploy --env dev`. Wrangler creates the `app.<domain>` custom domain.
+In `web/wrangler.jsonc`, replace `example.com` in the `dev` environment with your domain, then from
+`web/`:
+
+```sh
+npm ci
+CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.<domain> npm run build
+npx wrangler deploy
+```
+
+Wrangler creates the `app.<domain>` custom domain. Both values are fixed when the app is built:
+Cloudflare's Vite plugin picks the `dev` environment at build time (`--env` on `wrangler deploy` is
+ignored for this build), and the core's address is compiled into the browser code. A build without
+`VITE_MANDATE_API_URL` fails on purpose, so a deployed app never shows the made-up stand-in data
+used in `npm run dev`.
 
 ## 11. Check
 

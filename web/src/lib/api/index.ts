@@ -1,12 +1,11 @@
 /**
  * The one place the web app talks to the core. Shapes and rules follow section 4 of
- * docs/superpowers/specs/2026-11-21-v1-remaining-design.md (branch docs/v1-remaining).
+ * docs/superpowers/specs/2026-11-21-v1-remaining-design.md; where the core differs, the core wins.
  *
- * With VITE_MANDATE_API_URL unset, every call is answered by contract-shaped stand-ins (./standin.ts)
- * so the screens work before the core serves these endpoints. Setting the URL switches to the core;
- * no screen changes.
+ * VITE_MANDATE_API_URL names the core and is fixed at build time. In `npm run dev` and tests, leaving
+ * it unset answers every call from contract-shaped stand-ins (./standin.ts). A production build
+ * without it fails (./api-url.ts), and the stand-ins are never part of one.
  */
-import { standIn } from "#/lib/api/standin.ts";
 
 // ── Contract shapes (4.3) ────────────────────────────────────────────────────────────────────────
 // ponytail: the contract doesn't fix a timestamp format; these assume RFC 3339 strings.
@@ -194,7 +193,7 @@ export async function readResponse<T>(res: Response): Promise<T> {
 
 // ── Transport ────────────────────────────────────────────────────────────────────────────────────
 
-/** The core's origin, e.g. http://localhost:8080. Empty means stand-ins. */
+/** The core's origin, e.g. http://localhost:8080. Empty means stand-ins, in dev and tests only. */
 export const apiBaseUrl = (import.meta.env.VITE_MANDATE_API_URL ?? "")
 	.trim()
 	.replace(/\/+$/, "");
@@ -220,7 +219,19 @@ async function call<T>(
 	path: string,
 	body?: unknown,
 ): Promise<T> {
-	if (!apiBaseUrl) return readResponse<T>(await standIn(method, path, body));
+	if (!apiBaseUrl) {
+		// Never reached in a production build: the build fails without the URL, and DEV is false.
+		if (!import.meta.env.DEV) {
+			throw new ApiError(
+				"unreachable",
+				"oryxa isn't set up to reach its server.",
+				0,
+			);
+		}
+		// Loaded on demand, so a production bundle doesn't carry the stand-ins or their sample people.
+		const { standIn } = await import("#/lib/api/standin.ts");
+		return readResponse<T>(await standIn(method, path, body));
+	}
 	let res: Response;
 	try {
 		res = await fetch(`${apiBaseUrl}${path}`, requestInit(method, body));

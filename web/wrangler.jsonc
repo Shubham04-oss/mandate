@@ -4,13 +4,17 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
   "main": "@tanstack/react-start/server-entry",
-  // AWS dev (docs/deploy.md): `npx wrangler deploy --env dev`. Replace example.com with the
-  // Cloudflare zone's domain; the API is the core at api.<domain>.
+  // AWS dev (docs/deploy.md, the web app). Replace example.com with the Cloudflare zone's domain,
+  // then from web/:
+  //   CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.<domain> npm run build
+  //   npx wrangler deploy
+  // Both are fixed at build time: Cloudflare's Vite plugin picks the environment when it builds
+  // (`--env` at deploy is ignored), and the core's address is compiled into the browser code, which
+  // never sees Worker vars. Nothing on the server side reads the core's address.
   "env": {
     "dev": {
       "name": "mandate-web-dev",
-      "routes": [{ "pattern": "app.example.com", "custom_domain": true }],
-      "vars": { "MANDATE_API_URL": "https://api.example.com" }
+      "routes": [{ "pattern": "app.example.com", "custom_domain": true }]
     }
   }
 }
