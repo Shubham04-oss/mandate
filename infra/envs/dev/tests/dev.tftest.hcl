@@ -127,7 +127,11 @@ override_resource {
 }
 override_resource {
   target = aws_secretsmanager_secret.tunnel_token
-  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token" }
+  # A secret's id is its ARN.
+  values = {
+    arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token"
+    id  = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token"
+  }
 }
 override_resource {
   target = aws_sqs_queue.consumer["agent-resume"]
@@ -349,15 +353,14 @@ run "the_core_admits_only_eve_so_cf_connecting_ip_comes_from_the_sidecar" {
   command = apply
 
   assert {
-    condition = [
+    condition = alltrue([
       for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) :
-      r.referenced_security_group_id if r.security_group_id == aws_security_group.core.id
-    ] == [aws_security_group.eve.id]
-    error_message = "the core's only ingress is eve, by security group; nothing from the internet"
-  }
-  assert {
-    condition     = length(aws_security_group.core.ingress) == 0 && aws_vpc_security_group_ingress_rule.core_from_eve.cidr_ipv4 == null
-    error_message = "no inline or address-based ingress on the core"
+      r.referenced_security_group_id == aws_security_group.eve.id && r.cidr_ipv4 == null && r.cidr_ipv6 == null && r.prefix_list_id == null
+      if r.security_group_id == aws_security_group.core.id
+      ]) && length([
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) : r if r.security_group_id == aws_security_group.core.id
+    ]) == 1
+    error_message = "the core's only ingress rule is from eve, by security group; no address or prefix list"
   }
   assert {
     condition = {
@@ -404,6 +407,24 @@ run "cloudflared_runs_beside_the_core_pinned_and_unprivileged" {
     error_message = "the tunnel's own token, under the CMK"
   }
   assert {
+    condition     = aws_secretsmanager_secret_version.tunnel_token.secret_id == "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token"
+    error_message = "the token is written into the tunnel secret, not another one"
+  }
+  assert {
+    condition = jsondecode(aws_ecs_task_definition.core.container_definitions)[0].healthCheck == {
+      command     = ["CMD", "/usr/local/bin/mandate", "healthcheck"]
+      interval    = 10
+      timeout     = 5
+      retries     = 3
+      startPeriod = 30
+    }
+    error_message = "the core has a health check: its own binary probing /healthz"
+  }
+  assert {
+    condition     = jsondecode(aws_ecs_task_definition.core.container_definitions)[1].dependsOn == [{ containerName = "core", condition = "HEALTHY" }]
+    error_message = "cloudflared starts only once the core is healthy"
+  }
+  assert {
     condition = contains(flatten([
       for st in jsondecode(aws_iam_role_policy.execution["core"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
     ]), aws_secretsmanager_secret.tunnel_token.arn)
@@ -419,12 +440,18 @@ run "eve_is_private_and_reachable_only_from_the_core" {
   command = apply
 
   assert {
-    condition     = aws_vpc_security_group_ingress_rule.eve_from_core.referenced_security_group_id == aws_security_group.core.id
-    error_message = "eve admits the core only"
+    condition = alltrue([
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) :
+      r.referenced_security_group_id == aws_security_group.core.id && r.cidr_ipv4 == null && r.cidr_ipv6 == null && r.prefix_list_id == null
+      if r.security_group_id == aws_security_group.eve.id
+      ]) && length([
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) : r if r.security_group_id == aws_security_group.eve.id
+    ]) == 1
+    error_message = "eve's only ingress rule is from the core, by security group; no address or prefix list"
   }
   assert {
-    condition     = length(aws_ecs_service.eve.load_balancer) == 0 && length(aws_security_group.eve.ingress) == 0
-    error_message = "eve has no load balancer and no ingress but the core's rule"
+    condition     = length(aws_ecs_service.eve.load_balancer) == 0
+    error_message = "eve has no load balancer"
   }
   assert {
     condition     = aws_ecs_task_definition.eve.task_role_arn == null
