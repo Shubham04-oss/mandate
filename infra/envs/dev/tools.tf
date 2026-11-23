@@ -65,7 +65,10 @@ resource "aws_iam_role" "browser" {
       Effect    = "Allow"
       Principal = { Service = "bedrock-agentcore.amazonaws.com" }
       Action    = "sts:AssumeRole"
-      Condition = { StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id } }
+      Condition = {
+        StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id }
+        ArnLike      = { "aws:SourceArn" = "arn:aws:bedrock-agentcore:${var.region}:${data.aws_caller_identity.current.account_id}:*" }
+      }
     }]
   })
 }
@@ -75,11 +78,21 @@ resource "aws_iam_role_policy" "browser_recordings" {
   role = aws_iam_role.browser.name
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = "s3:PutObject"
-      Resource = "${aws_s3_bucket.recordings.arn}/recordings/*"
-    }]
+    # The actions AgentCore checks when the browser is created (multipart uploads, prefix listing).
+    Statement = [
+      {
+        Effect    = "Allow"
+        Action    = ["s3:PutObject", "s3:ListMultipartUploadParts", "s3:AbortMultipartUpload"]
+        Resource  = "${aws_s3_bucket.recordings.arn}/recordings/*"
+        Condition = { StringEquals = { "aws:ResourceAccount" = data.aws_caller_identity.current.account_id } }
+      },
+      {
+        Effect    = "Allow"
+        Action    = "s3:ListBucket"
+        Resource  = aws_s3_bucket.recordings.arn
+        Condition = { StringLike = { "s3:prefix" = ["recordings/*"] } }
+      },
+    ]
   })
 }
 
