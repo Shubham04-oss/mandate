@@ -96,6 +96,13 @@ variable "github_repository" {
   default = "Shubham04-oss/mandate"
 }
 
+# GitHub's immutable subject (owner and repo ids), so a renamed or re-created repo cannot take the role.
+# `gh api repos/OWNER/REPO/actions/oidc/customization/sub` prints it as sub_claim_prefix.
+variable "github_oidc_sub_prefix" {
+  type    = string
+  default = "repo:Shubham04-oss@218535561/mandate@1466076280"
+}
+
 variable "github_oidc_provider_arn" {
   type        = string
   default     = ""
