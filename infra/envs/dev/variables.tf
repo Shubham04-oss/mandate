@@ -84,3 +84,9 @@ variable "github_repository" {
   type    = string
   default = "Shubham04-oss/mandate"
 }
+
+variable "github_oidc_provider_arn" {
+  type        = string
+  default     = ""
+  description = "ARN of an existing GitHub OIDC provider in the account; empty creates one"
+}

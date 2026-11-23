@@ -672,3 +672,18 @@ run "only_the_dev_environment_of_this_repo_can_deploy" {
     error_message = "and only the task roles"
   }
 }
+
+run "an_existing_github_oidc_provider_is_reused_not_owned" {
+  command = plan
+  variables {
+    github_oidc_provider_arn = "arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com"
+  }
+  assert {
+    condition     = length(aws_iam_openid_connect_provider.github) == 0
+    error_message = "with an existing provider ARN, this stack must not create or own one"
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role.deploy.assume_role_policy).Statement[0].Principal.Federated == "arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com"
+    error_message = "the deploy role must trust the given provider"
+  }
+}

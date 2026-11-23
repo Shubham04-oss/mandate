@@ -74,8 +74,9 @@ tofu plan -var-file=dev.tfvars -out=dev.tfplan   # read it
 tofu apply dev.tfplan
 ```
 
-- If the account already has the GitHub OIDC provider, import it first:
-  `tofu import -var-file=dev.tfvars aws_iam_openid_connect_provider.github arn:aws:iam::$ACCOUNT:oidc-provider/token.actions.githubusercontent.com`.
+- If the account already has the GitHub OIDC provider (another stack made it), set
+  `github_oidc_provider_arn = "arn:aws:iam::<ACCOUNT>:oidc-provider/token.actions.githubusercontent.com"`
+  in `dev.tfvars`. This stack then uses it without owning it; do not import it.
 - If the zone already has an `http_ratelimit` or `http_request_late_transform` ruleset, fold its
   rules into `cloudflare_ruleset.auth_rate_limit` or `cloudflare_ruleset.origin_header`, or import
   it; a zone has one ruleset per phase.
