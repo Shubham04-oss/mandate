@@ -23,7 +23,7 @@ layer is the product.
 
 | Layer | Runs on | What |
 | --- | --- | --- |
-| Edge and web UI | Cloudflare | DNS, WAF, Turnstile; the web app (PWA) on Workers |
+| Edge and web UI | Cloudflare | DNS, WAF, Turnstile, a Tunnel to the core; the web app (PWA) on Workers |
 | Core | AWS, one Rust binary | Policy (Cedar), consent and grants, the governed tool server (MCP), audit |
 | Agent brain | AWS, eve (TypeScript) | Conversations, channels (Slack, Teams, web), durable waits. Untrusted: holds no credentials and decides nothing about access |
 | Data | AWS RDS PostgreSQL | One database: system of record and conversation state |

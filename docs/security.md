@@ -37,6 +37,10 @@
 - Code and password checks share one 5-per-minute bucket per email, so anyone can use up a
   victim's minute, which also blocks their verify-email and invite-accept. That is an accepted
   trade-off: it bounds guessing whatever token, step or IP the guesser uses.
+- The per-IP limit keys on `CF-Connecting-IP` (`MANDATE_TRUST_CF_IP=1`), set by Cloudflare and
+  passed in by the tunnel's sidecar on localhost. eve can also reach the core's port directly (for
+  `/mcp`) and could forge that header to spread attempts over fake IPs; eve is untrusted, so in dev
+  that is an accepted residual risk. The per-email limits above still bound it.
 - A leftover sign-up row (a sign-up nobody confirmed) blocks that email's password sign-ins until
   a password reset clears it. A sign-up for an email that already has an account blocks its
   password sign-in for one WorkOS round trip; the 5-per-minute limit caps how often.
@@ -58,6 +62,18 @@
 - `live_view_url` is not usable after a call returns: the browser session ends with the call. Live
   view and human takeover need sessions that outlive a call; that is future work.
 - A backend failure reaches the agent as a generic error; the detail goes only to the operator log.
+
+## Dev network (infra/envs/dev)
+
+- The public API reaches the core only through a Cloudflare Tunnel: `cloudflared` beside the core
+  dials out, so nothing listens on a public address. The tunnel forwards only `/v1/*` and
+  `/healthz`; the core's security group admits eve and nothing else.
+- To save the NAT gateway and VPC endpoints, every task (the one-off `migrate` and `db-bootstrap`
+  included) runs in a public subnet with a public IP and HTTPS egress to the internet; security
+  groups admit nothing from the internet. The database stays in private subnets with no route out
+  and is not publicly accessible.
+- The tunnel token is in tofu state (tofu creates the tunnel); the state bucket is private and
+  encrypted, and only the owner reads it.
 
 ## What a compromise of each part can do
 
