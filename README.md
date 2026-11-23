@@ -26,7 +26,7 @@ layer is the product.
 | Edge and web UI | Cloudflare | DNS, WAF, Turnstile; the web app (PWA) on Workers |
 | Core | AWS, one Rust binary | Policy (Cedar), consent and grants, the governed tool server (MCP), audit |
 | Agent brain | AWS, eve (TypeScript) | Conversations, channels (Slack, Teams, web), durable waits. Untrusted: holds no credentials and decides nothing about access |
-| Data | AWS Aurora PostgreSQL | One database: system of record and conversation state |
+| Data | AWS RDS PostgreSQL | One database: system of record and conversation state |
 | Tools | AWS AgentCore, Bedrock Guardrails | Browser, token vault, output guardrails |
 | Models | Cloudflare AI Gateway | OpenAI-compatible endpoint; provider keys stay in the gateway; model ids are configuration, never code |
 

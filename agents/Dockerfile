@@ -15,5 +15,6 @@ COPY --from=build --chown=root:root /app /app
 # The image's unprivileged user; the app files stay root-owned and read-only to it.
 USER node
 EXPOSE 3000
-# The Postgres workflow world's migrations (idempotent, under a lock) run before eve starts.
-CMD ["sh", "-c", "node node_modules/@workflow/world-postgres/bin/setup.js && exec npm start"]
+# The Postgres workflow world's migrations (idempotent, under a lock) run before eve starts. The RDS
+# root CAs go to the file WORKFLOW_POSTGRES_URL's sslrootcert names (sslmode=verify-full).
+CMD ["sh", "-c", "if [ -n \"${RDS_CA_PEM:-}\" ]; then printf '%s\\n' \"$RDS_CA_PEM\" > /tmp/rds-ca.pem; fi && node node_modules/@workflow/world-postgres/bin/setup.js && exec npm start"]

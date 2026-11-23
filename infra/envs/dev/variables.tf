@@ -22,10 +22,28 @@ locals {
   }
 }
 
-# Needs a version with auto-pause (min capacity 0); check `aws rds describe-db-engine-versions`.
-variable "aurora_engine_version" {
+# Check it is offered: `aws rds describe-db-engine-versions --engine postgres` (docs/deploy.md step 2).
+variable "db_engine_version" {
   type    = string
-  default = "17.5"
+  default = "17.11"
+}
+
+# db.t4g.small is the next step up if the core or eve outgrow it.
+variable "db_instance_class" {
+  type    = string
+  default = "db.t4g.micro"
+}
+
+# Off only to tear dev down on purpose.
+variable "db_deletion_protection" {
+  type    = bool
+  default = true
+}
+
+# Dev keeps a final snapshot by default; set true to destroy without one.
+variable "db_skip_final_snapshot" {
+  type    = bool
+  default = false
 }
 
 # The Cloudflare zone's domain: the API is api.<domain>, the web app app.<domain>.

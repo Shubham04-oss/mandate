@@ -82,17 +82,26 @@ resource "aws_security_group" "migrate" {
   vpc_id      = aws_vpc.main.id
 }
 
+resource "aws_security_group" "db_bootstrap" {
+  name        = "${local.name}-db-bootstrap"
+  description = "The one-off db-bootstrap task: nothing in; HTTPS to the endpoints and Postgres out"
+  vpc_id      = aws_vpc.main.id
+}
+
 locals {
   task_security_groups = {
-    core    = aws_security_group.core.id
-    eve     = aws_security_group.eve.id
-    migrate = aws_security_group.migrate.id
+    core           = aws_security_group.core.id
+    eve            = aws_security_group.eve.id
+    migrate        = aws_security_group.migrate.id
+    "db-bootstrap" = aws_security_group.db_bootstrap.id
   }
+  # One-off tasks that touch the database never reach the internet.
+  endpoint_only_tasks = ["migrate", "db-bootstrap"]
 }
 
 # HTTPS out: AWS APIs through the endpoints, WorkOS and AgentCore (core), the AI gateway (eve).
 resource "aws_vpc_security_group_egress_rule" "https" {
-  for_each          = { for k, v in local.task_security_groups : k => v if k != "migrate" }
+  for_each          = { for k, v in local.task_security_groups : k => v if !contains(local.endpoint_only_tasks, k) }
   security_group_id = each.value
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "tcp"
@@ -100,22 +109,34 @@ resource "aws_vpc_security_group_egress_rule" "https" {
   to_port           = 443
 }
 
-# The migrate task talks to nothing on the internet: ECR, logs and secrets through the interface
+# The one-off tasks talk to nothing on the internet: ECR, logs and secrets through the interface
 # endpoints, image layers through the S3 gateway endpoint.
-resource "aws_vpc_security_group_egress_rule" "migrate_to_endpoints" {
-  security_group_id            = aws_security_group.migrate.id
+resource "aws_vpc_security_group_egress_rule" "to_endpoints" {
+  for_each                     = toset(local.endpoint_only_tasks)
+  security_group_id            = local.task_security_groups[each.key]
   referenced_security_group_id = aws_security_group.endpoints.id
   ip_protocol                  = "tcp"
   from_port                    = 443
   to_port                      = 443
 }
 
-resource "aws_vpc_security_group_egress_rule" "migrate_to_s3" {
-  security_group_id = aws_security_group.migrate.id
+moved {
+  from = aws_vpc_security_group_egress_rule.migrate_to_endpoints
+  to   = aws_vpc_security_group_egress_rule.to_endpoints["migrate"]
+}
+
+resource "aws_vpc_security_group_egress_rule" "to_s3" {
+  for_each          = toset(local.endpoint_only_tasks)
+  security_group_id = local.task_security_groups[each.key]
   prefix_list_id    = aws_vpc_endpoint.s3.prefix_list_id
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
+}
+
+moved {
+  from = aws_vpc_security_group_egress_rule.migrate_to_s3
+  to   = aws_vpc_security_group_egress_rule.to_s3["migrate"]
 }
 
 resource "aws_vpc_security_group_egress_rule" "to_db" {
