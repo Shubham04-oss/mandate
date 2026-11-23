@@ -81,11 +81,6 @@ tofu apply dev.tfplan
   in `dev.tfvars`. This stack then uses it without owning it; do not import it.
 - If the zone already has an `http_ratelimit` ruleset, fold its rules into
   `cloudflare_ruleset.auth_rate_limit`, or import it; a zone has one ruleset per phase.
-- Coming from the ALB layout, this apply deletes the ALB, its certificate, the origin header rule,
-  the NAT gateway and the VPC endpoints, and replaces the `core` and `eve` services (a capacity
-  provider strategy cannot be added to a service in place). The API is down until the next deploy
-  (step 9) rolls the new core task definition; then set `MANDATE_MIGRATE_NETWORK` again (step 7),
-  since the migrate task now runs in the public subnets.
 - The services start on the tag `bootstrap`, which does not exist: ECS fails those first
   deployments and stops. The first deploy (step 9) brings them up.
 
@@ -262,7 +257,9 @@ with `AWS_PROFILE=mumbai` and the values from `tofu output`.
 `cloudflared` in the core's task connects out to Cloudflare with the tunnel token (from the
 `mandate-dev/cloudflared/tunnel-token` secret, as `TUNNEL_TOKEN`); Cloudflare sends `api.<domain>`
 through it to the core on `localhost:8080` and sets `CF-Connecting-IP`, which is why the core
-trusts that header for its per-IP sign-in limit (`MANDATE_TRUST_CF_IP=1`).
+trusts that header for its per-IP sign-in limit (`MANDATE_TRUST_CF_IP=1`), and only from a loopback
+peer, so eve cannot forge it. cloudflared starts only once the core's health check
+(`mandate healthcheck`, a GET of its own `/healthz`) passes.
 
 - Tofu creates the tunnel, so its secret (`random_bytes.tunnel_secret`) and token are in tofu
   state, and tofu writes the token into Secrets Manager: the state bucket must stay private,
@@ -271,9 +268,6 @@ trusts that header for its per-IP sign-in limit (`MANDATE_TRUST_CF_IP=1`).
 - Rotate: `tofu apply -var-file=dev.tfvars -replace=random_bytes.tunnel_secret`. That replaces the
   tunnel (new id, new token, the CNAME follows) and the secret value; then run the deploy workflow
   (step 9) so the core restarts with the new token. The API is down between the apply and the roll.
-- Residual risk: eve can reach the core's port directly (it needs `/mcp`) and could set its own
-  `CF-Connecting-IP` to spread sign-in attempts over fake IPs. The per-email limits still apply
-  (docs/security.md).
 
 ## Known limits (dev)
 

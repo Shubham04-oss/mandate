@@ -4,6 +4,7 @@ mod common;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::routing::{get, post};
 use common::app_store;
 use http::{Request, StatusCode, header};
@@ -20,6 +21,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
@@ -478,12 +480,18 @@ fn random_ip() -> String {
     format!("10.{}.{}.{}", b[0], b[1], b[2])
 }
 
+/// The core honours `CF-Connecting-IP` only from loopback, where the cloudflared sidecar is.
+fn sidecar() -> ConnectInfo<SocketAddr> {
+    ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 443)))
+}
+
 fn auth_post(uri: &str, ip: &str, body: Value) -> Request<Body> {
     Request::post(uri)
         .header("x-mandate", "1")
         .header(header::ORIGIN, WEB)
         .header(header::CONTENT_TYPE, "application/json")
         .header("cf-connecting-ip", ip)
+        .extension(sidecar())
         .body(Body::from(body.to_string()))
         .unwrap()
 }
@@ -1118,7 +1126,9 @@ impl Harness {
     }
 
     async fn get(&self, uri: &str, cookie: Option<&str>) -> axum::response::Response {
-        let mut r = Request::get(uri).header("cf-connecting-ip", &self.ip);
+        let mut r = Request::get(uri)
+            .header("cf-connecting-ip", &self.ip)
+            .extension(sidecar());
         if let Some(c) = cookie {
             r = r.header(header::COOKIE, format!("mandate_session={c}"));
         }

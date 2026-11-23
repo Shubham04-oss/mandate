@@ -38,9 +38,9 @@
   victim's minute, which also blocks their verify-email and invite-accept. That is an accepted
   trade-off: it bounds guessing whatever token, step or IP the guesser uses.
 - The per-IP limit keys on `CF-Connecting-IP` (`MANDATE_TRUST_CF_IP=1`), set by Cloudflare and
-  passed in by the tunnel's sidecar on localhost. eve can also reach the core's port directly (for
-  `/mcp`) and could forge that header to spread attempts over fake IPs; eve is untrusted, so in dev
-  that is an accepted residual risk. The per-email limits above still bound it.
+  passed in by the tunnel's sidecar on localhost. The core honours it only from a loopback peer:
+  eve also reaches the core's port (for `/mcp`), but from its own address, so a header it sends is
+  ignored and eve is limited by that address.
 - A leftover sign-up row (a sign-up nobody confirmed) blocks that email's password sign-ins until
   a password reset clears it. A sign-up for an email that already has an account blocks its
   password sign-in for one WorkOS round trip; the 5-per-minute limit caps how often.
@@ -74,6 +74,9 @@
   and is not publicly accessible.
 - The tunnel token is in tofu state (tofu creates the tunnel); the state bucket is private and
   encrypted, and only the owner reads it.
+- The tunnel is remotely managed, so anyone with Cloudflare Tunnel Edit on the account (the tofu
+  token or a dashboard admin) could add ingress rules into the VPC. Keep that token scoped to this
+  account only; tofu reverts such drift on the next apply.
 
 ## What a compromise of each part can do
 

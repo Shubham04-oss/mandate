@@ -38,7 +38,7 @@ pub struct ApiState {
     pub auth: Arc<dyn AuthProvider>,
     /// Where WorkOS sends the browser after SSO: this API's `/v1/auth/sso/callback`.
     pub sso_redirect_uri: String,
-    /// `MANDATE_TRUST_CF_IP=1`: rate limits key on `CF-Connecting-IP`; only behind Cloudflare.
+    /// `MANDATE_TRUST_CF_IP=1`: rate limits key on `CF-Connecting-IP` from a loopback peer.
     pub trust_cf_ip: bool,
     /// The served tools: grants name one, and an approval shows its call's effect.
     pub catalog: Catalog,

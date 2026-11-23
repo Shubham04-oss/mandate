@@ -60,9 +60,8 @@ locals {
     MANDATE_READ_HOSTS = var.read_hosts
     MANDATE_WEB_ORIGIN = "https://app.${var.domain}"
     MANDATE_API_ORIGIN = "https://${local.api_host}"
-    # The web API arrives only through cloudflared on localhost, which sets CF-Connecting-IP.
-    # ponytail: eve (untrusted) can reach :8080 directly and forge it to dodge the per-IP sign-in
-    # limit; the per-email limits still hold. Close it with a separate listener for /mcp.
+    # The web API arrives only through cloudflared on localhost, which sets CF-Connecting-IP; the
+    # core honours it only from a loopback peer, so eve (which reaches :8080 directly) cannot forge it.
     MANDATE_TRUST_CF_IP = "1"
     MANDATE_EVE_URL     = "http://eve.${local.internal}:3000"
     MANDATE_EVENT_BUS   = awscc_eventsv2_event_bus.main.event_bus_arn
@@ -118,6 +117,14 @@ resource "aws_ecs_task_definition" "core" {
   container_definitions = jsonencode([merge(local.container["core"], {
     portMappings = [{ containerPort = 8080, protocol = "tcp" }]
     environment  = [for k, v in local.core_environment : { name = k, value = v }]
+    # The image has no curl: the binary probes its own /healthz on loopback.
+    healthCheck = {
+      command     = ["CMD", "/usr/local/bin/mandate", "healthcheck"]
+      interval    = 10
+      timeout     = 5
+      retries     = 3
+      startPeriod = 30
+    }
     }), {
     name      = "cloudflared"
     essential = true
@@ -125,7 +132,9 @@ resource "aws_ecs_task_definition" "core" {
     # The image's own nonroot user, stated so a retagged image cannot run as root.
     user    = "65532:65532"
     command = ["tunnel", "--no-autoupdate", "run"]
-    secrets = [{ name = "TUNNEL_TOKEN", valueFrom = aws_secretsmanager_secret.tunnel_token.arn }]
+    # Register with Cloudflare only once the core answers, so the edge never routes to a cold core.
+    dependsOn = [{ containerName = "core", condition = "HEALTHY" }]
+    secrets   = [{ name = "TUNNEL_TOKEN", valueFrom = aws_secretsmanager_secret.tunnel_token.arn }]
     logConfiguration = {
       logDriver = "awslogs"
       options = {

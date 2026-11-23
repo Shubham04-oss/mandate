@@ -40,6 +40,8 @@ enum Cmd {
     Migrate,
     /// Serve the MCP tool server.
     Serve,
+    /// GET /healthz on the local server; exit 0 if it answers 2xx (the image has no curl).
+    Healthcheck,
     /// Print a signed assertion; only with MANDATE_ENV=dev.
     DevAssert {
         #[arg(long, value_parser = TenantId::parse)]
@@ -66,6 +68,7 @@ async fn main() -> ExitCode {
     let result = match Cli::parse().cmd {
         Cmd::Migrate => migrate().await,
         Cmd::Serve => serve().await,
+        Cmd::Healthcheck => healthcheck().await,
         Cmd::DevAssert {
             tenant,
             member,
@@ -90,6 +93,34 @@ async fn migrate() -> Result<()> {
     let url = env("MANDATE_MIGRATION_DATABASE_URL").or_else(|_| env("DATABASE_URL"))?;
     Store::connect_for_migration(&url).await?.migrate().await?;
     tracing::info!("migrations applied");
+    Ok(())
+}
+
+async fn healthcheck() -> Result<()> {
+    let bind = std::env::var("MANDATE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    probe(&healthz_url(&bind)?).await
+}
+
+/// The server listens on `bind` (often 0.0.0.0); the probe always asks loopback on its port.
+fn healthz_url(bind: &str) -> Result<String> {
+    let port = bind
+        .parse::<SocketAddr>()
+        .map_err(|e| format!("MANDATE_BIND {bind}: {e}"))?
+        .port();
+    Ok(format!("http://127.0.0.1:{port}/healthz"))
+}
+
+async fn probe(url: &str) -> Result<()> {
+    let res = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .no_proxy()
+        .build()?
+        .get(url)
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        return Err(format!("{url}: {}", res.status()).into());
+    }
     Ok(())
 }
 
@@ -298,7 +329,39 @@ async fn shutdown() {
 
 #[cfg(test)]
 mod tests {
-    use super::read_hosts;
+    use super::{healthz_url, probe, read_hosts};
+    use axum::http::StatusCode;
+    use axum::routing::get;
+
+    #[test]
+    fn healthz_url_asks_loopback_on_the_bind_port() {
+        assert_eq!(
+            healthz_url("0.0.0.0:8080").unwrap(),
+            "http://127.0.0.1:8080/healthz"
+        );
+        assert_eq!(
+            healthz_url("[::]:9000").unwrap(),
+            "http://127.0.0.1:9000/healthz"
+        );
+        assert!(healthz_url("localhost").is_err());
+    }
+
+    #[tokio::test]
+    async fn probe_passes_on_2xx_and_fails_otherwise() {
+        let app = axum::Router::new()
+            .route("/healthz", get(|| async { "ok" }))
+            .route("/down", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        assert!(probe(&format!("http://{addr}/healthz")).await.is_ok());
+        assert!(probe(&format!("http://{addr}/down")).await.is_err());
+        // Nothing listening: refused, not a pass.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gone = closed.local_addr().unwrap();
+        drop(closed);
+        assert!(probe(&format!("http://{gone}/healthz")).await.is_err());
+    }
 
     #[test]
     fn read_hosts_are_trimmed_lowercased_and_never_empty() {

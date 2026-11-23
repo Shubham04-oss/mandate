@@ -44,8 +44,9 @@ pub async fn hit(
     Ok((count > limit).then(|| (WINDOW_SECS - t.rem_euclid(WINDOW_SECS)).max(1)))
 }
 
-/// Cloudflare's `CF-Connecting-IP` when `trust_cf` (anyone else could forge it), else the peer
-/// address. IPv6 counts per /64, the block one host is usually given.
+/// Cloudflare's `CF-Connecting-IP` when `trust_cf` and the peer is loopback (the cloudflared
+/// sidecar; any other peer, eve included, could forge it), else the peer address. IPv6 counts per
+/// /64, the block one host is usually given.
 fn client_ip(req: &Request, trust_cf: bool) -> String {
     let cf = || {
         req.headers()
@@ -53,12 +54,14 @@ fn client_ip(req: &Request, trust_cf: bool) -> String {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<IpAddr>().ok())
     };
-    let peer = || {
-        req.extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| c.0.ip())
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
+    let ip = match peer {
+        Some(p) if trust_cf && p.to_canonical().is_loopback() => cf().or(peer),
+        _ => peer,
     };
-    let ip = if trust_cf { cf().or_else(peer) } else { peer() };
     // ponytail: without either (tests, a misconfigured server) all callers share one bucket.
     match ip.map(|ip| ip.to_canonical()) {
         Some(IpAddr::V6(v6)) => format!(
@@ -156,20 +159,37 @@ mod tests {
     }
 
     #[test]
-    fn cf_header_used_with_the_flag() {
+    fn cf_header_used_with_the_flag_from_loopback() {
         assert_eq!(
-            client_ip(&req(Some("1.2.3.4"), "10.0.0.9"), true),
+            client_ip(&req(Some("1.2.3.4"), "127.0.0.1"), true),
             "1.2.3.4"
         );
+        assert_eq!(client_ip(&req(Some("1.2.3.4"), "::1"), true), "1.2.3.4");
         // A header that is not an address falls back to the peer.
-        assert_eq!(client_ip(&req(Some("nope"), "10.0.0.9"), true), "10.0.0.9");
+        assert_eq!(
+            client_ip(&req(Some("nope"), "127.0.0.1"), true),
+            "127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn cf_header_from_a_non_loopback_peer_is_ignored() {
+        // eve reaches the core's port directly and could forge the header.
+        assert_eq!(
+            client_ip(&req(Some("1.2.3.4"), "10.0.0.9"), true),
+            "10.0.0.9"
+        );
+        assert_eq!(
+            client_ip(&req(Some("1.2.3.4"), "2001:db8:1:2::1"), true),
+            "2001:db8:1:2::/64"
+        );
     }
 
     #[test]
     fn ipv6_in_one_slash_64_share_a_bucket() {
         let a = client_ip(&req(None, "2001:db8:1:2::1"), false);
         let b = client_ip(
-            &req(Some("2001:db8:1:2:ffff:eeee:dddd:cccc"), "10.0.0.9"),
+            &req(Some("2001:db8:1:2:ffff:eeee:dddd:cccc"), "127.0.0.1"),
             true,
         );
         assert_eq!(a, "2001:db8:1:2::/64");
