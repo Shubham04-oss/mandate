@@ -28,7 +28,12 @@ resource "aws_service_discovery_service" "this" {
 }
 
 locals {
-  internal = aws_service_discovery_private_dns_namespace.main.name
+  # postgres:17-alpine (17.12), linux/amd64 manifest; bump with the mirror step in docs/deploy.md.
+  db_bootstrap_image_digest = "sha256:e80acae3f1109e8e4533618b594918936f2858c63afc7204c4773148a673add8"
+  # The RDS root CAs for ap-south-1 (truststore.pki.rds.amazonaws.com); tests pin its SHA-256.
+  # Every database client writes it to a file and connects with sslmode=verify-full.
+  rds_ca_pem = file("${path.module}/rds-ca/ap-south-1-bundle.pem")
+  internal   = aws_service_discovery_private_dns_namespace.main.name
   # Secret env names per task. The core entrypoint turns *_PEM values into 0600 files; eve reads
   # MANDATE_ASSERTION_PUBLIC_KEY as PEM text (lane D).
   secret_env = {
@@ -44,6 +49,7 @@ locals {
     "eve/assertion-public-key"   = "MANDATE_ASSERTION_PUBLIC_KEY"
   }
   core_environment = {
+    RDS_CA_PEM         = local.rds_ca_pem
     AWS_REGION         = var.region
     MANDATE_READ_HOSTS = var.read_hosts
     MANDATE_WEB_ORIGIN = "https://app.${var.domain}"
@@ -59,6 +65,7 @@ locals {
     MANDATE_GUARDRAIL_VERSION  = aws_bedrock_guardrail_version.main.version
   }
   eve_environment = {
+    RDS_CA_PEM             = local.rds_ca_pem
     PORT                   = "3000"
     MANDATE_CORE_MCP_URL   = "http://core.${local.internal}:8080/mcp"
     MANDATE_AI_GATEWAY_URL = var.ai_gateway_url
@@ -132,7 +139,9 @@ resource "aws_ecs_task_definition" "migrate" {
     operating_system_family = "LINUX"
     cpu_architecture        = "X86_64"
   }
-  container_definitions = jsonencode([local.container["migrate"]])
+  container_definitions = jsonencode([merge(local.container["migrate"], {
+    environment = [{ name = "RDS_CA_PEM", value = local.rds_ca_pem }]
+  })])
 }
 
 # One-off, run by the owner (docs/deploy.md step 4): creates the app and eve roles and eve's
@@ -151,14 +160,16 @@ resource "aws_ecs_task_definition" "db_bootstrap" {
   container_definitions = jsonencode([{
     name      = "db-bootstrap"
     essential = true
-    # The official image through ECR Public: psql 17, no Docker Hub rate limit.
-    image   = "public.ecr.aws/docker/library/postgres:17-alpine"
-    command = ["sh", "-c", "printf '%s\\n' \"$BOOTSTRAP_SQL\" | psql -v ON_ERROR_STOP=1 -f -"]
+    # Pinned by digest: the official postgres image mirrored into the core repository (deploy.md step 4).
+    image   = "${aws_ecr_repository.this["core"].repository_url}@${local.db_bootstrap_image_digest}"
+    command = ["sh", "-c", "printf '%s\\n' \"$RDS_CA_PEM\" > /tmp/rds-ca.pem && printf '%s\\n' \"$BOOTSTRAP_SQL\" | psql -v ON_ERROR_STOP=1 -f -"]
     environment = [for k, v in {
       PGHOST        = aws_db_instance.main.address
       PGUSER        = aws_db_instance.main.username
       PGDATABASE    = aws_db_instance.main.db_name
-      PGSSLMODE     = "require"
+      PGSSLMODE     = "verify-full"
+      PGSSLROOTCERT = "/tmp/rds-ca.pem"
+      RDS_CA_PEM    = local.rds_ca_pem
       BOOTSTRAP_SQL = file("${path.module}/sql/db_bootstrap.sql")
     } : { name = k, value = v }]
     secrets = [

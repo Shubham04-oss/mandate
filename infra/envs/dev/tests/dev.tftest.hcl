@@ -258,12 +258,34 @@ run "db_bootstrap_takes_role_passwords_from_secrets_only" {
     error_message = "no password is a plain environment value"
   }
   assert {
-    condition     = one([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.value if e.name == "PGSSLMODE"]) == "require"
-    error_message = "the bootstrap connects over TLS"
+    condition     = one([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.value if e.name == "PGSSLMODE"]) == "verify-full"
+    error_message = "the bootstrap verifies the server certificate and host name"
+  }
+  assert {
+    condition     = one([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.value if e.name == "RDS_CA_PEM"]) == file("${path.module}/rds-ca/ap-south-1-bundle.pem")
+    error_message = "the bootstrap trusts exactly the RDS CA bundle"
+  }
+  assert {
+    condition     = startswith(jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].image, "${aws_ecr_repository.this["core"].repository_url}@") && can(regex("@sha256:[0-9a-f]{64}$", jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].image))
+    error_message = "the image that holds the master password comes from the private repository, pinned by digest"
   }
   assert {
     condition     = !contains(flatten([for st in jsondecode(aws_iam_role_policy.deploy.policy).Statement : st.Resource if contains(flatten([st.Action]), "iam:PassRole")]), aws_iam_role.db_bootstrap_execution.arn)
     error_message = "the deploy workflow cannot run the bootstrap"
+  }
+}
+
+run "every_database_client_gets_the_pinned_rds_ca" {
+  command = apply
+
+  assert {
+    condition     = filesha256("${path.module}/rds-ca/ap-south-1-bundle.pem") == "ca4a9dc14e06c3f84274eff3ffed0e5d4d3463141593e1159eb4a0904df6cd74"
+    error_message = "the RDS CA bundle is the one fetched from truststore.pki.rds.amazonaws.com; re-check before changing the hash"
+  }
+  assert {
+    condition = alltrue([for td in [aws_ecs_task_definition.core, aws_ecs_task_definition.eve, aws_ecs_task_definition.migrate] :
+    one([for e in jsondecode(td.container_definitions)[0].environment : e.value if e.name == "RDS_CA_PEM"]) == file("${path.module}/rds-ca/ap-south-1-bundle.pem")])
+    error_message = "the core, eve and migrate get the CA their verify-full URLs name"
   }
 }
 
@@ -452,20 +474,22 @@ run "api_is_proxied_and_auth_is_rate_limited_at_the_edge" {
   }
 }
 
-run "the_migrate_task_reaches_only_the_endpoints_and_the_database" {
+run "the_one_off_tasks_reach_only_the_endpoints_and_the_database" {
   command = apply
 
   assert {
-    condition     = !contains(keys(aws_vpc_security_group_egress_rule.https), "migrate")
-    error_message = "the migrate task has no route to the internet"
+    condition     = !contains(keys(aws_vpc_security_group_egress_rule.https), "migrate") && !contains(keys(aws_vpc_security_group_egress_rule.https), "db-bootstrap")
+    error_message = "migrate and db-bootstrap have no route to the internet"
   }
   assert {
-    condition = (
-      aws_vpc_security_group_egress_rule.migrate_to_endpoints.referenced_security_group_id == aws_security_group.endpoints.id
-      && aws_vpc_security_group_egress_rule.migrate_to_s3.prefix_list_id == aws_vpc_endpoint.s3.prefix_list_id
-      && aws_vpc_security_group_egress_rule.to_db["migrate"].referenced_security_group_id == aws_security_group.db.id
-    )
-    error_message = "migrate: HTTPS to the interface and S3 endpoints, Postgres to the database"
+    condition = alltrue([for t, sg in { migrate = aws_security_group.migrate.id, "db-bootstrap" = aws_security_group.db_bootstrap.id } : (
+      aws_vpc_security_group_egress_rule.to_endpoints[t].security_group_id == sg
+      && aws_vpc_security_group_egress_rule.to_endpoints[t].referenced_security_group_id == aws_security_group.endpoints.id
+      && aws_vpc_security_group_egress_rule.to_s3[t].security_group_id == sg
+      && aws_vpc_security_group_egress_rule.to_s3[t].prefix_list_id == aws_vpc_endpoint.s3.prefix_list_id
+      && aws_vpc_security_group_egress_rule.to_db[t].referenced_security_group_id == aws_security_group.db.id
+    )])
+    error_message = "HTTPS to the interface and S3 endpoints, Postgres to the database"
   }
 }
 

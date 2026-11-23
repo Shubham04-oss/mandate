@@ -65,7 +65,7 @@ locals {
   db_master_secret_arn = one(aws_db_instance.main.master_user_secret[*].secret_arn)
 }
 
-# db-bootstrap pulls a public image (no ECR rights) and reads the master secret and the two URLs.
+# db-bootstrap pulls its mirrored image from the core repository and reads the master secret and the two URLs.
 resource "aws_iam_role" "db_bootstrap_execution" {
   name = "${local.name}-db-bootstrap-execution"
   assume_role_policy = jsonencode({
@@ -85,6 +85,16 @@ resource "aws_iam_role_policy" "db_bootstrap_execution" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      {
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
+        Resource = aws_ecr_repository.this["core"].arn
+      },
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]

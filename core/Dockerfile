@@ -38,6 +38,11 @@ if [ -n "${MANDATE_EVENT_PUBLIC_KEY_PEM:-}" ]; then
   export MANDATE_EVENT_PUBLIC_KEYS="mandate.core=/run/mandate/event-public-key.pem"
 fi
 unset MANDATE_EVENT_PUBLIC_KEY_PEM
+# The RDS root CAs that DATABASE_URL's sslrootcert names (sslmode=verify-full).
+if [ -n "${RDS_CA_PEM:-}" ]; then
+  printf '%s\n' "$RDS_CA_PEM" > /run/mandate/rds-ca.pem
+fi
+unset RDS_CA_PEM
 exec /usr/local/bin/mandate "$@"
 SH
 USER 10001
@@ -56,7 +61,7 @@ RUN apt-get update \
 COPY core/sql /app/sql
 USER 10001
 ENTRYPOINT []
-CMD ["sh", "-c", "mandate migrate && psql \"$MANDATE_MIGRATION_DATABASE_URL\" -v ON_ERROR_STOP=1 -v role=mandate_app -f /app/sql/app_role.sql"]
+CMD ["sh", "-c", "if [ -n \"${RDS_CA_PEM:-}\" ]; then printf '%s\\n' \"$RDS_CA_PEM\" > /run/mandate/rds-ca.pem; fi && mandate migrate && psql \"$MANDATE_MIGRATION_DATABASE_URL\" -v ON_ERROR_STOP=1 -v role=mandate_app -f /app/sql/app_role.sql"]
 
 # The default target is the service image.
 FROM serve
