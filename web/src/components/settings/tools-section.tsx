@@ -1,440 +1,580 @@
-import { cn } from "cn";
-import { useState } from "react";
+import { getRouteApi } from "@tanstack/react-router";
+import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { Icon } from "#/components/icons/icon.tsx";
-import { AppLogo } from "#/components/settings/app-logo.tsx";
-import { ConnectKeyDialog } from "#/components/settings/connect-key-dialog.tsx";
 import { SettingsHeader } from "#/components/settings/parts.tsx";
-import { Badge } from "#/components/ui/badge.tsx";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "#/components/ui/alert-dialog.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import {
-	Collapsible,
-	CollapsibleContent,
-	CollapsibleTrigger,
-} from "#/components/ui/collapsible.tsx";
+	Dialog,
+	DialogBody,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "#/components/ui/dialog.tsx";
+import { Input } from "#/components/ui/input.tsx";
+import { RadioGroup, RadioGroupItem } from "#/components/ui/radio-group.tsx";
+import { Skeleton } from "#/components/ui/skeleton.tsx";
 import {
-	DropdownMenu,
-	DropdownMenuContent,
-	DropdownMenuItem,
-	DropdownMenuTrigger,
-} from "#/components/ui/dropdown-menu.tsx";
+	ApiError,
+	api,
+	type Grant,
+	type GrantPrincipal,
+} from "#/lib/api/index.ts";
 import {
-	InputGroup,
-	InputGroupAddon,
-	InputGroupInput,
-} from "#/components/ui/input-group.tsx";
-import {
-	Select,
-	SelectContent,
-	SelectItem,
-	SelectTrigger,
-	SelectValue,
-} from "#/components/ui/select.tsx";
-import { sample } from "#/lib/sample.ts";
-import {
-	type CatalogTool,
-	type ConnectedTool,
-	searchCatalog,
-	summarizeConnections,
-	type ToolStatus,
-} from "#/lib/tools.ts";
+	catalog,
+	type Directory,
+	expiresAt,
+	expiryChoices,
+	forTool,
+	grantsAccess,
+	kindLabel,
+	principalKey,
+	principalName,
+} from "#/lib/grants.ts";
 
-// ponytail: every control here changes local state only. Connecting, disconnecting, events and who
-// can use a tool all go through the core, which holds the credentials in the token vault.
+const appRoute = getRouteApi("/_app");
 
-// The colour lives in the dot, the text stays neutral. Orange, and its warm tint, only where the
-// person must act.
-const statusPill: Record<
-	Exclude<ToolStatus, "connected">,
-	{ label: string; dot: string; fill: string }
-> = {
-	connecting: { label: "Connecting…", dot: "bg-sea", fill: "bg-hover" },
-	expired: { label: "Expired", dot: "bg-gold-deep", fill: "bg-gold-soft" },
-	failed: { label: "Failed", dot: "bg-destructive", fill: "bg-hover" },
+type Tool = (typeof catalog)[number];
+
+/** Someone a grant can be for: a person, a team, or an agent. */
+type Choice = { principal: GrantPrincipal; name: string; detail: string };
+
+type Loaded = { grants: Grant[]; names: Directory; choices: Choice[] };
+
+// ponytail: people come from the first page of /v1/org/members, and agents from /v1/agents, which
+// lists only the agents the admin may use; noted for the lead.
+async function load(): Promise<Loaded> {
+	const [grants, members, teams, agents] = await Promise.all([
+		api.grants.list(),
+		api.org.members(),
+		api.org.teams(),
+		api.agents(),
+	]);
+	const choices: Choice[] = [
+		...members.items.map((p) => ({
+			principal: { kind: "member" as const, id: p.id },
+			name: p.name,
+			detail: p.email,
+		})),
+		...teams.items.map((t) => ({
+			principal: { kind: "team" as const, id: t.id },
+			name: t.name,
+			detail: `${t.members} ${t.members === 1 ? "person" : "people"}`,
+		})),
+		...agents.items.map((a) => ({
+			principal: { kind: "agent" as const, id: a.id },
+			name: a.name,
+			detail: "Agent",
+		})),
+	];
+	const names: Directory = new Map(
+		choices.map((c) => [principalKey(c.principal), c.name]),
+	);
+	return { grants: grants.items, names, choices };
+}
+
+const message = (e: unknown) =>
+	e instanceof ApiError ? e.message : "Something went wrong. Try again.";
+
+const day = (iso: string) => {
+	const d = new Date(iso);
+	return d.toLocaleDateString([], {
+		day: "numeric",
+		month: "short",
+		...(d.getFullYear() === new Date().getFullYear()
+			? {}
+			: { year: "numeric" }),
+	});
 };
 
 export function ToolsSection() {
-	const [connected, setConnected] = useState(sample.tools.connected);
-	const [query, setQuery] = useState("");
-	const connectedIds = new Set(connected.map((t) => t.id));
-	const groups = searchCatalog(
-		sample.tools.catalog.map((g) => ({
-			...g,
-			tools: g.tools.filter((t) => !connectedIds.has(t.id)),
-		})),
-		query,
-	);
+	const { me } = appRoute.useLoaderData();
+	const [data, setData] = useState<Loaded | null>(null);
+	const [error, setError] = useState<unknown>(null);
+
+	const refresh = useCallback(async () => {
+		try {
+			setData(await load());
+			setError(null);
+		} catch (e) {
+			setError(e);
+		}
+	}, []);
+
+	// The core decides every grant change; this only spares a non-admin controls that would fail.
+	const access = grantsAccess(me, error);
+	useEffect(() => {
+		if (grantsAccess(me) === "manage") void refresh();
+	}, [me, refresh]);
 
 	return (
-		<div className="flex flex-col gap-8">
+		<div className="flex flex-col gap-6">
 			<SettingsHeader eyebrow="Connections" title="Tools">
-				Agents use a tool only with the access its person already has, and only
-				for the people you allow here.
+				{access === "manage"
+					? "Choose which people, teams and agents may use each tool, and for how long."
+					: "Your organization's admins choose which tools agents may use, and for whom."}
 			</SettingsHeader>
-
-			<section aria-labelledby="connected-h" className="flex flex-col gap-2.5">
-				<div className="flex flex-wrap items-center gap-2">
-					<h3
-						id="connected-h"
-						className="m-0 font-semibold text-[16px] tracking-[-0.01em]"
+			{access === "not_admin" ? (
+				<NotAdmin org={me.org.name} />
+			) : error ? (
+				<div className="flex flex-wrap items-center gap-3 rounded-card bg-raised px-5 py-4 shadow-card">
+					<p
+						role="alert"
+						className="m-0 flex-1 text-[13px] text-soft-foreground"
 					>
-						Connected
-					</h3>
-					<span className="ml-auto rounded-full px-2.5 py-1 text-[11px] text-soft-foreground shadow-[inset_0_0_0_1px_var(--border-quiet)]">
-						{summarizeConnections(connected)}
-					</span>
+						{message(error)}
+					</p>
+					<Button variant="outline" onClick={refresh}>
+						Try again
+					</Button>
 				</div>
-				<ul className="m-0 flex list-none flex-col rounded-card bg-raised p-0 shadow-card">
-					{connected.map((tool) => (
-						<ConnectedRow
+			) : !data ? (
+				<div className="flex flex-col gap-4" aria-busy="true">
+					<Skeleton className="h-36 rounded-card" />
+					<Skeleton className="h-36 rounded-card" />
+				</div>
+			) : (
+				<>
+					{catalog.map((tool) => (
+						<ToolCard
 							key={tool.id}
 							tool={tool}
-							onChange={(next) =>
-								setConnected((all) =>
-									all.map((t) => (t.id === next.id ? next : t)),
-								)
-							}
-							onRemove={() =>
-								setConnected((all) => all.filter((t) => t.id !== tool.id))
-							}
+							grants={forTool(data.grants, tool.id)}
+							data={data}
+							onChanged={refresh}
 						/>
 					))}
-				</ul>
-			</section>
-
-			<section aria-labelledby="add-h" className="flex flex-col gap-5">
-				<div className="flex flex-wrap items-end justify-between gap-3">
-					<div className="flex flex-col gap-1">
-						<h3
-							id="add-h"
-							className="m-0 font-semibold text-[16px] tracking-[-0.01em]"
-						>
-							Add a tool
-						</h3>
-						<p className="m-0 text-[12.5px] text-muted-foreground">
-							Browse by what your team needs, or search.
-						</p>
-					</div>
-					<InputGroup className="h-9 w-full rounded-lg sm:w-64">
-						<InputGroupAddon align="inline-start">
-							<Icon name="search" size={15} className="text-muted-foreground" />
-						</InputGroupAddon>
-						<InputGroupInput
-							aria-label="Search tools"
-							placeholder="Search tools"
-							value={query}
-							onChange={(e) => setQuery(e.target.value)}
-							className="pl-1 text-[12.5px]"
-						/>
-					</InputGroup>
-				</div>
-
-				{groups.length === 0 ? (
-					<p className="m-0 py-6 text-center text-[13px] text-muted-foreground">
-						No tools match. Try a different search.
+					<p className="m-0 text-[12px] text-muted-foreground leading-normal">
+						A grant lasts 90 days at most; allow it again when it ends. Removing
+						one stops it at once.
 					</p>
-				) : (
-					groups.map((group) => (
-						<section
-							key={group.title}
-							aria-label={group.title}
-							className="flex flex-col gap-2.5"
-						>
-							<div className="flex items-baseline gap-2">
-								<h4 className="m-0 font-semibold text-[14px]">{group.title}</h4>
-								<span className="text-[12px] text-muted-foreground max-sm:hidden">
-									{group.description}
-								</span>
-								<span className="ml-auto text-[11px] text-muted-foreground tabular-nums">
-									{String(group.tools.length).padStart(2, "0")}
-								</span>
-							</div>
-							<ul className="m-0 grid list-none grid-cols-1 items-start gap-2 p-0 sm:grid-cols-2">
-								{group.tools.map((tool) => (
-									<CatalogCard key={tool.id} tool={tool} />
-								))}
-							</ul>
-						</section>
-					))
-				)}
-			</section>
+				</>
+			)}
 		</div>
 	);
 }
 
-function ConnectedRow({
-	tool,
-	onChange,
-	onRemove,
-}: {
-	tool: ConnectedTool;
-	onChange: (tool: ConnectedTool) => void;
-	onRemove: () => void;
-}) {
-	const [open, setOpen] = useState(false);
-	const [confirming, setConfirming] = useState(false);
-	const access =
-		sample.tools.accessOptions.find((o) => o.value === tool.access)?.label ??
-		"";
-	const pill = tool.status === "connected" ? null : statusPill[tool.status];
-
+function NotAdmin({ org }: { org: string }) {
 	return (
-		<li className="border-border border-t first:border-t-0">
-			<Collapsible open={open} onOpenChange={setOpen}>
-				<div className="flex items-center gap-3 px-3 py-2.5">
-					<CollapsibleTrigger className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-lg border-0 bg-transparent p-0 text-left text-foreground">
-						<AppLogo logo={tool.logo} name={tool.name} />
-						<span className="flex min-w-0 flex-col gap-0.5">
-							<span className="flex items-center gap-2 font-semibold text-[13px]">
-								{tool.name}
-								{pill ? (
-									<Badge
-										className={cn(
-											"h-5 gap-1.5 pr-2 pl-1.5 font-medium text-[11px] text-soft-foreground",
-											pill.fill,
-										)}
-									>
-										<i className={cn("status-dot", pill.dot)} />
-										{pill.label}
-									</Badge>
-								) : null}
-							</span>
-							<span className="truncate text-[12px] text-muted-foreground">
-								{access} · {tool.detail}
-							</span>
-						</span>
-					</CollapsibleTrigger>
-
-					<AccessSelect
-						tool={tool}
-						onChange={onChange}
-						className="max-sm:hidden"
-					/>
-
-					<DropdownMenu>
-						<DropdownMenuTrigger
-							render={
-								<Button
-									variant="ghost"
-									size="icon-sm"
-									aria-label={`More for ${tool.name}`}
-								/>
-							}
-						>
-							<span
-								aria-hidden="true"
-								className="font-bold text-[15px] leading-none tracking-[1px]"
-							>
-								···
-							</span>
-						</DropdownMenuTrigger>
-						<DropdownMenuContent align="end" className="w-48">
-							<DropdownMenuItem onClick={() => setOpen(true)}>
-								Events and details
-							</DropdownMenuItem>
-							{tool.status !== "connected" ? (
-								<DropdownMenuItem>Reconnect ↗</DropdownMenuItem>
-							) : null}
-							<DropdownMenuItem
-								variant="destructive"
-								onClick={() => {
-									setOpen(true);
-									setConfirming(true);
-								}}
-							>
-								Disconnect
-							</DropdownMenuItem>
-						</DropdownMenuContent>
-					</DropdownMenu>
-				</div>
-
-				<CollapsibleContent>
-					<div className="flex flex-col gap-3 pr-3 pb-3.5 pl-[58px]">
-						<div className="flex items-center gap-2 text-[12px] text-muted-foreground sm:hidden">
-							Who can use it
-							<AccessSelect tool={tool} onChange={onChange} />
-						</div>
-
-						{tool.status === "connected" ? (
-							<div className="flex flex-col rounded-lg bg-canvas shadow-ring">
-								<div className="flex items-center gap-2 px-3 py-2.5">
-									<span className="flex flex-col gap-0.5">
-										<b className="font-semibold text-[12.5px]">
-											Events that wake your agent
-										</b>
-										<span className="text-[11.5px] text-muted-foreground">
-											When one happens in {tool.name}, your agent can act on it.
-										</span>
-									</span>
-									<Button variant="outline" size="xs" className="ml-auto">
-										+ Add event
-									</Button>
-								</div>
-								{tool.events.length === 0 ? (
-									<p className="m-0 border-border border-t px-3 py-3 text-[12px] text-muted-foreground">
-										No events yet.
-									</p>
-								) : (
-									tool.events.map((event) => (
-										<div
-											key={event.id}
-											className="flex items-center gap-2.5 border-border border-t px-3 py-2.5"
-										>
-											<i
-												aria-hidden="true"
-												className={cn(
-													"size-[7px] shrink-0 rounded-full",
-													event.on
-														? "bg-ok-solid shadow-[0_0_0_3px_rgb(127_207_152/0.15)]"
-														: "bg-border-strong",
-												)}
-											/>
-											<span className="flex min-w-0 flex-1 flex-col gap-0.5">
-												<b className="font-semibold text-[12px]">
-													{event.title}
-												</b>
-												<span className="text-[11px] text-muted-foreground">
-													{event.detail}
-												</span>
-											</span>
-											<button
-												type="button"
-												className="cursor-pointer border-0 bg-transparent p-0 text-[11.5px] text-muted-foreground hover:text-foreground"
-												onClick={() =>
-													onChange({
-														...tool,
-														events: tool.events.map((e) =>
-															e.id === event.id ? { ...e, on: !e.on } : e,
-														),
-													})
-												}
-											>
-												{event.on ? "Stop" : "Turn on"}
-											</button>
-										</div>
-									))
-								)}
-							</div>
-						) : (
-							<p className="m-0 text-[12px] text-muted-foreground">
-								{tool.status === "connecting"
-									? `Finish signing in to ${tool.name} in the tab that opened.`
-									: `${tool.name}'s sign-in has run out. Reconnect to keep using it.`}
-							</p>
-						)}
-
-						{confirming ? (
-							<div className="flex flex-wrap items-center gap-2 rounded-lg bg-destructive/10 px-3 py-2.5 shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--danger)_35%,transparent)]">
-								<span className="flex-1 text-[12px] text-soft-foreground">
-									Disconnect {tool.name}? Agents lose it at once, and every
-									grant that uses it stops.
-								</span>
-								<Button
-									variant="outline"
-									size="xs"
-									onClick={() => setConfirming(false)}
-								>
-									Keep connected
-								</Button>
-								<Button variant="destructive" size="xs" onClick={onRemove}>
-									Yes, disconnect
-								</Button>
-							</div>
-						) : (
-							<div className="flex gap-2">
-								{tool.status !== "connected" ? (
-									<Button size="xs">Reconnect ↗</Button>
-								) : null}
-								<Button
-									variant="outline"
-									size="xs"
-									onClick={() => setConfirming(true)}
-								>
-									Disconnect
-								</Button>
-							</div>
-						)}
-					</div>
-				</CollapsibleContent>
-			</Collapsible>
-		</li>
+		<section className="flex items-start gap-3.5 rounded-card bg-raised p-[22px] shadow-card">
+			<span className="grid size-9 flex-none place-items-center rounded-[11px] bg-hover text-soft-foreground">
+				<Icon name="lock" size={17} strokeWidth={1.9} />
+			</span>
+			<div className="flex flex-col gap-1">
+				<b className="font-semibold text-[14px]">
+					Only admins choose which tools agents may use.
+				</b>
+				<span className="text-[13px] text-soft-foreground leading-normal">
+					If your agent needs a tool it can't use yet, ask an admin of {org}.
+				</span>
+			</div>
+		</section>
 	);
 }
 
-/** Who may use the tool through their agents. */
-function AccessSelect({
+function ToolCard({
 	tool,
-	onChange,
-	className,
+	grants,
+	data,
+	onChanged,
 }: {
-	tool: ConnectedTool;
-	onChange: (tool: ConnectedTool) => void;
-	className?: string;
+	tool: Tool;
+	grants: Grant[];
+	data: Loaded;
+	onChanged: () => Promise<void>;
 }) {
+	// Opens with nobody chosen, or with whoever's grant ended.
+	const [allowing, setAllowing] = useState<{
+		prefill?: GrantPrincipal;
+	} | null>(null);
+	const [removing, setRemoving] = useState<Grant | null>(null);
+	const [removeError, setRemoveError] = useState<string | null>(null);
+	const headingId = `${tool.id}-h`;
+
+	const remove = async () => {
+		if (!removing) return;
+		try {
+			await api.grants.revoke(removing.id);
+			setRemoving(null);
+			await onChanged();
+		} catch (e) {
+			setRemoveError(message(e));
+		}
+	};
+
 	return (
-		<Select
-			value={tool.access}
-			onValueChange={(value) => value && onChange({ ...tool, access: value })}
-			items={sample.tools.accessOptions}
+		<section
+			aria-labelledby={headingId}
+			className="overflow-hidden rounded-card bg-raised shadow-card"
 		>
-			<SelectTrigger
-				aria-label={`Who can use ${tool.name}`}
-				className={className}
-			>
-				<SelectValue />
-			</SelectTrigger>
-			<SelectContent>
-				{sample.tools.accessOptions.map((o) => (
-					<SelectItem key={o.value} value={o.value}>
-						{o.label}
-					</SelectItem>
-				))}
-			</SelectContent>
-		</Select>
-	);
-}
-
-function CatalogCard({ tool }: { tool: CatalogTool }) {
-	const [keyOpen, setKeyOpen] = useState(false);
-	return (
-		<li>
-			<Collapsible className="rounded-xl bg-raised shadow-ring transition-shadow duration-150 hover:shadow-[0_0_0_1px_var(--border-strong)] data-open:shadow-[0_0_0_1px_var(--border-strong)]">
-				<CollapsibleTrigger className="group flex w-full cursor-pointer items-center gap-2.5 rounded-xl border-0 bg-transparent p-2 text-left text-foreground">
-					<AppLogo logo={tool.logo} name={tool.name} size={38} />
-					<span className="flex-1 font-semibold text-[13px]">{tool.name}</span>
+			<div className="flex flex-wrap items-center gap-3 p-4">
+				<span className="grid size-9 flex-none place-items-center rounded-[11px] bg-sky-soft text-sea">
 					<Icon
-						name="chevron-right"
-						size={15}
-						className="mr-1 rotate-90 text-muted-foreground transition-transform duration-150 group-data-panel-open:-rotate-90"
+						name={tool.id === "web.read_page" ? "link" : "laptop"}
+						size={17}
+						strokeWidth={1.9}
 					/>
-				</CollapsibleTrigger>
-				<CollapsibleContent>
-					<div className="flex flex-col items-start gap-2.5 pr-3 pb-3 pl-[56px]">
-						<p className="m-0 text-[12px] text-muted-foreground leading-normal">
-							{tool.description}
-						</p>
-						{tool.keyFields ? (
-							<Button
-								variant="outline"
-								size="xs"
-								onClick={() => setKeyOpen(true)}
-							>
-								Connect with a key
-							</Button>
-						) : (
-							<Button variant="outline" size="xs">
-								Connect ↗
-							</Button>
-						)}
-					</div>
-				</CollapsibleContent>
-			</Collapsible>
-			{tool.keyFields ? (
-				<ConnectKeyDialog
+				</span>
+				<div className="flex min-w-[200px] flex-1 flex-col gap-0.5">
+					<h4 id={headingId} className="m-0 font-semibold text-[14px]">
+						{tool.title}
+					</h4>
+					<span className="text-[12px] text-muted-foreground leading-normal">
+						{tool.about}
+					</span>
+				</div>
+				<Button variant="outline" onClick={() => setAllowing({})}>
+					Allow someone
+				</Button>
+			</div>
+			{grants.length === 0 ? (
+				<p className="m-0 border-border border-t px-4 py-3.5 text-[12.5px] text-muted-foreground">
+					No one yet, so no agent can use it.
+				</p>
+			) : (
+				<ul className="m-0 list-none p-0">
+					{grants.map((g) => (
+						<GrantRow
+							key={g.id}
+							grant={g}
+							name={principalName(g.principal, data.names)}
+							tool={tool}
+							onAllowAgain={() => setAllowing({ prefill: g.principal })}
+							onRemove={() => {
+								setRemoveError(null);
+								setRemoving(g);
+							}}
+						/>
+					))}
+				</ul>
+			)}
+
+			{allowing ? (
+				<AllowDialog
 					tool={tool}
-					open={keyOpen}
-					onOpenChange={setKeyOpen}
+					prefill={allowing.prefill}
+					choices={data.choices}
+					onClose={() => setAllowing(null)}
+					onAllowed={async () => {
+						setAllowing(null);
+						await onChanged();
+					}}
 				/>
 			) : null}
+
+			<AlertDialog
+				open={removing !== null}
+				onOpenChange={(open) => {
+					if (!open) setRemoving(null);
+				}}
+			>
+				<AlertDialogContent>
+					<AlertDialogHeader>
+						<AlertDialogTitle>
+							Remove{" "}
+							{removing ? principalName(removing.principal, data.names) : ""}?
+						</AlertDialogTitle>
+						<AlertDialogDescription>
+							Their agent stops being able to {tool.title.toLowerCase()} at
+							once. You can allow them again later.
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					{removeError ? (
+						<p
+							role="alert"
+							className="m-0 text-[12.5px] text-danger-foreground"
+						>
+							{removeError}
+						</p>
+					) : null}
+					<AlertDialogFooter>
+						<AlertDialogCancel variant="outline">Keep</AlertDialogCancel>
+						<AlertDialogAction variant="destructive" onClick={remove}>
+							Remove
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+		</section>
+	);
+}
+
+function GrantRow({
+	grant,
+	name,
+	tool,
+	onAllowAgain,
+	onRemove,
+}: {
+	grant: Grant;
+	name: string;
+	tool: Tool;
+	onAllowAgain: () => void;
+	onRemove: () => void;
+}) {
+	const expired = grant.state === "expired";
+	return (
+		<li className="flex flex-wrap items-center gap-x-3 gap-y-1 border-border border-t px-4 py-[11px]">
+			<span
+				aria-hidden="true"
+				className={
+					grant.principal.kind === "agent"
+						? "grid size-7 flex-none place-items-center rounded-full bg-sky-soft font-bold text-[11px] text-sea"
+						: "grid size-7 flex-none place-items-center rounded-full bg-active font-bold text-[11px]"
+				}
+			>
+				{name[0]?.toUpperCase()}
+			</span>
+			<span className="flex min-w-[160px] flex-1 flex-col">
+				<b
+					className={
+						expired
+							? "font-semibold text-[13px] text-soft-foreground"
+							: "font-semibold text-[13px]"
+					}
+				>
+					{name}
+				</b>
+				<span className="truncate text-[11.5px] text-muted-foreground">
+					{kindLabel[grant.principal.kind]} · allowed by {grant.granted_by.name}
+					{grant.reason ? ` · “${grant.reason}”` : ""}
+				</span>
+			</span>
+			<span className="text-[12px] text-muted-foreground tabular-nums">
+				{expired
+					? `Ended ${day(grant.expires_at)}`
+					: `Until ${day(grant.expires_at)}`}
+			</span>
+			{expired ? (
+				<Button variant="outline" size="sm" onClick={onAllowAgain}>
+					Allow again
+				</Button>
+			) : (
+				<Button
+					variant="ghost"
+					size="sm"
+					aria-label={`Remove ${name} from ${tool.title}`}
+					onClick={onRemove}
+				>
+					Remove
+				</Button>
+			)}
 		</li>
+	);
+}
+
+/** Who may use a tool, for how long, and whether without asking. */
+function AllowDialog({
+	tool,
+	prefill,
+	choices,
+	onClose,
+	onAllowed,
+}: {
+	tool: Tool;
+	prefill?: GrantPrincipal;
+	choices: Choice[];
+	onClose: () => void;
+	onAllowed: () => Promise<void>;
+}) {
+	const [query, setQuery] = useState("");
+	const [picked, setPicked] = useState(prefill ? principalKey(prefill) : "");
+	const [days, setDays] = useState("30");
+	const [reason, setReason] = useState("");
+	const [error, setError] = useState<string | null>(null);
+	const [busy, setBusy] = useState(false);
+
+	const q = query.trim().toLowerCase();
+	const shown = choices.filter(
+		(c) =>
+			principalKey(c.principal) === picked ||
+			!q ||
+			c.name.toLowerCase().includes(q) ||
+			c.detail.toLowerCase().includes(q),
+	);
+	const until = new Date(expiresAt(Number(days))).toLocaleDateString([], {
+		weekday: "short",
+		day: "numeric",
+		month: "short",
+	});
+
+	const submit = async (e: FormEvent) => {
+		e.preventDefault();
+		const choice = choices.find((c) => principalKey(c.principal) === picked);
+		if (!choice) {
+			setError("Choose who to allow.");
+			return;
+		}
+		setBusy(true);
+		setError(null);
+		try {
+			await api.grants.create({
+				principal: choice.principal,
+				tool: tool.id,
+				// ponytail: both v1 tools are external or plain reads, which the policy never runs
+				// unattended, so a standing grant would change nothing; noted for the lead.
+				standing: false,
+				expires_at: expiresAt(Number(days)),
+				...(reason.trim() ? { reason: reason.trim() } : {}),
+			});
+			await onAllowed();
+		} catch (err) {
+			setBusy(false);
+			setError(
+				err instanceof ApiError && err.code === "conflict"
+					? `${choice.name} can already ${tool.title.toLowerCase()}.`
+					: message(err),
+			);
+		}
+	};
+
+	return (
+		<Dialog
+			open
+			onOpenChange={(open) => {
+				if (!open) onClose();
+			}}
+		>
+			<DialogContent className="w-[460px]">
+				<DialogBody>
+					<DialogHeader>
+						<DialogTitle>
+							Allow someone to {tool.title.toLowerCase()}
+						</DialogTitle>
+						<DialogDescription>
+							Their agent may use it until the grant ends.{" "}
+							{tool.id === "web.submit_form"
+								? "It still asks first each time."
+								: "Pages off your allowed sites still ask first."}
+						</DialogDescription>
+					</DialogHeader>
+
+					<form
+						id="allow-form"
+						onSubmit={submit}
+						className="flex flex-col gap-5"
+					>
+						<div className="flex flex-col gap-2">
+							<label
+								htmlFor="grant-who"
+								className="font-semibold text-[12.5px]"
+							>
+								Who
+							</label>
+							<Input
+								id="grant-who"
+								placeholder="Search people, teams and agents"
+								value={query}
+								onChange={(e) => setQuery(e.target.value)}
+								className="h-10"
+							/>
+							<RadioGroup
+								aria-label="Who"
+								value={picked}
+								onValueChange={(v) => setPicked(String(v))}
+								className="max-h-44 gap-0.5 overflow-y-auto rounded-[14px] p-1 shadow-[inset_0_0_0_1px_var(--border-quiet)]"
+							>
+								{shown.length === 0 ? (
+									<p className="m-0 px-2.5 py-2 text-[12.5px] text-muted-foreground">
+										No one matches.
+									</p>
+								) : null}
+								{shown.map((c) => {
+									const key = principalKey(c.principal);
+									return (
+										// biome-ignore lint/a11y/noLabelWithoutControl: the radio inside is the control
+										<label
+											key={key}
+											className="flex cursor-pointer items-center gap-2.5 rounded-[10px] px-2.5 py-2 text-[13px] hover:bg-hover has-data-checked:bg-hover"
+										>
+											<RadioGroupItem value={key} />
+											<span className="min-w-0 flex-1 truncate">{c.name}</span>
+											<span className="text-[11.5px] text-muted-foreground">
+												{kindLabel[c.principal.kind]}
+											</span>
+										</label>
+									);
+								})}
+							</RadioGroup>
+						</div>
+
+						<div className="flex flex-col gap-2">
+							<span id="grant-days" className="font-semibold text-[12.5px]">
+								For how long
+							</span>
+							<RadioGroup
+								aria-labelledby="grant-days"
+								value={days}
+								onValueChange={(v) => setDays(String(v))}
+								className="grid grid-cols-4 gap-1 rounded-full bg-hover p-1"
+							>
+								{expiryChoices.map((d) => (
+									// biome-ignore lint/a11y/noLabelWithoutControl: the radio inside is the control
+									<label
+										key={d}
+										className="flex h-8 cursor-pointer items-center justify-center rounded-full font-medium text-[12.5px] text-soft-foreground has-focus-visible:ring-3 has-focus-visible:ring-ring/50 has-data-checked:bg-raised has-data-checked:font-semibold has-data-checked:text-foreground has-data-checked:shadow-[0_0_0_1px_var(--border-quiet)]"
+									>
+										<RadioGroupItem value={String(d)} className="sr-only" />
+										{d === 1 ? "1 day" : `${d} days`}
+									</label>
+								))}
+							</RadioGroup>
+							<span className="text-[11.5px] text-muted-foreground">
+								Until {until}.
+							</span>
+						</div>
+
+						<div className="flex flex-col gap-2">
+							<label
+								htmlFor="grant-reason"
+								className="font-semibold text-[12.5px]"
+							>
+								Reason{" "}
+								<span className="font-normal text-muted-foreground">
+									optional
+								</span>
+							</label>
+							<Input
+								id="grant-reason"
+								placeholder="What it's for, so others know later"
+								maxLength={500}
+								value={reason}
+								onChange={(e) => setReason(e.target.value)}
+								className="h-10"
+							/>
+						</div>
+
+						{error ? (
+							<p
+								role="alert"
+								className="m-0 text-[12.5px] text-danger-foreground"
+							>
+								{error}
+							</p>
+						) : null}
+					</form>
+
+					<DialogFooter className="justify-end">
+						<Button type="button" variant="outline" onClick={onClose}>
+							Cancel
+						</Button>
+						<Button type="submit" form="allow-form" disabled={busy}>
+							Allow
+						</Button>
+					</DialogFooter>
+				</DialogBody>
+			</DialogContent>
+		</Dialog>
 	);
 }

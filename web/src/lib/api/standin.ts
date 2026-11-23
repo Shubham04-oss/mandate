@@ -601,7 +601,7 @@ const grants: Grant[] = [
 		id: "grt_3",
 		principal: { kind: "agent", id: "agt_ops" },
 		tool: "web.submit_form",
-		standing: true,
+		standing: false,
 		expires_at: daysFromNow(10),
 		state: "active",
 		granted_by: ada,
