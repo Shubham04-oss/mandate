@@ -6,16 +6,16 @@ Every person, organization, email address and team on the screens is made up. Th
 customers or real people, and they exist only so the screens render until the core supplies real
 data.
 
-- `src/lib/sample.ts`: Ada Brennan (`ada@northstar.io`), Raya Patel, Priya, Rohan, and the
-  organizations Northstar, Harbourline and Tidewater Labs. Also the two-step sign-in QR code and
-  key.
+- `src/lib/sample.ts`: Ada Brennan, Raya Patel and Northstar, for the pop-up preview only.
 - `src/routes/preview.popups.tsx`: the team Platform, Kenji Sato, `maria@northwind.de`, and the
-  "Q3 revenue figures" request.
-- `src/lib/api/standin.ts`: the stand-in API responses (below) reuse the same people and
-  organizations, plus made-up agents, approvals and activity.
+  "Q3 revenue figures" request. Outside `npm run dev` the page is not found.
+- `src/lib/api/standin.ts`: the stand-in API responses (below): the same people and organizations
+  (also Harbourline and Tidewater Labs), plus made-up agents, approvals, conversations, grants and
+  activity, and the two-step sign-in QR code and key.
 - `public/avatars/` and `public/sample/`: the avatar drawings and the QR code image.
 
-Replace each with data from the core as the screens are wired; none of it should ship.
+None of it reaches a real screen: a production build has no stand-ins, and every screen gets its
+data from the core.
 
 ## Talking to the core
 
@@ -83,15 +83,33 @@ Checked against the core on `main` (`core/src/api`). The contract is unchanged b
 5. **Invitations.** The invitation has no member list, so the faces row on the invite card is gone.
 6. **Approval `effect`.** The values aren't listed; the app shows a plain description built from
    the tool name and arguments instead.
-7. **Not in the contract.** These stay on sample data: "Working now" on Home (tasks in progress,
-   the live browser, scheduled runs), the Tools pop-up (connections), and activity entries for
-   access that ended.
-8. **Asking from the web.** Section 5.2 now has conversation endpoints and a per-conversation event
-   stream. Wiring the ask box and quick actions to them, with a conversation view, is the next web
-   task; until then sending says it isn't ready.
-9. **Desktop notifications.** Events stream per conversation only. Nothing tells the web app that a
+7. **Desktop notifications.** Events stream per conversation only. Nothing tells the web app that a
    new approval needs the person outside an open conversation, so Settings → Notifications sends
    only the test.
+
+**Conversations** (`core/src/api/conversations.rs`)
+
+8. **`Last-Event-ID` and CORS.** The browser sends `Last-Event-ID` only when its own EventSource
+   reconnects; the core's CORS allows only `content-type` and `x-mandate`. If a browser preflights
+   that reconnect, it fails and the app opens a fresh stream, which replays from the start. The app
+   drops events it has already seen by id, so nothing shows twice either way. Not yet tried against
+   a running core.
+9. **`Retry-After` isn't exposed** to the page by CORS, so on 429 the app backs off on its own
+   schedule (1 s up to 30 s).
+10. **Tool events carry no target.** A step says "Read a web page" but not which page; the approval
+    has the arguments, so only steps that wait for an OK show the page.
+11. **No `GET /v1/conversations/{id}`.** A conversation's title and state come from the first page of
+    the list; one further back opens titled "Conversation", with its state taken from its events.
+
+**Grants** (`core/src/api/grants.rs`)
+
+12. **No tool catalog endpoint.** Settings → Tools names `web.read_page` and `web.submit_form` itself
+    (`src/lib/grants.ts`).
+13. **`standing` changes nothing in v1.** The policy never runs `external` effects unattended, and
+    reads under a grant run anyway, so the app always sends `standing: false` and offers no switch.
+14. **Who can be chosen.** People come from the first page of `/v1/org/members`, and agents from
+    `/v1/agents`, which lists only the agents the admin may use, not every agent in the
+    organization. A grant for anyone else shows their id instead of their name.
 
 **Settled by the core**
 
