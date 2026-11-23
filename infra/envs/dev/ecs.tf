@@ -40,7 +40,7 @@ locals {
     "core/event-public-key"      = "MANDATE_EVENT_PUBLIC_KEY_PEM"
     "migrate/database-url"       = "MANDATE_MIGRATION_DATABASE_URL"
     "eve/database-url"           = "WORKFLOW_POSTGRES_URL"
-    "eve/ai-gateway-key"         = "MANDATE_AI_GATEWAY_KEY"
+    "eve/ai-gateway-key"         = "MANDATE_AI_GATEWAY_KEY" # Cloudflare AI Gateway token (AI Gateway Run)
     "eve/assertion-public-key"   = "MANDATE_ASSERTION_PUBLIC_KEY"
   }
   core_environment = {

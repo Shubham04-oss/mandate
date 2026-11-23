@@ -26,7 +26,8 @@ eve over the private network.
   `openssl`, `python3`, `gh`, Node (for Wrangler).
 - A Cloudflare zone for the domain, and an API token for it with Zone DNS edit, Zone WAF edit and
   Workers edit.
-- The WorkOS environment (API key and client id) and the AI gateway (URL, key, model id).
+- The WorkOS environment (API key and client id) and a Cloudflare AI Gateway with the provider keys
+  stored in it (BYOK), a dynamic route for the default model, and a token with AI Gateway Run.
 
 ```sh
 export AWS_PROFILE=mumbai AWS_REGION=ap-south-1
@@ -55,8 +56,8 @@ Create `infra/envs/dev/dev.tfvars` (ignored by git; nothing in it is secret, but
 ```hcl
 domain             = "example.com"        # your Cloudflare zone
 cloudflare_zone_id = "..."
-ai_gateway_url     = "https://..."
-model_default      = "..."                # model id, as the gateway names it
+ai_gateway_url     = "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/compat"
+model_default      = "dynamic/mandate-default" # a gateway dynamic route, or provider/model
 read_hosts         = ""                   # MANDATE_READ_HOSTS: a data-egress allowlist, see docs/security.md
 ```
 
@@ -121,7 +122,7 @@ put eve/database-url     "postgres://mandate_eve:$EVE_PW@$HOST:5432/eve?sslmode=
 put migrate/database-url "postgres://mandate_migrator:$(enc "$MIGRATOR_PW")@$HOST:5432/mandate?sslmode=require"
 put core/workos-api-key   "$WORKOS_API_KEY"
 put core/workos-client-id "$WORKOS_CLIENT_ID"
-put eve/ai-gateway-key    "$AI_GATEWAY_KEY"
+put eve/ai-gateway-key    "$AI_GATEWAY_KEY"   # Cloudflare AI Gateway token (AI Gateway Run)
 
 umask 077; d=$(mktemp -d)
 openssl genpkey -algorithm ed25519 -out "$d/assertion.pem"
