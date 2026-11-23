@@ -82,15 +82,23 @@ resource "aws_security_group" "migrate" {
   vpc_id      = aws_vpc.main.id
 }
 
+resource "aws_security_group" "db_bootstrap" {
+  name        = "${local.name}-db-bootstrap"
+  description = "The one-off db-bootstrap task: nothing in; HTTPS (public image pull) and Postgres out"
+  vpc_id      = aws_vpc.main.id
+}
+
 locals {
   task_security_groups = {
-    core    = aws_security_group.core.id
-    eve     = aws_security_group.eve.id
-    migrate = aws_security_group.migrate.id
+    core           = aws_security_group.core.id
+    eve            = aws_security_group.eve.id
+    migrate        = aws_security_group.migrate.id
+    "db-bootstrap" = aws_security_group.db_bootstrap.id
   }
 }
 
-# HTTPS out: AWS APIs through the endpoints, WorkOS and AgentCore (core), the AI gateway (eve).
+# HTTPS out: AWS APIs through the endpoints, WorkOS and AgentCore (core), the AI gateway (eve),
+# the public postgres image through the NAT (db-bootstrap).
 resource "aws_vpc_security_group_egress_rule" "https" {
   for_each          = { for k, v in local.task_security_groups : k => v if k != "migrate" }
   security_group_id = each.value

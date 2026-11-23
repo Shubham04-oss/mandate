@@ -14,17 +14,29 @@ output "migrate_network_configuration" {
   })
 }
 
+output "db_bootstrap_network_configuration" {
+  description = "--network-configuration for the one-off db-bootstrap task (docs/deploy.md step 4)"
+  value = jsonencode({
+    awsvpcConfiguration = {
+      subnets        = aws_subnet.private[*].id
+      securityGroups = [aws_security_group.db_bootstrap.id]
+      assignPublicIp = "DISABLED"
+    }
+  })
+}
+
 output "ecr_repositories" {
   value = { for k, r in aws_ecr_repository.this : k => r.repository_url }
 }
 
+# Host only (no port): the runbook builds the URLs with :5432.
 output "database_endpoint" {
-  value = aws_rds_cluster.main.endpoint
+  value = aws_db_instance.main.address
 }
 
 output "database_master_secret_arn" {
   description = "RDS-managed secret holding the migration role's password"
-  value       = one(aws_rds_cluster.main.master_user_secret[*].secret_arn)
+  value       = one(aws_db_instance.main.master_user_secret[*].secret_arn)
 }
 
 output "secret_names" {

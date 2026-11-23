@@ -3,54 +3,45 @@ resource "aws_db_subnet_group" "main" {
   subnet_ids = aws_subnet.private[*].id
 }
 
-# Ingress rules name the task security groups that may connect (services.tf); no CIDRs.
+# Ingress rules name the task security groups that may connect (security_groups.tf); no CIDRs.
 resource "aws_security_group" "db" {
   name        = "${local.name}-db"
-  description = "Aurora: Postgres from the core, eve and the migrate task only"
+  description = "RDS: Postgres from the core, eve, migrate and db-bootstrap tasks only"
   vpc_id      = aws_vpc.main.id
 }
 
-resource "aws_rds_cluster_parameter_group" "main" {
+resource "aws_db_parameter_group" "main" {
   name   = local.name
-  family = "aurora-postgresql17"
+  family = "postgres17"
   parameter {
     name  = "rds.force_ssl"
     value = "1"
   }
 }
 
-resource "aws_rds_cluster" "main" {
-  cluster_identifier              = local.name
-  engine                          = "aurora-postgresql"
-  engine_mode                     = "provisioned"
-  engine_version                  = var.aurora_engine_version
-  database_name                   = "mandate"
-  master_username                 = "mandate_migrator"
-  manage_master_user_password     = true
-  master_user_secret_kms_key_id   = aws_kms_key.main.arn
-  db_subnet_group_name            = aws_db_subnet_group.main.name
-  vpc_security_group_ids          = [aws_security_group.db.id]
-  db_cluster_parameter_group_name = aws_rds_cluster_parameter_group.main.name
-  storage_encrypted               = true
-  kms_key_id                      = aws_kms_key.main.arn
-  backup_retention_period         = 1
-  deletion_protection             = true
-  final_snapshot_identifier       = "${local.name}-final"
-  # The owner creates roles through the Data API (IAM plus the master secret): no bastion, no open port.
-  enable_http_endpoint = true
-  serverlessv2_scaling_configuration {
-    min_capacity             = 0
-    max_capacity             = 2
-    seconds_until_auto_pause = 600
-  }
-}
-
-resource "aws_rds_cluster_instance" "main" {
-  count               = 1
-  identifier          = "${local.name}-1"
-  cluster_identifier  = aws_rds_cluster.main.id
-  instance_class      = "db.serverless"
-  engine              = aws_rds_cluster.main.engine
-  engine_version      = aws_rds_cluster.main.engine_version
-  publicly_accessible = false
+resource "aws_db_instance" "main" {
+  identifier     = local.name
+  engine         = "postgres"
+  engine_version = var.db_engine_version
+  # Minor upgrades go through var.db_engine_version, so state never drifts from what runs.
+  auto_minor_version_upgrade    = false
+  instance_class                = var.db_instance_class
+  storage_type                  = "gp3"
+  allocated_storage             = 20
+  max_allocated_storage         = 100
+  db_name                       = "mandate"
+  username                      = "mandate_migrator"
+  manage_master_user_password   = true
+  master_user_secret_kms_key_id = aws_kms_key.main.arn
+  db_subnet_group_name          = aws_db_subnet_group.main.name
+  vpc_security_group_ids        = [aws_security_group.db.id]
+  parameter_group_name          = aws_db_parameter_group.main.name
+  publicly_accessible           = false
+  multi_az                      = false
+  storage_encrypted             = true
+  kms_key_id                    = aws_kms_key.main.arn
+  backup_retention_period       = 7
+  deletion_protection           = var.db_deletion_protection
+  skip_final_snapshot           = var.db_skip_final_snapshot
+  final_snapshot_identifier     = "${local.name}-final"
 }

@@ -3,7 +3,7 @@ resource "aws_ecs_cluster" "main" {
 }
 
 resource "aws_cloudwatch_log_group" "this" {
-  for_each          = toset(["core", "eve", "migrate"])
+  for_each          = toset(["core", "eve", "migrate", "db-bootstrap"])
   name              = "/${local.name}/${each.key}"
   retention_in_days = 30
 }
@@ -133,6 +133,48 @@ resource "aws_ecs_task_definition" "migrate" {
     cpu_architecture        = "X86_64"
   }
   container_definitions = jsonencode([local.container["migrate"]])
+}
+
+# One-off, run by the owner (docs/deploy.md step 4): creates the app and eve roles and eve's
+# database. Role passwords come from the URLs already in their secrets, so none is in state or logs.
+resource "aws_ecs_task_definition" "db_bootstrap" {
+  family                   = "${local.name}-db-bootstrap"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.db_bootstrap_execution.arn
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+  container_definitions = jsonencode([{
+    name      = "db-bootstrap"
+    essential = true
+    # The official image through ECR Public: psql 17, no Docker Hub rate limit.
+    image   = "public.ecr.aws/docker/library/postgres:17-alpine"
+    command = ["sh", "-c", "printf '%s\\n' \"$BOOTSTRAP_SQL\" | psql -v ON_ERROR_STOP=1 -f -"]
+    environment = [for k, v in {
+      PGHOST        = aws_db_instance.main.address
+      PGUSER        = aws_db_instance.main.username
+      PGDATABASE    = aws_db_instance.main.db_name
+      PGSSLMODE     = "require"
+      BOOTSTRAP_SQL = file("${path.module}/sql/db_bootstrap.sql")
+    } : { name = k, value = v }]
+    secrets = [
+      { name = "PGPASSWORD", valueFrom = "${local.db_master_secret_arn}:password::" },
+      { name = "APP_DATABASE_URL", valueFrom = aws_secretsmanager_secret.this["core/database-url"].arn },
+      { name = "EVE_DATABASE_URL", valueFrom = aws_secretsmanager_secret.this["eve/database-url"].arn },
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.this["db-bootstrap"].name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "db-bootstrap"
+      }
+    }
+  }])
 }
 
 resource "aws_ecs_service" "core" {

@@ -97,6 +97,14 @@ override_resource {
   target = aws_secretsmanager_secret.this["eve/assertion-public-key"]
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/assertion-public-key" }
 }
+# Mocks leave computed blocks empty; RDS always returns the managed secret when it manages the password.
+override_resource {
+  target = aws_db_instance.main
+  values = {
+    address            = "mandate-dev.mock.ap-south-1.rds.amazonaws.com"
+    master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:rds!db-mock", kms_key_id = "arn:aws:kms:ap-south-1:000000000000:key/mock", secret_status = "active" }]
+  }
+}
 override_resource {
   target = aws_security_group.alb
   values = { id = "sg-alb" }
@@ -116,6 +124,10 @@ override_resource {
 override_resource {
   target = aws_security_group.db
   values = { id = "sg-db" }
+}
+override_resource {
+  target = aws_security_group.db_bootstrap
+  values = { id = "sg-db-bootstrap" }
 }
 override_resource {
   target = aws_security_group.endpoints
@@ -147,6 +159,10 @@ override_resource {
   values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-migrate-execution" }
 }
 override_resource {
+  target = aws_iam_role.db_bootstrap_execution
+  values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-db-bootstrap-execution" }
+}
+override_resource {
   target = aws_iam_role.core_task
   values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-core-task" }
 }
@@ -167,7 +183,7 @@ run "private_subnets_have_no_public_ips_and_route_through_nat" {
   }
   assert {
     condition     = length(aws_subnet.private) == 2 && length(aws_subnet.public) == 2
-    error_message = "two AZs: Aurora and the ALB both need two subnets"
+    error_message = "two AZs: the RDS subnet group and the ALB both need two subnets"
   }
   assert {
     condition     = aws_nat_gateway.egress.availability_mode == "regional"
@@ -197,28 +213,57 @@ run "endpoints_cover_what_tasks_need_without_nat" {
   }
 }
 
-run "aurora_scales_to_zero_and_never_holds_a_password_in_state" {
+run "database_is_private_encrypted_and_never_holds_a_password_in_state" {
   command = apply
 
   assert {
-    condition     = aws_rds_cluster.main.serverlessv2_scaling_configuration[0].min_capacity == 0
-    error_message = "dev Aurora scales to zero"
+    condition     = !aws_db_instance.main.publicly_accessible && !aws_db_instance.main.multi_az
+    error_message = "one private instance, never public"
   }
   assert {
-    condition     = aws_rds_cluster.main.manage_master_user_password == true && aws_rds_cluster.main.master_password == null
-    error_message = "RDS manages the master password in Secrets Manager; it never enters state"
+    condition     = aws_db_instance.main.storage_encrypted && aws_db_instance.main.kms_key_id == aws_kms_key.main.arn
+    error_message = "storage encrypted with the CMK"
   }
   assert {
-    condition     = aws_rds_cluster.main.storage_encrypted && aws_rds_cluster.main.deletion_protection
-    error_message = "encrypted with the CMK and protected from deletion"
+    condition     = aws_db_instance.main.manage_master_user_password == true && aws_db_instance.main.password == null && aws_db_instance.main.master_user_secret_kms_key_id == aws_kms_key.main.arn
+    error_message = "RDS manages the master password in Secrets Manager under the CMK; it never enters state"
   }
   assert {
-    condition     = alltrue([for i in aws_rds_cluster_instance.main : !i.publicly_accessible])
-    error_message = "no public database instance"
-  }
-  assert {
-    condition     = one([for p in aws_rds_cluster_parameter_group.main.parameter : p.value if p.name == "rds.force_ssl"]) == "1"
+    condition     = one([for p in aws_db_parameter_group.main.parameter : p.value if p.name == "rds.force_ssl"]) == "1" && aws_db_instance.main.parameter_group_name == aws_db_parameter_group.main.name
     error_message = "connections must use TLS"
+  }
+  assert {
+    condition     = var.db_instance_class == "db.t4g.micro" && aws_db_instance.main.instance_class == var.db_instance_class
+    error_message = "dev runs on db.t4g.micro unless the variable says otherwise"
+  }
+  assert {
+    condition     = aws_db_instance.main.deletion_protection && !aws_db_instance.main.skip_final_snapshot && aws_db_instance.main.backup_retention_period == 7
+    error_message = "protected from deletion, final snapshot kept, a week of backups"
+  }
+}
+
+run "db_bootstrap_takes_role_passwords_from_secrets_only" {
+  command = apply
+
+  assert {
+    condition = toset([for s in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].secrets : s.valueFrom]) == toset([
+      "${one(aws_db_instance.main.master_user_secret[*].secret_arn)}:password::",
+      aws_secretsmanager_secret.this["core/database-url"].arn,
+      aws_secretsmanager_secret.this["eve/database-url"].arn,
+    ])
+    error_message = "the master password and the two role URLs arrive as task secrets"
+  }
+  assert {
+    condition     = !anytrue([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.name == "PGPASSWORD" || endswith(e.name, "_URL")])
+    error_message = "no password is a plain environment value"
+  }
+  assert {
+    condition     = one([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.value if e.name == "PGSSLMODE"]) == "require"
+    error_message = "the bootstrap connects over TLS"
+  }
+  assert {
+    condition     = !contains(flatten([for st in jsondecode(aws_iam_role_policy.deploy.policy).Statement : st.Resource if contains(flatten([st.Action]), "iam:PassRole")]), aws_iam_role.db_bootstrap_execution.arn)
+    error_message = "the deploy workflow cannot run the bootstrap"
   }
 }
 
@@ -429,9 +474,9 @@ run "the_database_admits_only_the_tasks" {
 
   assert {
     condition = toset([for r in aws_vpc_security_group_ingress_rule.db : r.referenced_security_group_id]) == toset([
-      aws_security_group.core.id, aws_security_group.eve.id, aws_security_group.migrate.id,
+      aws_security_group.core.id, aws_security_group.eve.id, aws_security_group.migrate.id, aws_security_group.db_bootstrap.id,
     ])
-    error_message = "Postgres from the core, eve and migrate only"
+    error_message = "Postgres from the core, eve, migrate and db-bootstrap only"
   }
 }
 
