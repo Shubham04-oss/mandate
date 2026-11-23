@@ -716,7 +716,7 @@ run "only_the_dev_environment_of_this_repo_can_deploy" {
     condition = jsondecode(aws_iam_role.deploy.assume_role_policy).Statement[0].Condition == {
       StringEquals = {
         "token.actions.githubusercontent.com:aud"              = "sts.amazonaws.com"
-        "token.actions.githubusercontent.com:sub"              = "repo:Shubham04-oss/mandate:environment:dev"
+        "token.actions.githubusercontent.com:sub"              = "repo:Shubham04-oss@218535561/mandate@1466076280:environment:dev"
         "token.actions.githubusercontent.com:job_workflow_ref" = "Shubham04-oss/mandate/.github/workflows/deploy.yml@refs/heads/main"
       }
     }
