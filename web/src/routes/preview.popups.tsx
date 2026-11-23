@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, notFound } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
 import { sceneUrl, Wordmark } from "#/components/auth/auth-layout.tsx";
@@ -66,6 +66,10 @@ import { sample } from "#/lib/sample.ts";
 // A review page for the pop-up patterns: dialogs with a scene, the plain confirm, toasts,
 // the hover card and the empty state. Not linked from the app.
 export const Route = createFileRoute("/preview/popups")({
+	// A design preview with made-up people: never part of a real build.
+	beforeLoad: () => {
+		if (!import.meta.env.DEV) throw notFound();
+	},
 	head: () => ({ meta: [{ title: `Pop-ups · ${brand.name}` }] }),
 	component: PopupsPreview,
 });

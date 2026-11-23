@@ -18,7 +18,6 @@ import { Field, FieldLabel, FieldSeparator } from "#/components/ui/field.tsx";
 import { Input } from "#/components/ui/input.tsx";
 import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
-import { sample } from "#/lib/sample.ts";
 import { callbackMessage, saveFlow } from "#/lib/sign-in-flow.ts";
 
 type Search = { error?: string; reset?: boolean };
@@ -61,9 +60,9 @@ function SignIn() {
 			scene="bay"
 			sceneCard={
 				<SceneCard
-					avatar={sample.agent.avatar}
+					avatar="/avatars/agent.svg"
 					title="Your agent"
-					line="3 requests are waiting for you"
+					line="Asks you before it changes anything"
 				/>
 			}
 		>

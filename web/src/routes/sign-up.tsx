@@ -69,7 +69,7 @@ function SignUp() {
 						name="name"
 						autoComplete="name"
 						autoFocus
-						placeholder="Ada Brennan"
+						placeholder="First and last name"
 					/>
 				</Field>
 				<Field className="gap-1.5">
@@ -88,7 +88,7 @@ function SignUp() {
 						id="org"
 						name="org"
 						autoComplete="organization"
-						placeholder="Northstar"
+						placeholder="Your company"
 						aria-describedby="org-hint"
 					/>
 					<FieldDescription id="org-hint" className="text-[11.5px]">
