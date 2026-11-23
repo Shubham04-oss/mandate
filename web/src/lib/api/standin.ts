@@ -8,13 +8,21 @@
  * screens already use (see web/README.md).
  *
  * To reach every sign-in step, the email before the @ picks the outcome: mfa@, setup@, orgs@,
- * verify@, sso@, method@ and noaccess@; any other email signs straight in. The code 000000 is always
- * wrong, the password "wrong" never matches, and the reset or invite token "expired" has expired.
+ * verify@, sso@, method@ and noaccess@; member@ signs in as someone who isn't an admin; any other
+ * email signs straight in. The code 000000 is always wrong, the password "wrong" never matches, and
+ * the reset or invite token "expired" has expired.
+ *
+ * Conversations: an ask reads a page and answers; one that mentions a form or filling something in
+ * then waits for approval; one with "fail" in it fails as the core does when the agent can't start.
  */
 import type {
 	Activity,
 	Agent,
 	Approval,
+	ApprovalState,
+	Conversation,
+	ConversationEvent,
+	Grant,
 	Me,
 	Method,
 	Org,
@@ -22,6 +30,7 @@ import type {
 	SignInOutcome,
 	Team,
 } from "#/lib/api/index.ts";
+import type { EventSourceLike } from "#/lib/conversation-stream.ts";
 
 const json = (status: number, body?: unknown) =>
 	new Response(body === undefined ? null : JSON.stringify(body), {
@@ -145,7 +154,7 @@ const me = (org: Org = northstar): Me => ({
 	org,
 	orgs,
 	mfa_enabled: true,
-	is_admin: true,
+	is_admin: !isMember(),
 	teams: [
 		{ id: "team_platform", name: "Platform" },
 		{ id: "team_finance", name: "Finance" },
@@ -286,8 +295,16 @@ const sessionOrg = (): Org | null => {
 	return id ? (orgs.find((o) => o.id === id) ?? northstar) : null;
 };
 const signedIn = () => sessionOrg() !== null;
-const setSession = (org: Org | null) =>
-	org ? store()?.setItem(sessionKey, org.id) : store()?.removeItem(sessionKey);
+const memberKey = "mandate.standin.member";
+const isMember = () => store()?.getItem(memberKey) === "1";
+const setSession = (org: Org | null) => {
+	if (org) {
+		store()?.setItem(sessionKey, org.id);
+	} else {
+		store()?.removeItem(sessionKey);
+		store()?.removeItem(memberKey);
+	}
+};
 
 const signIn = (org: Org = northstar): Response => {
 	setSession(org);
@@ -325,6 +342,9 @@ const outcomeFor = (email: string): Response => {
 			return next("sso_required", { redirect_url: "/sign-in?standin=sso" });
 		case "method":
 			return next("method_required", { methods: ["sso", "magic_auth"] });
+		case "member":
+			store()?.setItem(memberKey, "1");
+			return signIn();
 		case "noaccess":
 			return fail(
 				403,
@@ -344,6 +364,268 @@ const wrongCode = () =>
 	fail(400, "code_invalid", "That code isn't right. Check it and try again.");
 const accepted = () => json(202);
 const signedOut = () => fail(401, "forbidden", "Sign in to continue.");
+
+// ── Conversations, kept for this page load ───────────────────────────────────────────────────────
+
+type Stored = { conversation: Conversation; events: ConversationEvent[] };
+const conversations = new Map<string, Stored>();
+const watchers = new Map<string, Set<(e: ConversationEvent) => void>>();
+
+/** Strips the id and kind off an event, leaving what the core puts in `data`. */
+const dataOf = (e: ConversationEvent): Record<string, unknown> => {
+	const { id: _id, kind: _kind, ...data } = e;
+	return data;
+};
+
+type EventBody = ConversationEvent extends infer E
+	? E extends ConversationEvent
+		? Omit<E, "id">
+		: never
+	: never;
+
+function push(id: string, body: EventBody) {
+	const c = conversations.get(id);
+	if (!c) return;
+	const event = { ...body, id: c.events.length + 1 } as ConversationEvent;
+	c.events.push(event);
+	c.conversation.updated_at = new Date().toISOString();
+	for (const fn of watchers.get(id) ?? []) fn(event);
+}
+
+const setState = (id: string, state: Conversation["state"]) => {
+	const c = conversations.get(id);
+	if (c) c.conversation.state = state;
+};
+
+/** Runs steps one after another, each `ms` apart, like a turn arriving over a stream. */
+function later(steps: (() => void)[], ms = 700) {
+	steps.forEach((step, i) => {
+		setTimeout(step, ms * (i + 1));
+	});
+}
+
+function newConversation(
+	message: string,
+	state: Conversation["state"],
+): string {
+	const id = `cnv_${Math.random().toString(36).slice(2, 10)}`;
+	const at = new Date().toISOString();
+	conversations.set(id, {
+		conversation: {
+			id,
+			title: message.slice(0, 80),
+			state,
+			created_at: at,
+			updated_at: at,
+		},
+		events: [],
+	});
+	push(id, { kind: "message", role: "user", text: message });
+	return id;
+}
+
+/** A turn: read a page, answer, and when asked to fill something in, wait for approval. */
+function turn(id: string, message: string) {
+	setState(id, "working");
+	const wantsForm = /form|fill|submit|book|request/i.test(message);
+	later([
+		() =>
+			push(id, { kind: "tool", name: "web.read_page", status: "requested" }),
+		() => push(id, { kind: "tool", name: "web.read_page", status: "running" }),
+		() =>
+			push(id, { kind: "tool", name: "web.read_page", status: "completed" }),
+		() =>
+			push(id, {
+				kind: "message",
+				role: "assistant",
+				text: wantsForm
+					? "The Team plan is $12 per seat a month, billed yearly, so 25 seats come to $3,600 a year.\n\nI've filled in the upgrade request. Sending it changes Northstar's plan, so it needs your OK."
+					: "Here's what the page says: the new refund policy gives 30 days for a full refund on yearly plans, and 14 days on monthly ones. Details are at https://help.acme.com/refunds.",
+			}),
+		() => {
+			if (!wantsForm) {
+				push(id, { kind: "done" });
+				setState(id, "idle");
+				return;
+			}
+			push(id, { kind: "tool", name: "web.submit_form", status: "requested" });
+			const approval: Approval = {
+				id: `apv_${id}`,
+				agent: yourAgent,
+				tool: "web.submit_form",
+				args: {
+					url: "https://help.acme.com/upgrade",
+					company: "Northstar",
+					plan: "Team, billed yearly",
+					seats: 25,
+				},
+				effect: "external",
+				requested_by: ada,
+				requested_at: new Date().toISOString(),
+				expires_at: inMinutes(30),
+				state: "pending",
+				can_decide: true,
+			};
+			approvals.unshift(approval);
+			setState(id, "waiting");
+			push(id, { kind: "approval_wait", approval });
+		},
+	]);
+}
+
+/** The core resumes a waiting turn once its approval is decided. */
+function resume(approval: Approval) {
+	const id = approval.id.replace(/^apv_/, "");
+	if (!conversations.has(id)) return;
+	const state: ApprovalState = approval.state;
+	const approved = state === "approved";
+	setState(id, "working");
+	later([
+		() => push(id, { kind: "approval_done", approval_id: approval.id, state }),
+		() =>
+			push(id, {
+				kind: "tool",
+				name: "web.submit_form",
+				status: approved ? "running" : "denied",
+			}),
+		...(approved
+			? [
+					() =>
+						push(id, {
+							kind: "tool",
+							name: "web.submit_form",
+							status: "completed",
+						}),
+				]
+			: []),
+		() =>
+			push(id, {
+				kind: "message",
+				role: "assistant",
+				text: approved
+					? "Sent. Acme says the request is in and someone will confirm by email within a day."
+					: "Okay, I won't send it. The form is still filled in if you change your mind.",
+			}),
+		() => {
+			push(id, { kind: "done" });
+			setState(id, "idle");
+		},
+	]);
+}
+
+// An earlier conversation, so the list has something in it.
+{
+	const id = newConversation("Summarise the new refund policy page", "idle");
+	push(id, { kind: "tool", name: "web.read_page", status: "requested" });
+	push(id, { kind: "tool", name: "web.read_page", status: "completed" });
+	push(id, {
+		kind: "message",
+		role: "assistant",
+		text: "The new refund policy gives 30 days for a full refund on yearly plans, and 14 days on monthly ones.",
+	});
+	push(id, { kind: "done" });
+	const c = conversations.get(id);
+	if (c) {
+		c.conversation.created_at = minutesAgo(90);
+		c.conversation.updated_at = minutesAgo(88);
+	}
+}
+
+/**
+ * Stands in for the browser's EventSource on a conversation: replays the log from the start, as
+ * the core does for a stream opened without Last-Event-ID, then sends new events as they come.
+ */
+export function standInEvents(id: string): EventSourceLike {
+	const handlers = new Map<
+		string,
+		((e: { data: string; lastEventId: string }) => void)[]
+	>();
+	const send = (e: ConversationEvent) => {
+		for (const fn of handlers.get(e.kind) ?? [])
+			fn({ data: JSON.stringify(dataOf(e)), lastEventId: String(e.id) });
+	};
+	const source: EventSourceLike = {
+		readyState: 0,
+		onopen: null,
+		onerror: null,
+		addEventListener: (kind, fn) => {
+			handlers.set(kind, [...(handlers.get(kind) ?? []), fn]);
+		},
+		close: () => {
+			source.readyState = 2;
+			watchers.get(id)?.delete(send);
+		},
+	};
+	setTimeout(() => {
+		if (source.readyState === 2) return;
+		const c = conversations.get(id);
+		if (!c) {
+			source.readyState = 2;
+			source.onerror?.();
+			return;
+		}
+		source.readyState = 1;
+		source.onopen?.();
+		for (const e of c.events) send(e);
+		watchers.set(id, (watchers.get(id) ?? new Set()).add(send));
+	}, 150);
+	return source;
+}
+
+// ── Grants ───────────────────────────────────────────────────────────────────────────────────────
+
+const daysFromNow = (d: number) =>
+	new Date(Date.now() + d * 86_400_000).toISOString();
+const grants: Grant[] = [
+	{
+		id: "grt_1",
+		principal: { kind: "team", id: "team_platform" },
+		tool: "web.read_page",
+		standing: false,
+		expires_at: daysFromNow(60),
+		state: "active",
+		granted_by: ada,
+		reason: null,
+	},
+	{
+		id: "grt_2",
+		principal: { kind: "member", id: "mem_rohan" },
+		tool: "web.read_page",
+		standing: false,
+		expires_at: daysFromNow(21),
+		state: "active",
+		granted_by: ada,
+		reason: null,
+	},
+	{
+		id: "grt_3",
+		principal: { kind: "agent", id: "agt_ops" },
+		tool: "web.submit_form",
+		standing: true,
+		expires_at: daysFromNow(10),
+		state: "active",
+		granted_by: ada,
+		reason: "Weekly vendor forms",
+	},
+	{
+		id: "grt_4",
+		principal: { kind: "member", id: "mem_priya" },
+		tool: "web.submit_form",
+		standing: false,
+		expires_at: daysFromNow(-3),
+		state: "expired",
+		granted_by: ada,
+		reason: null,
+	},
+];
+const catalog = ["web.read_page", "web.submit_form"];
+const principalExists = (kind: unknown, id: unknown) =>
+	(kind === "member" && people.some((p) => p.id === id)) ||
+	(kind === "team" && teams.some((t) => t.id === id)) ||
+	(kind === "agent" &&
+		[yourAgent, supportBot, opsBot, salesBot].some((a) => a.id === id));
+const forbidden = () =>
+	fail(403, "forbidden", "Only your organization's admins can do this.");
 
 type Body = Record<string, unknown>;
 type Handler = (
@@ -541,6 +823,7 @@ const routes: [Method, RegExp, Handler][] = [
 			approval.state = m[2] === "approve" ? "approved" : "denied";
 			approval.decided_by = ada;
 			approval.decided_at = new Date().toISOString();
+			resume(approval);
 			return json(200, approval);
 		},
 	],
@@ -557,6 +840,146 @@ const routes: [Method, RegExp, Handler][] = [
 			signedIn()
 				? json(200, { items: [yourAgent, supportBot, opsBot, salesBot] })
 				: signedOut(),
+	],
+	[
+		"GET",
+		/^\/v1\/conversations(?:\?.*)?$/,
+		() => {
+			if (!signedIn()) return signedOut();
+			const items = [...conversations.values()]
+				.map((c) => c.conversation)
+				.sort((a, b) => b.created_at.localeCompare(a.created_at));
+			return json(200, { items, next: null });
+		},
+	],
+	[
+		"POST",
+		/^\/v1\/conversations$/,
+		(_, b) => {
+			if (!signedIn()) return signedOut();
+			const message = typeof b.message === "string" ? b.message.trim() : "";
+			if (!message) return fail(400, "invalid_input", "Write what you need.");
+			if (/fail/i.test(message)) {
+				// As the core does when the agent can't start: the conversation stays, failed.
+				const id = newConversation(message, "failed");
+				push(id, {
+					kind: "error",
+					code: "internal",
+					message: "The agent is unavailable.",
+				});
+				return fail(502, "internal", "The agent is unavailable.");
+			}
+			const id = newConversation(message, "working");
+			turn(id, message);
+			const c = conversations.get(id);
+			return json(201, c?.conversation);
+		},
+	],
+	[
+		"POST",
+		/^\/v1\/conversations\/([^/]+)\/messages$/,
+		(m, b) => {
+			if (!signedIn()) return signedOut();
+			const id = decodeURIComponent(m[1]);
+			const c = conversations.get(id);
+			if (!c || c.conversation.state === "failed")
+				return fail(404, "not_found", "Not found.");
+			const message = typeof b.message === "string" ? b.message.trim() : "";
+			if (!message) return fail(400, "invalid_input", "Write what you need.");
+			push(id, { kind: "message", role: "user", text: message });
+			turn(id, message);
+			return accepted();
+		},
+	],
+	[
+		"POST",
+		/^\/v1\/conversations\/([^/]+)\/cancel$/,
+		(m) => {
+			if (!signedIn()) return signedOut();
+			const id = decodeURIComponent(m[1]);
+			if (!conversations.has(id)) return fail(404, "not_found", "Not found.");
+			later([
+				() => {
+					push(id, {
+						kind: "error",
+						code: "internal",
+						message: "Stopped before it finished.",
+					});
+					push(id, { kind: "done" });
+					setState(id, "idle");
+				},
+			]);
+			return accepted();
+		},
+	],
+	[
+		"GET",
+		/^\/v1\/grants$/,
+		() => {
+			if (!signedIn()) return signedOut();
+			if (isMember()) return forbidden();
+			const now = new Date().toISOString();
+			const items = grants.map((g) => ({
+				...g,
+				state: g.expires_at > now ? "active" : "expired",
+			}));
+			return json(200, { items });
+		},
+	],
+	[
+		"POST",
+		/^\/v1\/grants$/,
+		(_, b) => {
+			if (!signedIn()) return signedOut();
+			if (isMember()) return forbidden();
+			const p = (b.principal ?? {}) as Record<string, unknown>;
+			const expires = typeof b.expires_at === "string" ? b.expires_at : "";
+			const now = Date.now();
+			const at = Date.parse(expires);
+			if (
+				!principalExists(p.kind, p.id) ||
+				!catalog.includes(String(b.tool)) ||
+				!(at > now && at <= now + 90 * 86_400_000)
+			)
+				return fail(400, "invalid_input", "Check the grant and try again.");
+			const same = (g: Grant) =>
+				g.principal.kind === p.kind &&
+				g.principal.id === p.id &&
+				g.tool === b.tool;
+			const live = grants.find(
+				(g) => same(g) && Date.parse(g.expires_at) > now,
+			);
+			if (live) return fail(409, "conflict", "They already have this tool.");
+			// An expired grant for the same principal and tool gives way, as in the core.
+			for (const g of grants.filter(same)) grants.splice(grants.indexOf(g), 1);
+			const grant: Grant = {
+				id: `grt_${Math.random().toString(36).slice(2, 8)}`,
+				principal: {
+					kind: p.kind as Grant["principal"]["kind"],
+					id: String(p.id),
+				},
+				tool: String(b.tool),
+				standing: b.standing === true,
+				expires_at: expires,
+				state: "active",
+				granted_by: ada,
+				reason: typeof b.reason === "string" && b.reason ? b.reason : null,
+			};
+			grants.push(grant);
+			return json(201, grant);
+		},
+	],
+	[
+		"DELETE",
+		/^\/v1\/grants\/([^/]+)$/,
+		(m) => {
+			if (!signedIn()) return signedOut();
+			if (isMember()) return forbidden();
+			const i = grants.findIndex((g) => g.id === decodeURIComponent(m[1]));
+			if (i < 0) return fail(404, "not_found", "Not found.");
+			grants.splice(i, 1);
+			return json(204);
+		},
 	],
 ];
 

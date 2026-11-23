@@ -57,7 +57,7 @@ const appRoute = getRouteApi("/_app");
 type RailItem = {
 	label: string;
 	icon: IconName;
-	to?: "/";
+	to?: "/" | "/agent";
 	count?: number;
 	onClick?: () => void;
 	/** Shown in the tooltip, so the shortcut can be found. */
@@ -68,7 +68,7 @@ type RailItem = {
 const places = (waiting: number): RailItem[] => [
 	{ label: "Home", icon: "home", to: "/" },
 	{ label: "Approvals", icon: "shield-check", count: waiting },
-	{ label: "Your agent", icon: "bot" },
+	{ label: "Your agent", icon: "bot", to: "/agent" },
 	{ label: "Teams", icon: "user" },
 	{ label: "Activity", icon: "activity" },
 ];
@@ -108,7 +108,13 @@ function RailButton({ item }: { item: RailItem }) {
 							nativeButton={false}
 							aria-label={label}
 							className={look}
-							render={<Link to={item.to} activeOptions={{ exact: true }} />}
+							render={
+								<Link
+									to={item.to}
+									// Home is only itself; Your agent stays lit inside a conversation.
+									activeOptions={{ exact: item.to === "/" }}
+								/>
+							}
 						/>
 					) : (
 						<Button
@@ -278,7 +284,13 @@ function HeaderMenu({
 						item.to ? (
 							<DropdownMenuItem
 								key={item.label}
-								render={<Link to={item.to} activeOptions={{ exact: true }} />}
+								render={
+									<Link
+										to={item.to}
+										// Home is only itself; Your agent stays lit inside a conversation.
+										activeOptions={{ exact: item.to === "/" }}
+									/>
+								}
 								className="data-[status=active]:bg-active data-[status=active]:font-semibold"
 							>
 								<Icon name={item.icon} strokeWidth={1.8} />

@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { cn } from "cn";
 import {
 	type FormEvent,
@@ -7,14 +7,9 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { toast } from "sonner";
-import {
-	DriveMark,
-	GmailMark,
-	SlackMark,
-} from "#/components/icons/brand-marks.tsx";
-import { Icon } from "#/components/icons/icon.tsx";
-import { Avatar, AvatarImage } from "#/components/ui/avatar.tsx";
+import { Spinner } from "#/components/agent/marks.tsx";
+import { useStartConversation } from "#/components/agent/use-start-conversation.ts";
+import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import { Badge } from "#/components/ui/badge.tsx";
 import {
 	InputGroup,
@@ -32,22 +27,27 @@ import {
 } from "#/components/ui/item.tsx";
 import { Kbd } from "#/components/ui/kbd.tsx";
 import { activityRow, handledToday } from "#/lib/activity.ts";
-import { api } from "#/lib/api/index.ts";
+import { api, type Conversation } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
-import { clock, usePref } from "#/lib/preferences.ts";
-import { sample } from "#/lib/sample.ts";
+import { clock, formatWhen, usePref } from "#/lib/preferences.ts";
 import { shortcutLabel, useShortcut } from "#/lib/shortcuts.ts";
 
 export const Route = createFileRoute("/_app/")({
 	head: () => ({ meta: [{ title: `Home · ${brand.name}` }] }),
 	staticData: { title: "Home" },
 	ssr: false,
-	loader: async () => ({ activity: (await api.activity()).items }),
+	loader: async () => {
+		const [activity, conversations] = await Promise.all([
+			api.activity(),
+			api.conversations.list(),
+		]);
+		return { activity: activity.items, conversations: conversations.items };
+	},
 	component: Home,
 });
 
 function Home() {
-	const { activity } = Route.useLoaderData();
+	const { activity, conversations } = Route.useLoaderData();
 	const timeFormat = usePref(clock);
 	const handled = handledToday(activity);
 	const [ask, setAsk] = useState("");
@@ -77,7 +77,7 @@ function Home() {
 					<span className="font-semibold text-foreground">See activity</span>
 				</p>
 			</div>
-			<WorkingNow />
+			<WorkingNow conversations={conversations} />
 			<Recent
 				rows={activity.slice(0, 3).map((a) => activityRow(a, timeFormat))}
 			/>
@@ -85,8 +85,6 @@ function Home() {
 	);
 }
 
-// ponytail: nothing is sent yet. The ask goes to POST /v1/conversations (contract 5.2) once the
-// conversation view is built; until then the person is told, and their words stay.
 function AskBox({
 	value,
 	onChange,
@@ -96,25 +94,32 @@ function AskBox({
 	onChange: (value: string) => void;
 	inputRef: RefObject<HTMLInputElement | null>;
 }) {
-	const send = (e: FormEvent) => {
+	const start = useStartConversation();
+	const [sending, setSending] = useState(false);
+	const send = async (e: FormEvent) => {
 		e.preventDefault();
-		if (!value.trim()) return;
-		toast("Your agent can't take asks from here yet.", {
-			description: "What you wrote stays in the box.",
-		});
+		const words = value.trim();
+		if (!words || sending) return;
+		setSending(true);
+		// Opens the conversation; on failure the words stay in the box.
+		if (await start(words)) onChange("");
+		setSending(false);
 	};
 	return (
 		<form data-area="ask" onSubmit={send}>
 			<InputGroup className="h-14 rounded-full bg-raised pr-1.5 pl-3.5 shadow-[inset_0_0_0_1px_var(--field),0_8px_24px_rgb(0_0_0/0.2)] has-[[data-slot=input-group-control]:focus-visible]:shadow-[inset_0_0_0_1.5px_var(--text),0_8px_24px_rgb(0_0_0/0.2)]">
 				<InputGroupAddon align="inline-start" className="pl-0">
-					<Avatar className="size-[26px]">
-						<AvatarImage src={sample.agent.avatar} alt="" />
-					</Avatar>
+					<span
+						aria-hidden="true"
+						className="grid size-7 place-items-center rounded-full bg-sky-soft text-sea"
+					>
+						<Icon name="bot" size={15} strokeWidth={1.9} />
+					</span>
 				</InputGroupAddon>
 				<InputGroupInput
 					ref={inputRef}
 					aria-label="Ask your agent"
-					placeholder="Ask your agent, or jump to anything"
+					placeholder="Ask your agent to read a page or fill in a form"
 					value={value}
 					onChange={(e) => onChange(e.target.value)}
 					onKeyDown={(e) => {
@@ -129,7 +134,7 @@ function AskBox({
 						variant="default"
 						size="icon-sm"
 						aria-label="Send"
-						disabled={!value.trim()}
+						disabled={!value.trim() || sending}
 						className="size-[42px] rounded-full"
 					>
 						<Icon name="send" size={17} />
@@ -140,44 +145,55 @@ function AskBox({
 	);
 }
 
-type Quick = { title: string; meta: string; mark: ReactNode };
-
-const quickActions: Quick[] = [
+// What the v1 tools can do (read a page, submit a form); each fills the box with a start to finish.
+const quickActions: {
+	title: string;
+	meta: string;
+	icon: IconName;
+	prompt: string;
+}[] = [
 	{
-		title: "Catch me up on #launch",
-		meta: "Slack · 42 new",
-		mark: <SlackMark />,
+		title: "Sum up a web page",
+		meta: "Reads it as you",
+		icon: "link",
+		prompt: "Sum up this page: ",
 	},
 	{
-		title: "Draft replies to unread mail",
-		meta: "Gmail · 6 unread",
-		mark: <GmailMark />,
+		title: "Fill in a form for me",
+		meta: "Asks before it sends",
+		icon: "laptop",
+		prompt: "Fill in this form for me: ",
 	},
-	{ title: "Find the latest board pack", meta: "Drive", mark: <DriveMark /> },
 	{
-		title: "Do a task on a website",
-		meta: "Your agent's browser",
-		mark: <Icon name="laptop" size={15} className="text-[#111111]" />,
+		title: "Find something on a site",
+		meta: "Reads it as you",
+		icon: "search",
+		prompt: "Find this on ",
+	},
+	{
+		title: "Compare two pages",
+		meta: "Reads both as you",
+		icon: "copy",
+		prompt: "Compare these two pages: ",
 	},
 ];
 
-/** Each one starts an ask: it fills the box, ready to send or change. */
 function QuickActions({ onPick }: { onPick: (text: string) => void }) {
 	return (
 		<div className="quick-band rounded-card p-2">
 			<ul
-				aria-label="Quick actions from your connected apps"
+				aria-label="Things your agent can do"
 				className="m-0 grid list-none grid-cols-2 p-0 gap-2 min-[560px]:grid-cols-4"
 			>
 				{quickActions.map((action) => (
 					<li key={action.title} className="contents">
 						<Item
 							render={<button type="button" />}
-							onClick={() => onPick(action.title)}
+							onClick={() => onPick(action.prompt)}
 							className="min-h-24 flex-col flex-nowrap items-start gap-2.5 rounded-[13px] bg-white/10 p-3 text-white shadow-[inset_0_0_0_1px_rgb(255_255_255/0.16)] backdrop-blur-[10px] hover:bg-white/18"
 						>
-							<ItemMedia className="grid size-[26px] place-items-center rounded-[7px] bg-white">
-								{action.mark}
+							<ItemMedia className="grid size-[26px] place-items-center rounded-[7px] bg-white text-[#111111]">
+								<Icon name={action.icon} size={15} strokeWidth={1.9} />
 							</ItemMedia>
 							<ItemContent className="gap-0.5">
 								<ItemTitle className="line-clamp-2 text-[12.5px] text-white leading-[1.35]">
@@ -201,26 +217,23 @@ type Row = {
 	title: string;
 	detail: string;
 	when: string;
+	/** A conversation to open, when the row is one. */
+	conversationId?: string;
 };
 
-// Icon tiles, tinted by who acted and how it ended: sky and sea for the agent at work, green for
-// done, grey for waiting on the clock. Corners are 0.3 of the tile, as on the website.
+// Icon tiles, tinted by who acted and how it ended: sky and sea for the agent at work, the orange
+// for what needs you, green for done. Corners are 0.3 of the tile, as on the website.
 const tile = "grid size-[26px] place-items-center rounded-[8px]";
 
 const marks: Record<string, ReactNode> = {
-	live: (
-		<span className={cn(tile, "bg-sky-soft")}>
-			<i className="status-dot animate-pulse bg-sea" />
+	working: (
+		<span className={cn(tile, "bg-sky-soft text-sea")}>
+			<Spinner />
 		</span>
 	),
-	agent: (
-		<Avatar className="size-[26px]">
-			<AvatarImage src={sample.agent.avatar} alt="" />
-		</Avatar>
-	),
-	scheduled: (
-		<span className={cn(tile, "bg-hover text-soft-foreground")}>
-			<Icon name="clock" size={14} strokeWidth={1.9} />
+	waiting: (
+		<span className={cn(tile, "bg-gold-soft")}>
+			<i className="status-dot bg-gold-deep" />
 		</span>
 	),
 	done: (
@@ -236,11 +249,6 @@ const marks: Record<string, ReactNode> = {
 	refused: (
 		<span className={cn(tile, "bg-destructive/12 text-danger-foreground")}>
 			<Icon name="cross-circle" size={14} strokeWidth={1.9} />
-		</span>
-	),
-	expired: (
-		<span className={cn(tile, "bg-hover text-soft-foreground")}>
-			<Icon name="clock" size={14} strokeWidth={1.9} />
 		</span>
 	),
 };
@@ -259,12 +267,14 @@ function SidePanel({
 	scene: string;
 	title: string;
 	count?: number;
-	more: string;
+	more: ReactNode;
 	rows: Row[];
 	/** Said in place of the rows when there are none. */
 	empty: string;
 }) {
 	const id = `${area}-panel`;
+	const rowClass =
+		"min-h-12 rounded-lg px-2.5 py-1.5 no-underline hover:bg-hover";
 	return (
 		<section
 			data-area={area}
@@ -285,7 +295,6 @@ function SidePanel({
 						{count}
 					</Badge>
 				) : null}
-				{/* ponytail: opens the full list once those pages exist */}
 				<span className="ml-auto text-[12px] text-muted-foreground">
 					{more}
 				</span>
@@ -299,10 +308,19 @@ function SidePanel({
 				<Item
 					key={row.id}
 					size="xs"
-					render={<button type="button" />}
+					render={
+						row.conversationId ? (
+							<Link
+								to="/agent/$conversationId"
+								params={{ conversationId: row.conversationId }}
+							/>
+						) : (
+							<button type="button" />
+						)
+					}
 					// rows cut off long titles; the whole line is there on hover
 					title={`${row.title}\n${row.detail}`}
-					className="min-h-12 rounded-lg px-2.5 py-1.5 hover:bg-hover"
+					className={rowClass}
 				>
 					<ItemMedia>{marks[row.kind]}</ItemMedia>
 					<ItemContent className="min-w-0 gap-0">
@@ -313,9 +331,7 @@ function SidePanel({
 							{row.detail}
 						</ItemDescription>
 					</ItemContent>
-					<ItemActions
-						className={cn("text-[11.5px] text-muted-foreground tabular-nums")}
-					>
+					<ItemActions className="text-[11.5px] text-muted-foreground tabular-nums">
 						{row.when}
 					</ItemActions>
 				</Item>
@@ -324,17 +340,35 @@ function SidePanel({
 	);
 }
 
-// ponytail: the contract has no endpoint for work in progress (live browser sessions, scheduled
-// runs), so this panel stays on sample data; noted for the lead.
-function WorkingNow() {
+/** Your conversations that are under way or waiting for you, newest first. */
+function WorkingNow({ conversations }: { conversations: Conversation[] }) {
+	const timeFormat = usePref(clock);
+	const rows: Row[] = conversations
+		.filter((c) => c.state === "working" || c.state === "waiting")
+		.slice(0, 3)
+		.map((c) => ({
+			id: c.id,
+			kind: c.state,
+			title: c.title,
+			detail: c.state === "waiting" ? "Waiting for you" : "Working",
+			when: formatWhen(c.updated_at, timeFormat),
+			conversationId: c.id,
+		}));
 	return (
 		<SidePanel
 			area="left"
 			scene="/scenes/deck.webp"
 			title="Working now"
-			count={sample.working.filter((row) => row.kind !== "scheduled").length}
-			more="Open"
-			rows={sample.working}
+			count={rows.length}
+			more={
+				<Link
+					to="/agent"
+					className="text-inherit no-underline hover:text-foreground"
+				>
+					Open
+				</Link>
+			}
+			rows={rows}
 			empty="Nothing in progress. Ask your agent, and it shows up here."
 		/>
 	);
@@ -346,6 +380,7 @@ function Recent({ rows }: { rows: Row[] }) {
 			area="right"
 			scene="/scenes/harbour.webp"
 			title="Recent"
+			// ponytail: opens the activity page once it exists
 			more="All"
 			rows={rows}
 			empty="Nothing yet. What your agents do shows up here."

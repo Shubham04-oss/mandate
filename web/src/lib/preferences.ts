@@ -85,3 +85,15 @@ export function formatTime(iso: string, choice: Clock): string {
 		...(choice === "system" ? {} : { hour12: choice === "12" }),
 	});
 }
+
+/** When something happened: the time today, the date before that. */
+export function formatWhen(
+	iso: string,
+	choice: Clock,
+	now = new Date(),
+): string {
+	const at = new Date(iso);
+	return at.toDateString() === now.toDateString()
+		? formatTime(iso, choice)
+		: at.toLocaleDateString([], { day: "numeric", month: "short" });
+}

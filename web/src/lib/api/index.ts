@@ -7,8 +7,8 @@
  * without it fails (./api-url.ts), and the stand-ins are never part of one.
  */
 
-// ── Contract shapes (4.3) ────────────────────────────────────────────────────────────────────────
-// ponytail: the contract doesn't fix a timestamp format; these assume RFC 3339 strings.
+// ── Contract shapes (4.3, 5.2; core/src/api where they differ) ───────────────────────────────────
+// Timestamps are RFC 3339 in UTC, as the core writes them.
 
 export type Person = {
 	id: string;
@@ -75,6 +75,56 @@ export type Activity = {
 	approved_by?: Person;
 };
 export type Page<T> = { items: T[]; next: string | null };
+
+/** A conversation with the person's own agent (core/src/api/conversations.rs). */
+export type ConversationState = "working" | "waiting" | "idle" | "failed";
+export type Conversation = {
+	id: string;
+	title: string;
+	state: ConversationState;
+	created_at: string;
+	updated_at: string;
+};
+
+/** What a tool call has got to; the core sends no call id or target, only the tool and this. */
+export type ToolStatus =
+	| "requested"
+	| "running"
+	| "completed"
+	| "denied"
+	| "failed";
+
+/** One event of a conversation's stream; `id` is its place in the log, counting from 1. */
+export type ConversationEvent = { id: number } & (
+	| { kind: "message"; role: "user" | "assistant"; text: string }
+	| { kind: "tool"; name: string; status: ToolStatus }
+	| { kind: "approval_wait"; approval: Approval }
+	| { kind: "approval_done"; approval_id: string; state: ApprovalState }
+	| { kind: "error"; code: string; message: string }
+	| { kind: "done" }
+);
+
+/** Who an admin let use a tool, until when (core/src/api/grants.rs). */
+export type GrantPrincipal = { kind: "agent" | "member" | "team"; id: string };
+export type Grant = {
+	id: string;
+	principal: GrantPrincipal;
+	tool: string;
+	/** Runs without asking each time; reads under a grant run anyway. */
+	standing: boolean;
+	expires_at: string;
+	state: "active" | "expired";
+	granted_by: Person;
+	reason: string | null;
+};
+export type NewGrant = {
+	principal: GrantPrincipal;
+	tool: string;
+	standing: boolean;
+	/** At most 90 days from now. */
+	expires_at: string;
+	reason?: string;
+};
 export type Invitation = { org: Org; inviter: Person; email: string };
 export type MfaSetup = { qr_svg: string; secret: string; challenge: string };
 
@@ -198,7 +248,7 @@ export const apiBaseUrl = (import.meta.env.VITE_MANDATE_API_URL ?? "")
 	.trim()
 	.replace(/\/+$/, "");
 
-export type Method = "GET" | "POST";
+export type Method = "GET" | "POST" | "DELETE";
 
 /** Builds the fetch options every call uses; exported for its test. */
 export function requestInit(method: Method, body?: unknown): RequestInit {
@@ -328,4 +378,35 @@ export const api = {
 	activity: (cursor?: string) =>
 		call<Page<Activity>>("GET", `/v1/activity${query({ cursor })}`),
 	agents: () => call<{ items: Agent[] }>("GET", "/v1/agents"),
+	conversations: {
+		/** The person's own conversations, newest first. */
+		list: (cursor?: string) =>
+			call<Page<Conversation>>("GET", `/v1/conversations${query({ cursor })}`),
+		/** 403 `no_access` when the person has no agent yet. */
+		start: (message: string) =>
+			call<Conversation>("POST", "/v1/conversations", { message }),
+		send: (id: string, message: string) =>
+			call<void>(
+				"POST",
+				`/v1/conversations/${encodeURIComponent(id)}/messages`,
+				{ message },
+			),
+		cancel: (id: string) =>
+			call<void>("POST", `/v1/conversations/${encodeURIComponent(id)}/cancel`),
+	},
+	/** Org admins only: anyone else gets 403 `forbidden`. */
+	grants: {
+		list: () => call<{ items: Grant[] }>("GET", "/v1/grants"),
+		/** 409 `conflict` when the principal already has a live grant for the tool. */
+		create: (grant: NewGrant) => call<Grant>("POST", "/v1/grants", grant),
+		revoke: (id: string) =>
+			call<void>("DELETE", `/v1/grants/${encodeURIComponent(id)}`),
+	},
 };
+
+/** Where a conversation's event stream is, for EventSource; empty with stand-ins. */
+export function conversationEventsUrl(id: string): string {
+	return apiBaseUrl
+		? `${apiBaseUrl}/v1/conversations/${encodeURIComponent(id)}/events`
+		: "";
+}

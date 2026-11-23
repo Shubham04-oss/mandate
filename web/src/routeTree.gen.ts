@@ -27,6 +27,8 @@ import { Route as MfaSetupRouteImport } from './routes/mfa_.setup'
 import { Route as PreviewPopupsRouteImport } from './routes/preview.popups'
 import { Route as SignInCodeRouteImport } from './routes/sign-in_.code'
 import { Route as SignInRequiredRouteImport } from './routes/sign-in_.required'
+import { Route as AppAgentIndexRouteImport } from './routes/_app/agent/index'
+import { Route as AppAgentConversationIdRouteImport } from './routes/_app/agent/$conversationId'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -117,6 +119,16 @@ const SignInRequiredRoute = SignInRequiredRouteImport.update({
   path: '/sign-in/required',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AppAgentIndexRoute = AppAgentIndexRouteImport.update({
+  id: '/agent/',
+  path: '/agent/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAgentConversationIdRoute = AppAgentConversationIdRouteImport.update({
+  id: '/agent/$conversationId',
+  path: '/agent/$conversationId',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -136,6 +148,8 @@ export interface FileRoutesByFullPath {
   '/preview/popups': typeof PreviewPopupsRoute
   '/sign-in/code': typeof SignInCodeRoute
   '/sign-in/required': typeof SignInRequiredRoute
+  '/agent/$conversationId': typeof AppAgentConversationIdRoute
+  '/agent/': typeof AppAgentIndexRoute
 }
 export interface FileRoutesByTo {
   '/choose-organization': typeof ChooseOrganizationRoute
@@ -155,6 +169,8 @@ export interface FileRoutesByTo {
   '/sign-in/code': typeof SignInCodeRoute
   '/sign-in/required': typeof SignInRequiredRoute
   '/': typeof AppIndexRoute
+  '/agent/$conversationId': typeof AppAgentConversationIdRoute
+  '/agent': typeof AppAgentIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -176,6 +192,8 @@ export interface FileRoutesById {
   '/sign-in_/code': typeof SignInCodeRoute
   '/sign-in_/required': typeof SignInRequiredRoute
   '/_app/': typeof AppIndexRoute
+  '/_app/agent/$conversationId': typeof AppAgentConversationIdRoute
+  '/_app/agent/': typeof AppAgentIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -197,6 +215,8 @@ export interface FileRouteTypes {
     | '/preview/popups'
     | '/sign-in/code'
     | '/sign-in/required'
+    | '/agent/$conversationId'
+    | '/agent/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/choose-organization'
@@ -216,6 +236,8 @@ export interface FileRouteTypes {
     | '/sign-in/code'
     | '/sign-in/required'
     | '/'
+    | '/agent/$conversationId'
+    | '/agent'
   id:
     | '__root__'
     | '/_app'
@@ -236,6 +258,8 @@ export interface FileRouteTypes {
     | '/sign-in_/code'
     | '/sign-in_/required'
     | '/_app/'
+    | '/_app/agent/$conversationId'
+    | '/_app/agent/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -386,15 +410,33 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SignInRequiredRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_app/agent/': {
+      id: '/_app/agent/'
+      path: '/agent'
+      fullPath: '/agent/'
+      preLoaderRoute: typeof AppAgentIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/agent/$conversationId': {
+      id: '/_app/agent/$conversationId'
+      path: '/agent/$conversationId'
+      fullPath: '/agent/$conversationId'
+      preLoaderRoute: typeof AppAgentConversationIdRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
 interface AppRouteChildren {
   AppIndexRoute: typeof AppIndexRoute
+  AppAgentConversationIdRoute: typeof AppAgentConversationIdRoute
+  AppAgentIndexRoute: typeof AppAgentIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppIndexRoute: AppIndexRoute,
+  AppAgentConversationIdRoute: AppAgentConversationIdRoute,
+  AppAgentIndexRoute: AppAgentIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
