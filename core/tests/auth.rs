@@ -234,6 +234,60 @@ async fn cors_allows_only_the_web_origin() {
 }
 
 #[tokio::test]
+async fn cors_allows_event_stream_reconnects_and_exposes_retry_after() {
+    let routes = Router::new()
+        .route("/v1/conversations/{id}/events", get(|| async { "ok" }))
+        .route("/limited", get(|| async { api::ApiError::rate_limited(7) }));
+    let app = api::with_routes(routes, state(offline_store()));
+    // An EventSource reconnect sends Last-Event-ID, which is not CORS-safelisted, so it is preflighted.
+    let preflight = |origin: &str| {
+        Request::options("/v1/conversations/00000000-0000-0000-0000-000000000000/events")
+            .header(header::ORIGIN, origin)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "last-event-id")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let r = app.clone().oneshot(preflight(WEB)).await.unwrap();
+    let h = r.headers();
+    assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], WEB);
+    assert_eq!(h[header::ACCESS_CONTROL_ALLOW_CREDENTIALS], "true");
+    let allowed = h[header::ACCESS_CONTROL_ALLOW_HEADERS]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(allowed.contains("last-event-id"), "{allowed}");
+
+    let r = app
+        .clone()
+        .oneshot(preflight("https://evil.example"))
+        .await
+        .unwrap();
+    assert!(
+        r.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none()
+    );
+
+    let r = app
+        .oneshot(
+            Request::get("/limited")
+                .header(header::ORIGIN, WEB)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(r.headers()[header::RETRY_AFTER], "7");
+    let exposed = r.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(exposed.contains("retry-after"), "{exposed}");
+}
+
+#[tokio::test]
 #[ignore]
 async fn session_is_bound_to_its_tenant() {
     let store = app_store().await;

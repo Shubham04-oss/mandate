@@ -193,7 +193,13 @@ fn cors(web_origin: &str) -> CorsLayer {
         .allow_origin(origin)
         .allow_credentials(true)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers([header::CONTENT_TYPE, CSRF_HEADER])
+        // EventSource reconnects send Last-Event-ID; the web reads Retry-After on a 429.
+        .allow_headers([
+            header::CONTENT_TYPE,
+            CSRF_HEADER,
+            HeaderName::from_static("last-event-id"),
+        ])
+        .expose_headers([header::RETRY_AFTER])
 }
 
 /// Every `/v1` route of the web API, with its CSRF, CORS and body-size layers.
