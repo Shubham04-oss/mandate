@@ -1094,6 +1094,13 @@ async fn cancel(
     let c = load(&api.store, &session.tenant, id, Some(&session.member))
         .await?
         .ok_or(ApiError::not_found())?;
+    // Nothing is running: cancelling must not restart the relay or mark the conversation working.
+    if !matches!(
+        s.state(&session.tenant, id).await?.as_deref(),
+        Some("working" | "waiting")
+    ) {
+        return Ok(StatusCode::ACCEPTED);
+    }
     s.eve
         .cancel(&s.token(&session.tenant, &c), &c.eve)
         .await
