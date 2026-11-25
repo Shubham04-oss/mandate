@@ -102,8 +102,12 @@ export function parseEvent(
 }
 
 // After the core refuses a stream (429 when too many are open) or a reconnect fails, wait longer
-// each time before trying again.
-const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 20_000, 30_000];
+// each time before trying again, and stop after this many failures in a row (about 38 s).
+const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 20_000];
+export const MAX_FAILURES = BACKOFF_MS.length;
+
+/** Told when the stream loses the core after its last retry, and when it has it again. */
+export type OnLost = (lost: boolean) => void;
 
 /**
  * One live stream of a conversation's events, shared by everyone listening to it.
@@ -116,6 +120,8 @@ const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 20_000, 30_000];
 export class ConversationStream {
 	private source: EventSourceLike | null = null;
 	private listeners = new Set<(e: ConversationEvent) => void>();
+	private lostListeners = new Set<OnLost>();
+	private lost = false;
 	private lastId = 0;
 	private failures = 0;
 	private retry: unknown = null;
@@ -139,16 +145,29 @@ export class ConversationStream {
 		return this.listeners.size;
 	}
 
-	subscribe(fn: (e: ConversationEvent) => void): () => void {
+	/** True once the stream has given up on the core; it stays closed until reopened. */
+	get gaveUp() {
+		return this.lost;
+	}
+
+	subscribe(fn: (e: ConversationEvent) => void, onLost?: OnLost): () => void {
 		this.listeners.add(fn);
+		if (onLost) this.lostListeners.add(onLost);
 		if (this.closed) {
 			this.closed = false;
 			this.open();
 		}
 		return () => {
 			this.listeners.delete(fn);
+			if (onLost) this.lostListeners.delete(onLost);
 			if (this.listeners.size === 0) this.close();
 		};
+	}
+
+	private setLost(lost: boolean) {
+		if (this.lost === lost) return;
+		this.lost = lost;
+		for (const fn of this.lostListeners) fn(lost);
 	}
 
 	close() {
@@ -171,15 +190,21 @@ export class ConversationStream {
 		}
 		source.onopen = () => {
 			this.failures = 0;
+			this.setLost(false);
 		};
 		source.onerror = () => {
 			// Still connecting: the browser is reconnecting on its own, with Last-Event-ID.
 			if (source.readyState !== 2 || this.source !== source) return;
 			source.close();
 			this.source = null;
-			const wait =
-				BACKOFF_MS[Math.min(this.failures, BACKOFF_MS.length - 1)] ?? 30_000;
+			const wait = BACKOFF_MS[this.failures];
 			this.failures += 1;
+			// Out of retries: stay closed instead of asking the core every 30 s forever.
+			if (wait === undefined) {
+				this.closed = true;
+				this.setLost(true);
+				return;
+			}
 			this.retry = this.timers.set(() => {
 				this.retry = null;
 				if (!this.closed) this.open();
@@ -230,7 +255,10 @@ const streams = new Map<string, ConversationStream>();
 export function listen(
 	conversationId: string,
 	fn: (e: ConversationEvent) => void,
-	connect: Connect = connectToCore,
+	{
+		connect = connectToCore,
+		onLost,
+	}: { connect?: Connect; onLost?: OnLost } = {},
 ): () => void {
 	let stream = streams.get(conversationId);
 	if (!stream) {
@@ -238,7 +266,7 @@ export function listen(
 		streams.set(conversationId, stream);
 	}
 	const s = stream;
-	const stop = s.subscribe(fn);
+	const stop = s.subscribe(fn, onLost);
 	return () => {
 		stop();
 		if (s.listening === 0) streams.delete(conversationId);

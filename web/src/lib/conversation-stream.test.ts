@@ -4,6 +4,7 @@ import {
 	ConversationStream,
 	type EventSourceLike,
 	listen,
+	MAX_FAILURES,
 	parseEvent,
 } from "./conversation-stream.ts";
 
@@ -151,6 +152,28 @@ describe("the conversation stream", () => {
 		expect(c.next()).toBe(1_000);
 	});
 
+	it("gives up after a few failures in a row, says so, and stops asking", async () => {
+		const { sources, stream, clock: c } = setup();
+		const lost: boolean[] = [];
+		stream.subscribe(
+			() => {},
+			(l) => lost.push(l),
+		);
+		await flush();
+		const waits: (number | undefined)[] = [];
+		for (let i = 0; i < MAX_FAILURES; i++) {
+			(sources.at(-1) as FakeSource).fail();
+			waits.push(c.next());
+			await flush();
+		}
+		expect(waits).toEqual([1_000, 2_000, 5_000, 10_000, 20_000]);
+		(sources.at(-1) as FakeSource).fail();
+		expect(c.pending).toHaveLength(0);
+		expect(sources).toHaveLength(MAX_FAILURES + 1);
+		expect(stream.gaveUp).toBe(true);
+		expect(lost).toEqual([true]);
+	});
+
 	it("ignores events it doesn't understand", async () => {
 		const { sources, stream, seen } = setup();
 		stream.subscribe((e) => seen.push(e));
@@ -179,14 +202,14 @@ describe("listen", () => {
 			opened += 1;
 			return new FakeSource();
 		};
-		const a = listen("cnv_shared", () => {}, connect);
-		const b = listen("cnv_shared", () => {}, connect);
+		const a = listen("cnv_shared", () => {}, { connect });
+		const b = listen("cnv_shared", () => {}, { connect });
 		await flush();
 		expect(opened).toBe(1);
 		a();
 		b();
 		// Gone with its last listener: the next one opens afresh.
-		const c = listen("cnv_shared", () => {}, connect);
+		const c = listen("cnv_shared", () => {}, { connect });
 		await flush();
 		expect(opened).toBe(2);
 		c();

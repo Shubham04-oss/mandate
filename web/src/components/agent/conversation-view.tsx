@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { cn } from "cn";
-import { useEffect, useReducer, useRef } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ActivityPanel } from "#/components/agent/activity-panel.tsx";
 import { AgentText } from "#/components/agent/agent-text.tsx";
@@ -36,7 +36,11 @@ export function ConversationView({
 	conversations: Conversation[];
 }) {
 	const [view, dispatch] = useReducer(applyEvent, emptyView);
-	useEffect(() => listen(conversation.id, dispatch), [conversation.id]);
+	const [lost, setLost] = useState(false);
+	useEffect(
+		() => listen(conversation.id, dispatch, { onLost: setLost }),
+		[conversation.id],
+	);
 
 	// Failed means the agent never started: the stream can't say so, the list can.
 	const failed = conversation.state === "failed";
@@ -96,6 +100,11 @@ export function ConversationView({
 								<i aria-hidden="true" className="status-dot bg-gold-deep" />
 								Waiting for your OK
 							</p>
+						) : null}
+						{lost ? (
+							<output className="m-0 block text-[13px] text-muted-foreground leading-normal">
+								Lost touch with your agent. Reload the page to see what it did.
+							</output>
 						) : null}
 						<div ref={end} />
 					</div>

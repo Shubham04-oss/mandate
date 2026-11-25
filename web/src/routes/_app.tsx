@@ -2,7 +2,6 @@ import {
 	createFileRoute,
 	type ErrorComponentProps,
 	Outlet,
-	redirect,
 	useRouter,
 } from "@tanstack/react-router";
 import { AppShell } from "#/components/app/app-shell.tsx";
@@ -20,18 +19,13 @@ export const Route = createFileRoute("/_app")({
 	ssr: false,
 	validateSearch: (search: Record<string, unknown>): AppSearch =>
 		isSettingsSection(search.settings) ? { settings: search.settings } : {},
+	// A lost session goes to /sign-in from the API module itself (src/lib/api/index.ts).
 	loader: async () => {
-		try {
-			const [me, pending] = await Promise.all([
-				api.me(),
-				api.approvals.list("pending"),
-			]);
-			return { me, pending: pending.items };
-		} catch (e) {
-			if (e instanceof ApiError && e.signedOut)
-				throw redirect({ to: "/sign-in" });
-			throw e;
-		}
+		const [me, pending] = await Promise.all([
+			api.me(),
+			api.approvals.list("pending"),
+		]);
+		return { me, pending: pending.items };
 	},
 	errorComponent: AppUnavailable,
 	component: () => (
@@ -43,6 +37,8 @@ export const Route = createFileRoute("/_app")({
 
 function AppUnavailable({ error }: ErrorComponentProps) {
 	const router = useRouter();
+	// Already on its way to /sign-in: nothing to say meanwhile.
+	if (error instanceof ApiError && error.signedOut) return null;
 	return (
 		<div className="grid min-h-dvh place-items-center bg-background p-6 text-center text-foreground">
 			<div className="flex max-w-sm flex-col items-center gap-3">

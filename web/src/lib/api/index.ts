@@ -201,10 +201,30 @@ export class ApiError extends Error {
 		this.name = "ApiError";
 	}
 
-	/** No session: the person has to sign in. */
+	/** No session: the person has to sign in. A wrong password or a two-step demand is a 401 too. */
 	get signedOut() {
-		return this.status === 401;
+		return this.status === 401 && this.code === "forbidden";
 	}
+}
+
+/** Whether an error means the session is gone; sign-in's own calls handle their 401s in place. */
+export function isLostSession(error: unknown, path: string): boolean {
+	return (
+		error instanceof ApiError &&
+		error.signedOut &&
+		!path.startsWith("/v1/auth/")
+	);
+}
+
+// A fresh load of the sign-in page, so nothing of the old session stays in memory.
+let goToSignIn = () => {
+	if (typeof window !== "undefined" && window.location.pathname !== "/sign-in")
+		window.location.assign("/sign-in");
+};
+
+/** Replaces what happens when the session is gone; for tests. */
+export function onSignedOut(fn: () => void) {
+	goToSignIn = fn;
 }
 
 const fallbackMessage = "Something went wrong. Try again.";
@@ -266,7 +286,21 @@ export function requestInit(method: Method, body?: unknown): RequestInit {
 	};
 }
 
+/** Every call to the core goes through here, so a lost session is handled in this one place. */
 async function call<T>(
+	method: Method,
+	path: string,
+	body?: unknown,
+): Promise<T> {
+	try {
+		return await send<T>(method, path, body);
+	} catch (e) {
+		if (isLostSession(e, path)) goToSignIn();
+		throw e;
+	}
+}
+
+async function send<T>(
 	method: Method,
 	path: string,
 	body?: unknown,
