@@ -98,10 +98,18 @@ describe("activityRow", () => {
 
 describe("handledToday", () => {
 	const now = new Date("2026-11-21T15:00:00");
-	it("counts today's runs and asks, not refusals or other days", () => {
+	it("counts what ran today: an approved action once, a denied or waiting ask not at all", () => {
 		const items = [
 			entry({ at: "2026-11-21T09:00:00", decision: "run" }),
-			entry({ at: "2026-11-21T10:00:00", decision: "ask" }),
+			// An approved action: its ask, then the run it allowed.
+			entry({
+				at: "2026-11-21T10:00:00",
+				decision: "ask",
+				outcome: "approved",
+			}),
+			entry({ at: "2026-11-21T10:01:00", decision: "run" }),
+			entry({ at: "2026-11-21T10:30:00", decision: "ask", outcome: "denied" }),
+			entry({ at: "2026-11-21T10:40:00", decision: "ask", outcome: "pending" }),
 			entry({ at: "2026-11-21T11:00:00", decision: "refuse" }),
 			entry({ at: "2026-11-20T11:00:00", decision: "run" }),
 		];
