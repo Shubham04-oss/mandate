@@ -118,3 +118,31 @@ jobs:
           if [ "$WITH_EVE" = true ]; then
             roll eve "$REGISTRY/mandate-dev/eve:$TAG"
           fi
+
+  # The web app ships after the core, so it never calls an API the live core doesn't have yet.
+  web:
+    needs: deploy
+    if: vars.MANDATE_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # A Workers-only token; Wrangler reads it and the account id from the environment.
+      - name: Build and deploy to app.oryxa.in
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
