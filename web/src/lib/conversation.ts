@@ -100,9 +100,11 @@ export function applyEvent(view: View, e: ConversationEvent): View {
 				state: "working",
 			};
 		case "error":
+			// The core ends a failed turn with `error` and no `done`, so the error ends it here.
 			return {
 				...view,
 				lines: [...view.lines, { key, kind: "error", text: e.message }],
+				state: "idle",
 			};
 		case "done":
 			return { ...view, state: "idle" };

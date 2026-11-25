@@ -3,6 +3,15 @@ import { Icon } from "#/components/icons/icon.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import { Textarea } from "#/components/ui/textarea.tsx";
 
+/** Whether the composer's button stops your agent or sends: Stop only while it works and nothing is written. */
+export function composerAction(
+	working: boolean,
+	text: string,
+	canStop: boolean,
+): "stop" | "send" {
+	return working && !text.trim() && canStop ? "stop" : "send";
+}
+
 /**
  * Where you write to your agent. Enter sends, Shift+Enter starts a new line. While your agent
  * works and nothing is written, the button stops it instead.
@@ -25,7 +34,7 @@ export function Composer({
 }) {
 	const [text, setText] = useState("");
 	const [sending, setSending] = useState(false);
-	const stops = working && !text.trim() && onStop !== undefined;
+	const stops = composerAction(working, text, onStop !== undefined) === "stop";
 
 	const send = async () => {
 		const words = text.trim();
