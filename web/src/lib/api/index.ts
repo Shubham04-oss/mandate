@@ -229,6 +229,19 @@ export function onSignedOut(fn: () => void) {
 	goToSignIn = fn;
 }
 
+/**
+ * Asks the core whether the session still holds. A lost one goes to /sign-in through call(), as any
+ * call would; any other failure (the core unreachable) counts as still signed in.
+ */
+export async function stillSignedIn(): Promise<boolean> {
+	try {
+		await api.me();
+		return true;
+	} catch (e) {
+		return !(e instanceof ApiError && e.signedOut);
+	}
+}
+
 const fallbackMessage = "Something went wrong. Try again.";
 
 /** Turns any response into the body the contract promises, or throws its error as an ApiError. */

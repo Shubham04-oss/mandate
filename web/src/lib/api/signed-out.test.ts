@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, api, isLostSession, onSignedOut } from "./index.ts";
+import {
+	ApiError,
+	api,
+	isLostSession,
+	onSignedOut,
+	stillSignedIn,
+} from "./index.ts";
 
 // The stand-ins answer in tests (no core URL), keeping their session in a stubbed sessionStorage.
 beforeEach(() => {
@@ -33,6 +39,17 @@ describe("a lost session", () => {
 		await expect(api.me()).rejects.toMatchObject({ signedOut: true });
 		await expect(api.conversations.list()).rejects.toBeInstanceOf(ApiError);
 		expect(goTo).toHaveBeenCalledTimes(2);
+	});
+
+	it("is checked once when the event stream gives up: gone means sign in again", async () => {
+		const goTo = vi.fn();
+		onSignedOut(goTo);
+		expect(await stillSignedIn()).toBe(false);
+		expect(goTo).toHaveBeenCalledOnce();
+
+		await api.auth.password("ada@northstar.io", "anything");
+		expect(await stillSignedIn()).toBe(true);
+		expect(goTo).toHaveBeenCalledOnce();
 	});
 
 	it("leaves a wrong password to the sign-in page", async () => {

@@ -77,7 +77,7 @@ function clock() {
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-function setup() {
+function setup(checkSession?: () => Promise<boolean>) {
 	const sources: FakeSource[] = [];
 	const c = clock();
 	const stream = new ConversationStream(
@@ -88,6 +88,7 @@ function setup() {
 			return s;
 		},
 		c.timers,
+		checkSession,
 	);
 	const seen: ConversationEvent[] = [];
 	return { sources, clock: c, stream, seen };
@@ -174,10 +175,37 @@ describe("the conversation stream", () => {
 		}
 		expect(waits).toEqual([1_000, 2_000, 5_000, 10_000, 20_000]);
 		(sources.at(-1) as FakeSource).fail();
+		await flush();
 		expect(c.pending).toHaveLength(0);
 		expect(sources).toHaveLength(MAX_FAILURES + 1);
 		expect(stream.gaveUp).toBe(true);
 		expect(lost).toEqual([true]);
+	});
+
+	it("checks the session once when it gives up, and says nothing if it's gone", async () => {
+		let checks = 0;
+		const {
+			sources,
+			stream,
+			clock: c,
+		} = setup(async () => {
+			checks += 1;
+			return false; // signed out: call() is already on its way to /sign-in
+		});
+		const lost: boolean[] = [];
+		stream.subscribe(
+			() => {},
+			(l) => lost.push(l),
+		);
+		await flush();
+		for (let i = 0; i <= MAX_FAILURES; i++) {
+			(sources.at(-1) as FakeSource).fail();
+			c.next();
+			await flush();
+		}
+		expect(checks).toBe(1);
+		expect(lost).toEqual([]);
+		expect(c.pending).toHaveLength(0);
 	});
 
 	it("closes once a turn has ended, and not on an earlier turn's done in a replay", async () => {

@@ -2,6 +2,7 @@ import {
 	type ApprovalState,
 	type ConversationEvent,
 	conversationEventsUrl,
+	stillSignedIn,
 	type ToolStatus,
 } from "#/lib/api/index.ts";
 
@@ -141,6 +142,8 @@ export class ConversationStream {
 			set: (fn, ms) => setTimeout(fn, ms),
 			clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 		},
+		/** Whether the session still holds, asked once when the stream gives up. */
+		private readonly checkSession: () => Promise<boolean> = async () => true,
 	) {}
 
 	/** The id of the last event passed on; what Last-Event-ID would say. */
@@ -224,10 +227,14 @@ export class ConversationStream {
 			this.source = null;
 			const wait = BACKOFF_MS[this.failures];
 			this.failures += 1;
-			// Out of retries: stay closed instead of asking the core every 30 s forever.
+			// Out of retries: stay closed instead of asking the core every 30 s forever. A stream's
+			// 401 never reaches call(), so ask once whether the session is gone (then it's off to
+			// /sign-in) before saying the agent is out of touch.
 			if (wait === undefined) {
 				this.closed = true;
-				this.setLost(true);
+				void this.checkSession().then((signedIn) => {
+					if (signedIn) this.setLost(true);
+				});
 				return;
 			}
 			this.retry = this.timers.set(() => {
@@ -309,11 +316,21 @@ export function listen(
 	{
 		connect = connectToCore,
 		onLost,
-	}: { connect?: Connect; onLost?: OnLost } = {},
+		checkSession = stillSignedIn,
+	}: {
+		connect?: Connect;
+		onLost?: OnLost;
+		checkSession?: () => Promise<boolean>;
+	} = {},
 ): Listening {
 	let stream = streams.get(conversationId);
 	if (!stream) {
-		stream = new ConversationStream(conversationId, connect);
+		stream = new ConversationStream(
+			conversationId,
+			connect,
+			undefined,
+			checkSession,
+		);
 		streams.set(conversationId, stream);
 	}
 	const s = stream;
