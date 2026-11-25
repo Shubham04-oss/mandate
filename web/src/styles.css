@@ -283,13 +283,6 @@
 		background: var(--gold-deep);
 	}
 
-	/* A status dot: answered, waiting, or (orange) needs the person. */
-	.status-dot {
-		flex: none;
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-	}
 }
 
 /*

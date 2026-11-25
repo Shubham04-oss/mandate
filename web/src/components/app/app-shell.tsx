@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
+import { StatusMark } from "#/components/agent/marks.tsx";
 import { PersonAvatar } from "#/components/auth/parts.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import {
@@ -161,7 +162,7 @@ function NeedsTab({ waiting }: { waiting: Approval[] }) {
 					<PersonAvatar key={person.id} person={person} className="size-5" />
 				))}
 			</AvatarGroup>
-			<i aria-hidden="true" className="status-dot bg-gold-deep" />
+			<StatusMark mark="needs-you" size={14} />
 			{waiting.length} need you
 			<Icon
 				name="chevron-right"

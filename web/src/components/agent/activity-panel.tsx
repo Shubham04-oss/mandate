@@ -1,7 +1,6 @@
 import { useRouter } from "@tanstack/react-router";
 import { useState } from "react";
-import { Spinner } from "#/components/agent/marks.tsx";
-import { Icon } from "#/components/icons/icon.tsx";
+import { StatusMark } from "#/components/agent/marks.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import { ApiError, type Approval, api } from "#/lib/api/index.ts";
 import { type Step, stepLabel, toolTitle } from "#/lib/conversation.ts";
@@ -69,34 +68,16 @@ function StepItem({ step }: { step: Step }) {
 
 function StepIcon({ step, waiting }: { step: Step; waiting: boolean }) {
 	if (waiting)
-		return (
-			<i
-				role="img"
-				aria-label="Needs your OK"
-				className="size-2 rounded-full bg-gold-deep"
-			/>
-		);
+		return <StatusMark mark="needs-you" label="Needs your OK" size={15} />;
 	if (step.status === "requested" || step.status === "running")
-		return (
-			<span role="img" aria-label="Under way" className="text-sea">
-				<Spinner className="size-3.5" />
-			</span>
-		);
+		return <StatusMark mark="working" label="Under way" size={15} />;
 	if (step.status === "completed")
-		return (
-			<Icon
-				name="check"
-				size={14}
-				strokeWidth={2.4}
-				label="Done"
-				className="text-ok-foreground"
-			/>
-		);
+		return <StatusMark mark="done" label="Done" size={15} />;
 	return (
-		<Icon
-			name="cross-circle"
-			size={14}
+		<StatusMark
+			mark="failed"
 			label={step.status === "denied" ? "Not done" : "Failed"}
+			size={15}
 			className="text-muted-foreground"
 		/>
 	);

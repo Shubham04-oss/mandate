@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { ActivityPanel } from "#/components/agent/activity-panel.tsx";
 import { AgentText } from "#/components/agent/agent-text.tsx";
 import { Composer } from "#/components/agent/composer.tsx";
-import { Spinner, StateMark } from "#/components/agent/marks.tsx";
+import { StateMark, StatusMark } from "#/components/agent/marks.tsx";
 import { useStartConversation } from "#/components/agent/use-start-conversation.ts";
 import { Icon } from "#/components/icons/icon.tsx";
 import { Button, buttonVariants } from "#/components/ui/button.tsx";
@@ -102,14 +102,14 @@ export function ConversationView({
 							<LineView key={line.key} line={line} failed={failed} />
 						))}
 						{state === "working" ? (
-							<p className="m-0 flex items-center gap-2 text-[13px] text-muted-foreground">
-								<Spinner />
+							<p className="m-0 flex items-center gap-2.5 text-[13px] text-muted-foreground">
+								<StatusMark mark="working" />
 								Your agent is working
 							</p>
 						) : null}
 						{state === "waiting" ? (
 							<p className="m-0 flex items-center gap-2.5 text-[13px] text-muted-foreground">
-								<i aria-hidden="true" className="status-dot bg-gold-deep" />
+								<StatusMark mark="needs-you" />
 								Waiting for your OK
 							</p>
 						) : null}
