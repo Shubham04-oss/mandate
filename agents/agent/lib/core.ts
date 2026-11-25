@@ -7,6 +7,13 @@ const ASKS = "(asks for approval)";
 
 export type Listing = Map<string, "run" | "ask">;
 
+/** The core's MCP URL, read at call time; no fallback, so a missing setting fails loudly. */
+export function coreMcpUrl(): string {
+  const url = process.env.MANDATE_CORE_MCP_URL;
+  if (!url) throw new Error("MANDATE_CORE_MCP_URL is not set");
+  return url;
+}
+
 /** The tools the core lists for this assertion, each tagged run or ask; refused tools are absent. */
 export async function listTools(
   url: string,
