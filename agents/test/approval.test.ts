@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Assertion } from "../agent/lib/assertion.ts";
+import { instanceKeyOf } from "../agent/lib/caller.ts";
 import { approvalFor, coreMcpUrl, type Listing, listTools } from "../agent/lib/core.ts";
 
 const ann: Assertion = { tenant: "acme", member: "ann", agent: "ann-op", expires_at: 2e9 };
@@ -96,4 +97,8 @@ test("coreMcpUrl reads MANDATE_CORE_MCP_URL when called, and has no fallback", (
     if (before === undefined) delete process.env.MANDATE_CORE_MCP_URL;
     else process.env.MANDATE_CORE_MCP_URL = before;
   }
+});
+
+test("the connection's instance key is the verified tenant and agent", () => {
+  assert.equal(instanceKeyOf(ann), "acme/ann-op");
 });
