@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Assertion } from "../agent/lib/assertion.ts";
-import { approvalFor, type Listing, listTools } from "../agent/lib/core.ts";
+import { approvalFor, coreMcpUrl, type Listing, listTools } from "../agent/lib/core.ts";
 
 const ann: Assertion = { tenant: "acme", member: "ann", agent: "ann-op", expires_at: 2e9 };
 const caller = { current: ann, initiator: ann, token: "tok" };
@@ -83,4 +83,17 @@ test("listTools fails on a non-200 or malformed answer", async () => {
   await assert.rejects(listTools("http://core/mcp", "tok", undefined, status));
   const junk = (async () => new Response("{}")) as typeof fetch;
   await assert.rejects(listTools("http://core/mcp", "tok", undefined, junk));
+});
+
+test("coreMcpUrl reads MANDATE_CORE_MCP_URL when called, and has no fallback", () => {
+  const before = process.env.MANDATE_CORE_MCP_URL;
+  try {
+    process.env.MANDATE_CORE_MCP_URL = "http://core.internal:8080/mcp";
+    assert.equal(coreMcpUrl(), "http://core.internal:8080/mcp");
+    delete process.env.MANDATE_CORE_MCP_URL;
+    assert.throws(() => coreMcpUrl(), /MANDATE_CORE_MCP_URL/);
+  } finally {
+    if (before === undefined) delete process.env.MANDATE_CORE_MCP_URL;
+    else process.env.MANDATE_CORE_MCP_URL = before;
+  }
 });
