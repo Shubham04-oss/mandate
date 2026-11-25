@@ -2724,7 +2724,7 @@ async fn failed_neutralisation_issues_no_session() {
             json!({ "code": GOOD_CODE }),
         )
         .await;
-    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(session_cookie(&r).is_none());
     assert_eq!(
         sign_up_row(&h, &victim.id).await,
@@ -3211,7 +3211,7 @@ async fn ambiguous_create_user_failure_keeps_the_row() {
     // WorkOS made the user but the answer was lost.
     *h.fake.create_user_error.lock().unwrap() = Some(AuthError::Upstream("status 504".into()));
     let r = h.post("/v1/auth/sign-up", sign_up_body(&email)).await;
-    assert_eq!(r.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(sign_up_row_by_email(&h, &email).await, Some((None, false)));
     // So that password is refused even after the email gets verified some other way.
     let inviter = h.user("admin");

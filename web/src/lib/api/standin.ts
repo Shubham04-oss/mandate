@@ -887,7 +887,7 @@ const routes: [Method, RegExp, Handler][] = [
 					code: "internal",
 					message: "The agent is unavailable.",
 				});
-				return fail(502, "internal", "The agent is unavailable.");
+				return fail(503, "internal", "The agent is unavailable.");
 			}
 			const id = newConversation(message, "working");
 			turn(id, message);

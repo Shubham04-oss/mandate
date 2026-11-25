@@ -948,7 +948,7 @@ async fn cancel_on_an_idle_or_failed_conversation_is_a_no_op() {
         Some(json!({ "message": "x" })),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let (_, list) = call(&app, "GET", "/v1/conversations", None).await;
     let failed = list["items"][0]["id"].as_str().unwrap().to_owned();
     // A failed conversation has no eve session, so cancel already finds nothing to cancel: 404.
@@ -1632,7 +1632,7 @@ async fn a_failed_eve_start_marks_the_conversation_failed() {
         Some(json!({ "message": "hello" })),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "internal");
     let (_, list) = call(&h.app(&t, "ann").await, "GET", "/v1/conversations", None).await;
     let id = list["items"][0]["id"].as_str().unwrap().to_owned();
@@ -1755,7 +1755,7 @@ async fn hanging_eve_starts_hold_no_database_connection() {
     .expect("the pool is not drained by calls waiting on eve");
     assert_eq!(status, StatusCode::OK);
     for s in starts {
-        assert_eq!(s.await.unwrap().0, StatusCode::BAD_GATEWAY);
+        assert_eq!(s.await.unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
     }
     let (_, list) = call(&app, "GET", "/v1/conversations", None).await;
     let states: Vec<&str> = list["items"]
@@ -1802,7 +1802,7 @@ async fn a_hanging_eve_send_leaves_the_row_unlocked() {
         .await
         .expect("the conversation row is not locked across the eve call");
     drop(tx);
-    assert_eq!(sent.await.unwrap().0, StatusCode::BAD_GATEWAY);
+    assert_eq!(sent.await.unwrap().0, StatusCode::SERVICE_UNAVAILABLE);
     // The hung message was sent twice under one key, so eve runs it once.
     let sends = h
         .fake
