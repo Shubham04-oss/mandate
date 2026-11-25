@@ -18,6 +18,8 @@ import {
 import { ApiError, api, type Conversation } from "#/lib/api/index.ts";
 import {
 	applyEvent,
+	approvalState,
+	currentAsks,
 	emptyView,
 	type Line,
 	shownState,
@@ -57,7 +59,20 @@ export function ConversationView({
 	const failed = conversation.state === "failed";
 	const state = failed
 		? "failed"
-		: shownState(view.state ?? conversation.state, view.steps);
+		: shownState(view.state ?? conversation.state, view);
+	// Redraw when the next ask runs out, so its Approve and Deny don't outlive it.
+	const [, redraw] = useReducer((n: number) => n + 1, 0);
+	useEffect(() => {
+		const ends = currentAsks(view)
+			.filter((a) => approvalState(a) === "pending")
+			.map((a) => Date.parse(a.expires_at));
+		if (ends.length === 0) return;
+		const t = setTimeout(
+			redraw,
+			Math.max(0, Math.min(...ends) - Date.now()) + 50,
+		);
+		return () => clearTimeout(t);
+	}, [view]);
 
 	const end = useRef<HTMLDivElement>(null);
 	const count = view.lines.length;
@@ -147,11 +162,7 @@ export function ConversationView({
 								label="Reply to your agent"
 								placeholder="Reply to your agent"
 								onSend={send}
-								working={
-									state === "working" ||
-									state === "waiting" ||
-									state === "expired"
-								}
+								working={state === "working" || state === "expired"}
 								onStop={stop}
 							/>
 						)}

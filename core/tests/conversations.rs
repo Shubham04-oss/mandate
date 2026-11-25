@@ -1256,6 +1256,20 @@ async fn a_wait_whose_approval_expired_reads_expired_and_can_be_stopped() {
     assert_eq!(one["state"], "expired");
     let (_, list) = call(&app, "GET", "/v1/conversations", None).await;
     assert_eq!(list["items"][0]["state"], "expired");
+    // A later turn that pauses without asking is not held to the old, expired approval.
+    let mut tx = h.store.begin(&t).await.unwrap();
+    sqlx::query(
+        "insert into conversation_events (tenant_id, conversation, seq, kind, data) \
+         select tenant_id, conversation, max(seq) + 1, 'message', '{\"role\":\"user\",\"text\":\"again\"}' \
+         from conversation_events where conversation = $1::uuid group by tenant_id, conversation",
+    )
+    .bind(&id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (_, one) = call(&app, "GET", &format!("/v1/conversations/{id}"), None).await;
+    assert_eq!(one["state"], "waiting");
     // Stop still reaches eve: the turn there is still paused.
     let (status, _) = call(
         &app,

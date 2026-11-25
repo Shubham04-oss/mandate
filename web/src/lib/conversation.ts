@@ -121,16 +121,23 @@ export function approvalState(
 		: a.state;
 }
 
-/** A wait whose approvals have all run out waits for no one: it reads expired. */
+/** The approvals asked for since you last wrote; an older turn's never hold this one up. */
+export function currentAsks(view: Pick<View, "lines" | "steps">) {
+	const you = lastIndex(view.lines, (l) => l.kind === "you");
+	const since = you < 0 ? 0 : Number(view.lines[you]?.key);
+	return view.steps.flatMap((s) =>
+		s.approval && Number(s.key) > since ? [s.approval] : [],
+	);
+}
+
+/** A wait whose latest ask has run out waits for no one: it reads expired. */
 export function shownState(
 	state: ConversationState,
-	steps: Step[],
+	view: Pick<View, "lines" | "steps">,
 	now = Date.now(),
 ): ConversationState {
-	if (state !== "waiting") return state;
-	const asks = steps.flatMap((s) => (s.approval ? [s.approval] : []));
-	return asks.length > 0 &&
-		asks.every((a) => approvalState(a, now) !== "pending")
+	const last = currentAsks(view).at(-1);
+	return state === "waiting" && last && approvalState(last, now) === "expired"
 		? "expired"
 		: state;
 }

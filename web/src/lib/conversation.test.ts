@@ -123,10 +123,23 @@ describe("an approval nobody decided in time", () => {
 			},
 		]);
 		expect(v.state).toBe("waiting");
-		expect(shownState("waiting", v.steps, now)).toBe("expired");
-		expect(
-			shownState("waiting", v.steps, Date.parse("2026-11-25T17:00:00Z")),
-		).toBe("waiting");
-		expect(shownState("working", v.steps, now)).toBe("working");
+		expect(shownState("waiting", v, now)).toBe("expired");
+		expect(shownState("waiting", v, Date.parse("2026-11-25T17:00:00Z"))).toBe(
+			"waiting",
+		);
+		expect(shownState("working", v, now)).toBe("working");
+	});
+
+	it("never holds a new turn to an older turn's expired ask", () => {
+		const v = fold([
+			{ id: 1, kind: "tool", name: "web.submit_form", status: "requested" },
+			{
+				id: 2,
+				kind: "approval_wait",
+				approval: { ...approval, expires_at: "2026-11-25T17:55:00Z" },
+			},
+			{ id: 3, kind: "message", role: "user", text: "Try again" },
+		]);
+		expect(shownState("waiting", v, now)).toBe("waiting");
 	});
 });
