@@ -47,8 +47,9 @@ const MAX_RELAY_FAILURES: u32 = 5;
 const TOOL_PREFIX: &str = "mandate__";
 const TS: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'"#;
 
+// 503, not 502: Cloudflare replaces an origin 502 with its own page, which drops the CORS headers.
 const EVE_DOWN: ApiError = ApiError::new(
-    StatusCode::BAD_GATEWAY,
+    StatusCode::SERVICE_UNAVAILABLE,
     "internal",
     "The agent is unavailable.",
 );

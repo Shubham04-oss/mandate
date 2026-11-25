@@ -232,8 +232,9 @@ impl From<AuthError> for ApiError {
             AuthError::Step(_) => no_access(),
             AuthError::Upstream(kind) => {
                 tracing::warn!(%kind, "workos request failed");
+                // 503, not 502: Cloudflare replaces an origin 502 with its own page, which drops the CORS headers.
                 ApiError::new(
-                    StatusCode::BAD_GATEWAY,
+                    StatusCode::SERVICE_UNAVAILABLE,
                     "internal",
                     "Sign-in is unavailable right now. Please try again.",
                 )
@@ -1589,13 +1590,27 @@ impl WorkosAuth {
 fn kind(e: &workos::Error) -> String {
     match e {
         workos::Error::Api(a) => {
-            let code = a.code.as_deref().filter(|c| {
-                c.len() <= 64 && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
-            });
-            match code {
+            let safe =
+                |c: &&str| c.len() <= 64 && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+            let mut out = match a.code.as_deref().filter(safe) {
                 Some(c) => format!("status {} {c}", a.status),
                 None => format!("status {}", a.status),
+            };
+            // WorkOS names the reason in `errors[].code`; only codes are kept, never messages (they can hold emails).
+            let body: Value = serde_json::from_slice(&a.raw_body).unwrap_or(Value::Null);
+            let reasons: Vec<&str> = body
+                .get("errors")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.get("code")?.as_str())
+                .filter(safe)
+                .take(5)
+                .collect();
+            if !reasons.is_empty() {
+                out.push_str(&format!(" ({})", reasons.join(", ")));
             }
+            out
         }
         workos::Error::Network(t) => format!("network ({:?})", t.kind),
         workos::Error::Decode(_) => "decode".into(),
@@ -2223,6 +2238,15 @@ mod tests {
         assert_eq!(
             e.to_string(),
             "workos request failed: status 429 rate_limit_exceeded"
+        );
+        let e = classify(api_error(
+            400,
+            json!({ "code": "user_creation_error", "message": "ann@x.com",
+                    "errors": [{ "code": "password_not_allowed", "message": "ann@x.com" }, { "code": "Bad ann@x.com" }] }),
+        ));
+        assert_eq!(
+            e.to_string(),
+            "workos request failed: status 400 user_creation_error (password_not_allowed)"
         );
         let leak = "error sending request for url (https://api.workos.com/x?email=ann%40x.com)";
         let net = workos::Error::Network(workos::transport::TransportError::new(
