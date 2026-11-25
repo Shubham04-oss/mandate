@@ -91,29 +91,25 @@ Checked against the core on `main` (`core/src/api`). The contract is unchanged b
 
 **Conversations** (`core/src/api/conversations.rs`)
 
-8. **`Last-Event-ID` and CORS.** The browser sends `Last-Event-ID` only when its own EventSource
-   reconnects; the core's CORS allows only `content-type` and `x-mandate`. If a browser preflights
-   that reconnect, it fails and the app opens a fresh stream, which replays from the start. The app
-   drops events it has already seen by id, so nothing shows twice either way. Not yet tried against
-   a running core.
-9. **`Retry-After` isn't exposed** to the page by CORS, so on 429 the app backs off on its own
-   schedule (1 s up to 30 s).
-10. **Tool events carry no target.** A step says "Read a web page" but not which page; the approval
-    has the arguments, so only steps that wait for an OK show the page.
-11. **No `GET /v1/conversations/{id}`.** A conversation's title and state come from the first page of
-    the list; one further back opens titled "Conversation", with its state taken from its events.
+8. **Tool events carry no target.** A step says "Read a web page" but not which page; the approval
+   has the arguments, so only steps that wait for an OK show the page.
 
 **Grants** (`core/src/api/grants.rs`)
 
-12. **No tool catalog endpoint.** Settings → Tools names `web.read_page` and `web.submit_form` itself
-    (`src/lib/grants.ts`).
-13. **`standing` changes nothing in v1.** The policy never runs `external` effects unattended, and
+9. **No tool catalog endpoint.** Settings → Tools names `web.read_page` and `web.submit_form` itself
+   (`src/lib/grants.ts`).
+10. **`standing` changes nothing in v1.** The policy never runs `external` effects unattended, and
     reads under a grant run anyway, so the app always sends `standing: false` and offers no switch.
-14. **Who can be chosen.** People come from the first page of `/v1/org/members`, and agents from
+11. **Who can be chosen.** People come from the first page of `/v1/org/members`, and agents from
     `/v1/agents`, which lists only the agents the admin may use, not every agent in the
     organization. A grant for anyone else shows their id instead of their name.
 
 **Settled by the core**
+
+- **One conversation:** `GET /v1/conversations/{id}` loads a conversation when its page opens; one
+  that isn't the person's is not found.
+- **The event stream over CORS:** the core allows `Last-Event-ID` and exposes `Retry-After`. The app
+  still drops replayed events by id, and stops after five failed reconnects in a row.
 
 - **Local addresses:** the core listens on `127.0.0.1:8080`, which `localhost` reaches, and its
   tests use `http://localhost:3000` as the web origin. The session cookie is `Secure; SameSite=Lax`,

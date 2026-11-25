@@ -856,6 +856,17 @@ const routes: [Method, RegExp, Handler][] = [
 		},
 	],
 	[
+		"GET",
+		/^\/v1\/conversations\/([^/?]+)$/,
+		(m) => {
+			if (!signedIn()) return signedOut();
+			const c = conversations.get(decodeURIComponent(m[1] ?? ""));
+			return c
+				? json(200, c.conversation)
+				: fail(404, "not_found", "Not found.");
+		},
+	],
+	[
 		"POST",
 		/^\/v1\/conversations$/,
 		(_, b) => {

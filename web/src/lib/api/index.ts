@@ -420,6 +420,9 @@ export const api = {
 		/** The person's own conversations, newest first. */
 		list: (cursor?: string) =>
 			call<Page<Conversation>>("GET", `/v1/conversations${query({ cursor })}`),
+		/** One of the person's own conversations; 404 `not_found` for anyone else's. */
+		get: (id: string) =>
+			call<Conversation>("GET", `/v1/conversations/${encodeURIComponent(id)}`),
 		/** 403 `no_access` when the person has no agent yet. */
 		start: (message: string) =>
 			call<Conversation>("POST", "/v1/conversations", { message }),
