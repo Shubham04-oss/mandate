@@ -930,6 +930,69 @@ async fn cancel_stops_the_turn() {
     assert_eq!(got[1].event, "done");
 }
 
+#[tokio::test]
+#[ignore]
+async fn cancel_on_an_idle_or_failed_conversation_is_a_no_op() {
+    let h = harness().await;
+    let t = tenant();
+    seed(&t).await;
+    turn(&h.fake, 0, "hello", "Hi Ann");
+    let idle = start(&h, &t, "hello").await;
+    h.settle(&t, &idle).await;
+    h.fake.fail_start.store(true, Ordering::SeqCst);
+    let app = h.app(&t, "ann").await;
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/conversations",
+        Some(json!({ "message": "x" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let (_, list) = call(&app, "GET", "/v1/conversations", None).await;
+    let failed = list["items"][0]["id"].as_str().unwrap().to_owned();
+    // A failed conversation has no eve session, so cancel already finds nothing to cancel: 404.
+    for (id, state, want) in [
+        (&idle, "idle", StatusCode::ACCEPTED),
+        (&failed, "failed", StatusCode::NOT_FOUND),
+    ] {
+        let (status, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/conversations/{id}/cancel"),
+            None,
+        )
+        .await;
+        assert_eq!(status, want);
+        assert_eq!(h.state(&t, id).await, state);
+    }
+    assert!(!h.fake.seen().iter().any(|s| s.path.ends_with("/cancel")));
+}
+
+#[tokio::test]
+#[ignore]
+async fn get_one_conversation_is_scoped_to_its_member() {
+    let h = harness().await;
+    let t = tenant();
+    seed(&t).await;
+    let id = start(&h, &t, "mine").await;
+    let ann = h.app(&t, "ann").await;
+    let (status, one) = call(&ann, "GET", &format!("/v1/conversations/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, list) = call(&ann, "GET", "/v1/conversations", None).await;
+    assert_eq!(one, list["items"][0]);
+    assert_eq!(one["title"], "mine");
+    let other_tenant = tenant();
+    members(&other_tenant).await;
+    for app in [h.app(&t, "bob").await, h.app(&other_tenant, "ann").await] {
+        let (status, body) = call(&app, "GET", &format!("/v1/conversations/{id}"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+    }
+    let (status, _) = call(&ann, "GET", "/v1/conversations/not-a-uuid", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 /// The guard audit rows of tenant `t`: (decision, reason).
 async fn guard_audit(h: &Harness, t: &TenantId) -> Vec<(String, Option<String>)> {
     let mut tx = h.store.begin(t).await.unwrap();

@@ -49,7 +49,70 @@ resource "aws_iam_role_policy" "execution" {
       {
         Effect   = "Allow"
         Action   = "secretsmanager:GetSecretValue"
-        Resource = values(local.task_secrets[each.key])
+        Resource = concat(values(local.task_secrets[each.key]), lookup(local.execution_extra_secrets, each.key, []))
+      },
+      {
+        Effect    = "Allow"
+        Action    = "kms:Decrypt"
+        Resource  = aws_kms_key.main.arn
+        Condition = { StringEquals = { "kms:ViaService" = "secretsmanager.${var.region}.amazonaws.com" } }
+      },
+    ]
+  })
+}
+
+locals {
+  db_master_secret_arn = one(aws_db_instance.main.master_user_secret[*].secret_arn)
+  # migrate takes the master password live; the core's cloudflared sidecar takes the tunnel token.
+  execution_extra_secrets = {
+    migrate = [local.db_master_secret_arn]
+    core    = [aws_secretsmanager_secret.tunnel_token.arn]
+  }
+}
+
+# db-bootstrap pulls its mirrored image from the core repository and reads the master secret and the two URLs.
+resource "aws_iam_role" "db_bootstrap_execution" {
+  name = "${local.name}-db-bootstrap-execution"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+      Condition = { StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id } }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "db_bootstrap_execution" {
+  name = "execution"
+  role = aws_iam_role.db_bootstrap_execution.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
+        Resource = aws_ecr_repository.this["core"].arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.this["db-bootstrap"].arn}:*"
+      },
+      {
+        Effect = "Allow"
+        Action = "secretsmanager:GetSecretValue"
+        Resource = [
+          local.db_master_secret_arn,
+          aws_secretsmanager_secret.this["core/database-url"].arn,
+          aws_secretsmanager_secret.this["eve/database-url"].arn,
+        ]
       },
       {
         Effect    = "Allow"

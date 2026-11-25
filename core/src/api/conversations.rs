@@ -1043,6 +1043,28 @@ async fn list(
     Ok(Json(json!({ "items": items, "next": next })))
 }
 
+/// One of the caller's own conversations, in the list's shape; a failed one is shown too.
+async fn get_one(
+    State(api): State<Arc<ApiState>>,
+    session: Session,
+    Path(raw): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let id = conversation_id(&raw)?;
+    let mut tx = api.store.begin(&session.tenant).await?;
+    let mine: bool = sqlx::query_scalar(
+        "select exists (select 1 from conversations where tenant_id = current_setting('mandate.tenant', true) \
+         and id = $1 and member = $2)",
+    )
+    .bind(id)
+    .bind(session.member.as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+    if !mine {
+        return Err(ApiError::not_found());
+    }
+    Ok(Json(conversation_json(&mut tx, id).await?))
+}
+
 async fn send(
     State(api): State<Arc<ApiState>>,
     Extension(s): Extension<Arc<Conversations>>,
@@ -1094,6 +1116,13 @@ async fn cancel(
     let c = load(&api.store, &session.tenant, id, Some(&session.member))
         .await?
         .ok_or(ApiError::not_found())?;
+    // Nothing is running: cancelling must not restart the relay or mark the conversation working.
+    if !matches!(
+        s.state(&session.tenant, id).await?.as_deref(),
+        Some("working" | "waiting")
+    ) {
+        return Ok(StatusCode::ACCEPTED);
+    }
     s.eve
         .cancel(&s.token(&session.tenant, &c), &c.eve)
         .await
@@ -1232,6 +1261,7 @@ async fn read_events(
 pub fn routes(conv: Arc<Conversations>) -> Router<Arc<ApiState>> {
     Router::new()
         .route("/v1/conversations", get(list).post(start))
+        .route("/v1/conversations/{id}", get(get_one))
         .route("/v1/conversations/{id}/messages", post(send))
         .route("/v1/conversations/{id}/events", get(events))
         .route("/v1/conversations/{id}/cancel", post(cancel))

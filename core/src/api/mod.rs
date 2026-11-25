@@ -38,7 +38,7 @@ pub struct ApiState {
     pub auth: Arc<dyn AuthProvider>,
     /// Where WorkOS sends the browser after SSO: this API's `/v1/auth/sso/callback`.
     pub sso_redirect_uri: String,
-    /// `MANDATE_TRUST_CF_IP=1`: rate limits key on `CF-Connecting-IP`; only behind Cloudflare.
+    /// `MANDATE_TRUST_CF_IP=1`: rate limits key on `CF-Connecting-IP` from a loopback peer.
     pub trust_cf_ip: bool,
     /// The served tools: grants name one, and an approval shows its call's effect.
     pub catalog: Catalog,
@@ -193,7 +193,13 @@ fn cors(web_origin: &str) -> CorsLayer {
         .allow_origin(origin)
         .allow_credentials(true)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers([header::CONTENT_TYPE, CSRF_HEADER])
+        // EventSource reconnects send Last-Event-ID; the web reads Retry-After on a 429.
+        .allow_headers([
+            header::CONTENT_TYPE,
+            CSRF_HEADER,
+            HeaderName::from_static("last-event-id"),
+        ])
+        .expose_headers([header::RETRY_AFTER])
 }
 
 /// Every `/v1` route of the web API, with its CSRF, CORS and body-size layers.

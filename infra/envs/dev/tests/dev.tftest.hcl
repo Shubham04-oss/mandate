@@ -11,20 +11,8 @@ mock_provider "aws" {
   mock_resource "aws_iam_role" {
     defaults = { arn = "arn:aws:iam::000000000000:role/mock" }
   }
-  mock_resource "aws_acm_certificate" {
-    defaults = { arn = "arn:aws:acm:ap-south-1:000000000000:certificate/mock" }
-  }
   mock_resource "aws_service_discovery_service" {
     defaults = { arn = "arn:aws:servicediscovery:ap-south-1:000000000000:service/srv-mock" }
-  }
-  mock_resource "aws_lb_target_group" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:targetgroup/mock/0" }
-  }
-  mock_resource "aws_lb_listener" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:listener/app/mock/0/0" }
-  }
-  mock_resource "aws_lb" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:ap-south-1:000000000000:loadbalancer/app/mock/0" }
   }
   mock_resource "aws_s3_bucket" {
     defaults = { bucket = "mandate-dev-recordings-mock", arn = "arn:aws:s3:::mandate-dev-recordings-mock" }
@@ -48,11 +36,11 @@ mock_provider "awscc" {
   }
 }
 mock_provider "cloudflare" {
-  mock_data "cloudflare_ip_ranges" {
-    defaults = {
-      ipv4_cidrs = ["173.245.48.0/20", "103.21.244.0/22"]
-      ipv6_cidrs = ["2400:cb00::/32"]
-    }
+  mock_resource "cloudflare_zero_trust_tunnel_cloudflared" {
+    defaults = { id = "00000000-0000-4000-8000-000000000001" }
+  }
+  mock_data "cloudflare_zero_trust_tunnel_cloudflared_token" {
+    defaults = { token = "mock-tunnel-token" }
   }
 }
 
@@ -82,10 +70,6 @@ override_resource {
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/event-public-key" }
 }
 override_resource {
-  target = aws_secretsmanager_secret.this["migrate/database-url"]
-  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/migrate/database-url" }
-}
-override_resource {
   target = aws_secretsmanager_secret.this["eve/database-url"]
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/database-url" }
 }
@@ -97,9 +81,29 @@ override_resource {
   target = aws_secretsmanager_secret.this["eve/assertion-public-key"]
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/assertion-public-key" }
 }
+# Mocks leave computed blocks empty; RDS always returns the managed secret when it manages the password.
 override_resource {
-  target = aws_security_group.alb
-  values = { id = "sg-alb" }
+  target = aws_db_instance.main
+  values = {
+    address            = "mandate-dev.mock.ap-south-1.rds.amazonaws.com"
+    master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:rds!db-mock", kms_key_id = "arn:aws:kms:ap-south-1:000000000000:key/mock", secret_status = "active" }]
+  }
+}
+override_resource {
+  target = aws_subnet.public[0]
+  values = { id = "subnet-public-a" }
+}
+override_resource {
+  target = aws_subnet.public[1]
+  values = { id = "subnet-public-b" }
+}
+override_resource {
+  target = aws_subnet.private[0]
+  values = { id = "subnet-private-a" }
+}
+override_resource {
+  target = aws_subnet.private[1]
+  values = { id = "subnet-private-b" }
 }
 override_resource {
   target = aws_security_group.core
@@ -118,12 +122,16 @@ override_resource {
   values = { id = "sg-db" }
 }
 override_resource {
-  target = aws_security_group.endpoints
-  values = { id = "sg-endpoints" }
+  target = aws_security_group.db_bootstrap
+  values = { id = "sg-db-bootstrap" }
 }
 override_resource {
-  target = aws_vpc_endpoint.s3
-  values = { prefix_list_id = "pl-s3" }
+  target = aws_secretsmanager_secret.tunnel_token
+  # A secret's id is its ARN.
+  values = {
+    arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token"
+    id  = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token"
+  }
 }
 override_resource {
   target = aws_sqs_queue.consumer["agent-resume"]
@@ -147,18 +155,23 @@ override_resource {
   values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-migrate-execution" }
 }
 override_resource {
+  target = aws_iam_role.db_bootstrap_execution
+  values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-db-bootstrap-execution" }
+}
+override_resource {
   target = aws_iam_role.core_task
   values = { arn = "arn:aws:iam::000000000000:role/mandate-dev-core-task" }
 }
 
 variables {
-  domain             = "example.test"
-  cloudflare_zone_id = "0123456789abcdef0123456789abcdef"
-  ai_gateway_url     = "https://gateway.example.test"
-  model_default      = "model"
+  domain                = "example.test"
+  cloudflare_zone_id    = "0123456789abcdef0123456789abcdef"
+  cloudflare_account_id = "fedcba9876543210fedcba9876543210"
+  ai_gateway_url        = "https://gateway.example.test"
+  model_default         = "model"
 }
 
-run "private_subnets_have_no_public_ips_and_route_through_nat" {
+run "nothing_gives_the_database_a_public_route" {
   command = apply
 
   assert {
@@ -167,11 +180,24 @@ run "private_subnets_have_no_public_ips_and_route_through_nat" {
   }
   assert {
     condition     = length(aws_subnet.private) == 2 && length(aws_subnet.public) == 2
-    error_message = "two AZs: Aurora and the ALB both need two subnets"
+    error_message = "two AZs: the RDS subnet group needs two subnets"
   }
   assert {
-    condition     = aws_nat_gateway.egress.availability_mode == "regional"
-    error_message = "one regional NAT gateway for egress"
+    condition     = length(aws_route_table.private.route) == 0
+    error_message = "the private route table has no route out of the VPC (no NAT, no internet gateway)"
+  }
+  assert {
+    condition = (
+      toset(aws_db_subnet_group.main.subnet_ids) == toset(aws_subnet.private[*].id)
+      && toset([for a in aws_route_table_association.private : a.subnet_id]) == toset(aws_subnet.private[*].id)
+      && alltrue([for a in aws_route_table_association.private : a.route_table_id == aws_route_table.private.id])
+      && length(setintersection(toset([for a in aws_route_table_association.public : a.subnet_id]), toset(aws_subnet.private[*].id))) == 0
+    )
+    error_message = "the database lives only in the private subnets, which use only the private route table"
+  }
+  assert {
+    condition     = !aws_db_instance.main.publicly_accessible
+    error_message = "the database has no public address"
   }
 }
 
@@ -184,41 +210,100 @@ run "default_security_group_allows_nothing" {
   }
 }
 
-run "endpoints_cover_what_tasks_need_without_nat" {
+run "database_is_private_encrypted_and_never_holds_a_password_in_state" {
   command = apply
 
   assert {
-    condition     = toset(keys(aws_vpc_endpoint.interface)) == toset(["ecr.api", "ecr.dkr", "logs", "secretsmanager"])
-    error_message = "interface endpoints: ECR, logs, Secrets Manager"
+    condition     = !aws_db_instance.main.publicly_accessible && !aws_db_instance.main.multi_az
+    error_message = "one private instance, never public"
   }
   assert {
-    condition     = aws_vpc_endpoint.s3.vpc_endpoint_type == "Gateway"
-    error_message = "S3 (ECR layers) through the free gateway endpoint"
+    condition     = aws_db_instance.main.storage_encrypted && aws_db_instance.main.kms_key_id == aws_kms_key.main.arn
+    error_message = "storage encrypted with the CMK"
+  }
+  assert {
+    condition     = aws_db_instance.main.manage_master_user_password == true && aws_db_instance.main.password == null && aws_db_instance.main.master_user_secret_kms_key_id == aws_kms_key.main.arn
+    error_message = "RDS manages the master password in Secrets Manager under the CMK; it never enters state"
+  }
+  assert {
+    condition     = one([for p in aws_db_parameter_group.main.parameter : p.value if p.name == "rds.force_ssl"]) == "1" && aws_db_instance.main.parameter_group_name == aws_db_parameter_group.main.name
+    error_message = "connections must use TLS"
+  }
+  assert {
+    condition     = aws_db_instance.main.ca_cert_identifier == "rds-ca-rsa2048-g1"
+    error_message = "the server certificate chains to the RSA2048 G1 root in rds-ca/"
+  }
+  assert {
+    condition     = var.db_instance_class == "db.t4g.micro" && aws_db_instance.main.instance_class == var.db_instance_class
+    error_message = "dev runs on db.t4g.micro unless the variable says otherwise"
+  }
+  assert {
+    condition     = aws_db_instance.main.deletion_protection && !aws_db_instance.main.skip_final_snapshot && aws_db_instance.main.backup_retention_period == 7
+    error_message = "protected from deletion, final snapshot kept, a week of backups"
   }
 }
 
-run "aurora_scales_to_zero_and_never_holds_a_password_in_state" {
+run "db_bootstrap_takes_role_passwords_from_secrets_only" {
   command = apply
 
   assert {
-    condition     = aws_rds_cluster.main.serverlessv2_scaling_configuration[0].min_capacity == 0
-    error_message = "dev Aurora scales to zero"
+    condition     = jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].user == "postgres"
+    error_message = "the shell holding the master password does not run as root"
   }
   assert {
-    condition     = aws_rds_cluster.main.manage_master_user_password == true && aws_rds_cluster.main.master_password == null
-    error_message = "RDS manages the master password in Secrets Manager; it never enters state"
+    condition = toset([for s in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].secrets : s.valueFrom]) == toset([
+      "${one(aws_db_instance.main.master_user_secret[*].secret_arn)}:password::",
+      aws_secretsmanager_secret.this["core/database-url"].arn,
+      aws_secretsmanager_secret.this["eve/database-url"].arn,
+    ])
+    error_message = "the master password and the two role URLs arrive as task secrets"
   }
   assert {
-    condition     = aws_rds_cluster.main.storage_encrypted && aws_rds_cluster.main.deletion_protection
-    error_message = "encrypted with the CMK and protected from deletion"
+    condition     = !anytrue([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.name == "PGPASSWORD" || endswith(e.name, "_URL")])
+    error_message = "no password is a plain environment value"
   }
   assert {
-    condition     = alltrue([for i in aws_rds_cluster_instance.main : !i.publicly_accessible])
-    error_message = "no public database instance"
+    condition     = one([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.value if e.name == "PGSSLMODE"]) == "verify-full"
+    error_message = "the bootstrap verifies the server certificate and host name"
   }
   assert {
-    condition     = one([for p in aws_rds_cluster_parameter_group.main.parameter : p.value if p.name == "rds.force_ssl"]) == "1"
-    error_message = "connections must use TLS"
+    condition     = one([for e in jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].environment : e.value if e.name == "RDS_CA_PEM"]) == file("${path.module}/rds-ca/ap-south-1-bundle.crt")
+    error_message = "the bootstrap trusts exactly the RDS CA bundle"
+  }
+  assert {
+    condition     = startswith(jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].image, "${aws_ecr_repository.this["core"].repository_url}@") && can(regex("@sha256:[0-9a-f]{64}$", jsondecode(aws_ecs_task_definition.db_bootstrap.container_definitions)[0].image))
+    error_message = "the image that holds the master password comes from the private repository, pinned by digest"
+  }
+  assert {
+    condition     = !contains(flatten([for st in jsondecode(aws_iam_role_policy.deploy.policy).Statement : st.Resource if contains(flatten([st.Action]), "iam:PassRole")]), aws_iam_role.db_bootstrap_execution.arn)
+    error_message = "the deploy workflow cannot run the bootstrap"
+  }
+}
+
+run "migrate_reads_the_master_password_live" {
+  command = apply
+
+  assert {
+    condition     = [for s in jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].secrets : s if s.name == "PGPASSWORD"] == [{ name = "PGPASSWORD", valueFrom = "${one(aws_db_instance.main.master_user_secret[*].secret_arn)}:password::" }]
+    error_message = "migrate takes the password from the RDS-managed secret, so rotation never stales it"
+  }
+  assert {
+    condition     = one([for e in jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].environment : e.value if e.name == "MANDATE_MIGRATION_DATABASE_URL"]) == "postgres://mandate_migrator@mandate-dev.mock.ap-south-1.rds.amazonaws.com:5432/mandate?sslmode=verify-full&sslrootcert=/run/mandate/rds-ca.pem"
+    error_message = "the migration URL holds no password and verifies the server"
+  }
+}
+
+run "every_database_client_gets_the_pinned_rds_ca" {
+  command = apply
+
+  assert {
+    condition     = filesha256("${path.module}/rds-ca/ap-south-1-bundle.crt") == "ca4a9dc14e06c3f84274eff3ffed0e5d4d3463141593e1159eb4a0904df6cd74"
+    error_message = "the RDS CA bundle is the one fetched from truststore.pki.rds.amazonaws.com; re-check before changing the hash"
+  }
+  assert {
+    condition = alltrue([for td in [aws_ecs_task_definition.core, aws_ecs_task_definition.eve, aws_ecs_task_definition.migrate] :
+    one([for e in jsondecode(td.container_definitions)[0].environment : e.value if e.name == "RDS_CA_PEM"]) == file("${path.module}/rds-ca/ap-south-1-bundle.crt")])
+    error_message = "the core, eve and migrate get the CA their verify-full URLs name"
   }
 }
 
@@ -238,7 +323,7 @@ run "secrets_are_containers_under_the_cmk" {
     condition = toset(keys(aws_secretsmanager_secret.this)) == toset([
       "core/database-url", "core/workos-api-key", "core/workos-client-id",
       "core/assertion-private-key", "core/event-signing-key", "core/event-public-key",
-      "migrate/database-url", "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key",
+      "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key",
     ])
     error_message = "one secret per value a task needs, named by who reads it"
   }
@@ -248,60 +333,34 @@ run "secrets_are_containers_under_the_cmk" {
   }
 }
 
-run "only_cloudflare_reaches_the_load_balancer" {
+run "the_tunnel_forwards_the_web_api_only" {
   command = apply
 
   assert {
-    condition     = toset([for r in aws_vpc_security_group_ingress_rule.alb_from_cloudflare : r.cidr_ipv4]) == toset(["173.245.48.0/20", "103.21.244.0/22"])
-    error_message = "the ALB admits Cloudflare's ranges and nothing else"
+    condition = jsonencode([for r in cloudflare_zero_trust_tunnel_cloudflared_config.api.config.ingress : [r.hostname, r.path, r.service]]) == jsonencode([
+      ["api.example.test", "^/(v1/.*|healthz)$", "http://localhost:8080"],
+      [null, null, "http_status:404"],
+    ])
+    error_message = "api.<domain> /v1/* and /healthz go to the core on localhost:8080; anything else is a 404 (the MCP server stays private)"
   }
   assert {
-    condition     = alltrue([for r in aws_vpc_security_group_ingress_rule.alb_from_cloudflare : r.from_port == 443 && r.to_port == 443])
-    error_message = "HTTPS only"
-  }
-  assert {
-    condition     = aws_lb.api.drop_invalid_header_fields
-    error_message = "drop malformed headers at the edge"
+    condition     = cloudflare_zero_trust_tunnel_cloudflared.api.config_src == "cloudflare" && cloudflare_zero_trust_tunnel_cloudflared_config.api.tunnel_id == cloudflare_zero_trust_tunnel_cloudflared.api.id
+    error_message = "a remotely managed tunnel, configured here"
   }
 }
 
-run "the_edge_forwards_the_web_api_only" {
+run "the_core_admits_only_eve_so_cf_connecting_ip_comes_from_the_sidecar" {
   command = apply
 
   assert {
-    condition     = aws_lb_listener.https.default_action[0].type == "fixed-response" && aws_lb_listener.https.default_action[0].fixed_response[0].status_code == "404"
-    error_message = "anything not listed is a 404 at the load balancer (the MCP server stays private)"
-  }
-  assert {
-    condition     = toset(flatten([for c in aws_lb_listener_rule.api.condition : [for p in c.path_pattern : p.values]])) == toset(["/v1/*", "/healthz"])
-    error_message = "forward only the web API and the health check"
-  }
-  assert {
-    condition     = toset(flatten([for c in aws_lb_listener_rule.api.condition : [for h in c.host_header : h.values]])) == toset(["api.example.test"])
-    error_message = "only the API host"
-  }
-}
-
-run "only_this_zone_reaches_the_core_so_cf_connecting_ip_is_trusted" {
-  command = apply
-
-  assert {
-    condition = one(flatten([
-      for c in aws_lb_listener_rule.api.condition : [for h in c.http_header : h if h.http_header_name == "X-Mandate-Origin-Auth"]
-    ])).values == toset([random_password.origin.result])
-    error_message = "the ALB forwards only requests carrying the secret origin header"
-  }
-  assert {
-    condition     = length(random_password.origin.result) == 48 && !random_password.origin.special
-    error_message = "a 48-character alphanumeric origin secret (ALB header values allow no specials)"
-  }
-  assert {
-    condition = (
-      cloudflare_ruleset.origin_header.phase == "http_request_late_transform"
-      && cloudflare_ruleset.origin_header.rules[0].expression == "(http.host eq \"api.example.test\")"
-      && cloudflare_ruleset.origin_header.rules[0].action_parameters.headers["X-Mandate-Origin-Auth"].value == random_password.origin.result
-    )
-    error_message = "Cloudflare sets the origin header on the API host"
+    condition = alltrue([
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) :
+      r.referenced_security_group_id == aws_security_group.eve.id && r.cidr_ipv4 == null && r.cidr_ipv6 == null && r.prefix_list_id == null
+      if r.security_group_id == aws_security_group.core.id
+      ]) && length([
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) : r if r.security_group_id == aws_security_group.core.id
+    ]) == 1
+    error_message = "the core's only ingress rule is from eve, by security group; no address or prefix list"
   }
   assert {
     condition = {
@@ -316,16 +375,83 @@ run "only_this_zone_reaches_the_core_so_cf_connecting_ip_is_trusted" {
   }
 }
 
+run "cloudflared_runs_beside_the_core_pinned_and_unprivileged" {
+  command = apply
+
+  assert {
+    condition     = [for c in jsondecode(aws_ecs_task_definition.core.container_definitions) : c.name] == ["core", "cloudflared"]
+    error_message = "the core stays first: the deploy workflow swaps containerDefinitions[0]'s image"
+  }
+  assert {
+    condition     = can(regex("^docker\\.io/cloudflare/cloudflared@sha256:[0-9a-f]{64}$", jsondecode(aws_ecs_task_definition.core.container_definitions)[1].image))
+    error_message = "the official cloudflared image, pinned by digest"
+  }
+  assert {
+    condition = (
+      jsondecode(aws_ecs_task_definition.core.container_definitions)[1].user == "65532:65532"
+      && jsondecode(aws_ecs_task_definition.core.container_definitions)[1].command == ["tunnel", "--no-autoupdate", "run"]
+      && jsondecode(aws_ecs_task_definition.core.container_definitions)[1].logConfiguration.options["awslogs-stream-prefix"] == "cloudflared"
+    )
+    error_message = "cloudflared runs non-root, never self-updates, and logs to its own stream"
+  }
+  assert {
+    condition     = jsondecode(aws_ecs_task_definition.core.container_definitions)[1].secrets == [{ name = "TUNNEL_TOKEN", valueFrom = aws_secretsmanager_secret.tunnel_token.arn }]
+    error_message = "the tunnel token arrives as a task secret"
+  }
+  assert {
+    condition     = !contains([for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.valueFrom], aws_secretsmanager_secret.tunnel_token.arn)
+    error_message = "the core container never sees the tunnel token"
+  }
+  assert {
+    condition     = aws_secretsmanager_secret.tunnel_token.kms_key_id == aws_kms_key.main.arn && aws_secretsmanager_secret_version.tunnel_token.secret_string == "mock-tunnel-token"
+    error_message = "the tunnel's own token, under the CMK"
+  }
+  assert {
+    condition     = aws_secretsmanager_secret_version.tunnel_token.secret_id == "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token"
+    error_message = "the token is written into the tunnel secret, not another one"
+  }
+  assert {
+    condition = jsondecode(aws_ecs_task_definition.core.container_definitions)[0].healthCheck == {
+      command     = ["CMD", "/usr/local/bin/mandate", "healthcheck"]
+      interval    = 10
+      timeout     = 5
+      retries     = 3
+      startPeriod = 30
+    }
+    error_message = "the core has a health check: its own binary probing /healthz"
+  }
+  assert {
+    condition     = jsondecode(aws_ecs_task_definition.core.container_definitions)[1].dependsOn == [{ containerName = "core", condition = "HEALTHY" }]
+    error_message = "cloudflared starts only once the core is healthy"
+  }
+  assert {
+    condition = contains(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["core"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ]), aws_secretsmanager_secret.tunnel_token.arn)
+    error_message = "the core's execution role can inject the tunnel token"
+  }
+  assert {
+    condition     = toset([for r in aws_vpc_security_group_egress_rule.core_to_tunnel : "${r.ip_protocol}/${r.from_port}-${r.to_port}"]) == toset(["tcp/7844-7844", "udp/7844-7844"])
+    error_message = "cloudflared reaches Cloudflare's edge on 7844 only"
+  }
+}
+
 run "eve_is_private_and_reachable_only_from_the_core" {
   command = apply
 
   assert {
-    condition     = aws_vpc_security_group_ingress_rule.eve_from_core.referenced_security_group_id == aws_security_group.core.id
-    error_message = "eve admits the core only"
+    condition = alltrue([
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) :
+      r.referenced_security_group_id == aws_security_group.core.id && r.cidr_ipv4 == null && r.cidr_ipv6 == null && r.prefix_list_id == null
+      if r.security_group_id == aws_security_group.eve.id
+      ]) && length([
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) : r if r.security_group_id == aws_security_group.eve.id
+    ]) == 1
+    error_message = "eve's only ingress rule is from the core, by security group; no address or prefix list"
   }
   assert {
-    condition     = length(aws_ecs_service.eve.load_balancer) == 0 && !aws_ecs_service.eve.network_configuration[0].assign_public_ip
-    error_message = "eve has no load balancer and no public IP"
+    condition     = length(aws_ecs_service.eve.load_balancer) == 0
+    error_message = "eve has no load balancer"
   }
   assert {
     condition     = aws_ecs_task_definition.eve.task_role_arn == null
@@ -359,8 +485,8 @@ run "each_task_reads_only_its_own_secrets" {
   assert {
     condition = toset(flatten([
       for st in jsondecode(aws_iam_role_policy.execution["migrate"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
-    ])) == toset([aws_secretsmanager_secret.this["migrate/database-url"].arn])
-    error_message = "the migrate task reads only the migration URL"
+    ])) == toset([one(aws_db_instance.main.master_user_secret[*].secret_arn)])
+    error_message = "the migrate task reads only the RDS-managed master secret"
   }
   assert {
     condition = toset([for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.name]) == toset([
@@ -381,13 +507,45 @@ run "each_task_reads_only_its_own_secrets" {
   }
 }
 
-run "services_take_no_public_ip_and_images_are_immutable" {
+run "services_run_on_spot_in_public_subnets_without_nat" {
   command = apply
 
   assert {
-    condition     = !aws_ecs_service.core.network_configuration[0].assign_public_ip
-    error_message = "the core is reached through the ALB only"
+    condition = alltrue([for svc in [aws_ecs_service.core, aws_ecs_service.eve] : (
+      length(svc.capacity_provider_strategy) == 1 && one(svc.capacity_provider_strategy).capacity_provider == "FARGATE_SPOT" && one(svc.capacity_provider_strategy).weight == 1
+    )])
+    error_message = "core and eve run on Fargate Spot when use_fargate_spot is true (the default)"
   }
+  assert {
+    condition     = toset(aws_ecs_cluster_capacity_providers.main.capacity_providers) == toset(["FARGATE", "FARGATE_SPOT"])
+    error_message = "the cluster offers Spot and on-demand Fargate"
+  }
+  assert {
+    condition = alltrue([for svc in [aws_ecs_service.core, aws_ecs_service.eve] : (
+      svc.network_configuration[0].assign_public_ip && toset(svc.network_configuration[0].subnets) == toset(aws_subnet.public[*].id)
+    )])
+    error_message = "the services egress through their own public IPs, not a NAT gateway"
+  }
+  assert {
+    condition     = alltrue([for o in [output.migrate_network_configuration, output.db_bootstrap_network_configuration] : jsondecode(o).awsvpcConfiguration.assignPublicIp == "ENABLED" && toset(jsondecode(o).awsvpcConfiguration.subnets) == toset(aws_subnet.public[*].id)])
+    error_message = "the one-off tasks run in the public subnets with a public IP"
+  }
+}
+
+run "spot_can_be_switched_off" {
+  command = plan
+  variables {
+    use_fargate_spot = false
+  }
+  assert {
+    condition     = alltrue([for svc in [aws_ecs_service.core, aws_ecs_service.eve] : one(svc.capacity_provider_strategy).capacity_provider == "FARGATE"])
+    error_message = "use_fargate_spot = false puts the services on on-demand Fargate"
+  }
+}
+
+run "images_are_immutable" {
+  command = apply
+
   assert {
     condition     = alltrue([for r in aws_ecr_repository.this : r.image_tag_mutability == "IMMUTABLE"])
     error_message = "a deployed tag always names the same image"
@@ -398,8 +556,8 @@ run "api_is_proxied_and_auth_is_rate_limited_at_the_edge" {
   command = apply
 
   assert {
-    condition     = cloudflare_dns_record.api.proxied
-    error_message = "the API is proxied by Cloudflare"
+    condition     = cloudflare_dns_record.api.proxied && cloudflare_dns_record.api.type == "CNAME" && cloudflare_dns_record.api.content == "00000000-0000-4000-8000-000000000001.cfargotunnel.com"
+    error_message = "api.<domain> is a proxied CNAME to the tunnel"
   }
   assert {
     condition     = cloudflare_ruleset.auth_rate_limit.phase == "http_ratelimit" && strcontains(cloudflare_ruleset.auth_rate_limit.rules[0].expression, "/v1/auth/")
@@ -407,20 +565,17 @@ run "api_is_proxied_and_auth_is_rate_limited_at_the_edge" {
   }
 }
 
-run "the_migrate_task_reaches_only_the_endpoints_and_the_database" {
+run "the_one_off_tasks_take_nothing_in_and_reach_https_and_the_database" {
   command = apply
 
   assert {
-    condition     = !contains(keys(aws_vpc_security_group_egress_rule.https), "migrate")
-    error_message = "the migrate task has no route to the internet"
-  }
-  assert {
-    condition = (
-      aws_vpc_security_group_egress_rule.migrate_to_endpoints.referenced_security_group_id == aws_security_group.endpoints.id
-      && aws_vpc_security_group_egress_rule.migrate_to_s3.prefix_list_id == aws_vpc_endpoint.s3.prefix_list_id
-      && aws_vpc_security_group_egress_rule.to_db["migrate"].referenced_security_group_id == aws_security_group.db.id
-    )
-    error_message = "migrate: HTTPS to the interface and S3 endpoints, Postgres to the database"
+    condition = alltrue([for t, sg in { migrate = aws_security_group.migrate, "db-bootstrap" = aws_security_group.db_bootstrap } : (
+      length(sg.ingress) == 0
+      && aws_vpc_security_group_egress_rule.https[t].security_group_id == sg.id
+      && aws_vpc_security_group_egress_rule.https[t].from_port == 443 && aws_vpc_security_group_egress_rule.https[t].to_port == 443
+      && aws_vpc_security_group_egress_rule.to_db[t].referenced_security_group_id == aws_security_group.db.id
+    )])
+    error_message = "no ingress; HTTPS out (dev trade-off: no endpoints) and Postgres to the database"
   }
 }
 
@@ -429,9 +584,9 @@ run "the_database_admits_only_the_tasks" {
 
   assert {
     condition = toset([for r in aws_vpc_security_group_ingress_rule.db : r.referenced_security_group_id]) == toset([
-      aws_security_group.core.id, aws_security_group.eve.id, aws_security_group.migrate.id,
+      aws_security_group.core.id, aws_security_group.eve.id, aws_security_group.migrate.id, aws_security_group.db_bootstrap.id,
     ])
-    error_message = "Postgres from the core, eve and migrate only"
+    error_message = "Postgres from the core, eve, migrate and db-bootstrap only"
   }
 }
 
@@ -561,7 +716,7 @@ run "only_the_dev_environment_of_this_repo_can_deploy" {
     condition = jsondecode(aws_iam_role.deploy.assume_role_policy).Statement[0].Condition == {
       StringEquals = {
         "token.actions.githubusercontent.com:aud"              = "sts.amazonaws.com"
-        "token.actions.githubusercontent.com:sub"              = "repo:Shubham04-oss/mandate:environment:dev"
+        "token.actions.githubusercontent.com:sub"              = "repo:Shubham04-oss@218535561/mandate@1466076280:environment:dev"
         "token.actions.githubusercontent.com:job_workflow_ref" = "Shubham04-oss/mandate/.github/workflows/deploy.yml@refs/heads/main"
       }
     }
@@ -584,5 +739,20 @@ run "only_the_dev_environment_of_this_repo_can_deploy" {
       for st in jsondecode(aws_iam_role_policy.deploy.policy).Statement : st.Resource if contains(flatten([st.Action]), "iam:PassRole")
     ])) == toset(concat([for r in aws_iam_role.execution : r.arn], [aws_iam_role.core_task.arn]))
     error_message = "and only the task roles"
+  }
+}
+
+run "an_existing_github_oidc_provider_is_reused_not_owned" {
+  command = plan
+  variables {
+    github_oidc_provider_arn = "arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com"
+  }
+  assert {
+    condition     = length(aws_iam_openid_connect_provider.github) == 0
+    error_message = "with an existing provider ARN, this stack must not create or own one"
+  }
+  assert {
+    condition     = jsondecode(aws_iam_role.deploy.assume_role_policy).Statement[0].Principal.Federated == "arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com"
+    error_message = "the deploy role must trust the given provider"
   }
 }

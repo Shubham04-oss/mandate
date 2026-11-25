@@ -77,7 +77,7 @@ AWS              v                                   v
    mandate core (one Rust binary, ECS Fargate)
       policy (Cedar) . grants and consent . MCP tool server . brokering . output guard . audit
       |            |                  |                    |
-   Aurora      AgentCore Identity  AgentCore Browser     Bedrock Guardrails
+   RDS         AgentCore Identity  AgentCore Browser     Bedrock Guardrails
    PostgreSQL  (token vault)       (live view, S3        (output guard)
                                     recordings)
    models: our AI gateway, provider-agnostic, used by eve and the core
@@ -141,7 +141,7 @@ It holds no credentials and decides nothing about access:
 - Its agent-wide `approval` policy and `defineDynamic` tools call the core, so cards appear early and
   the model only sees allowed tools, but the core checks again on every execution.
 - It reaches tools only through the core's MCP server, with a short-lived run token the core issued.
-- Its workflow state lives in Aurora under its own schema.
+- Its workflow state lives in its own database on the same RDS PostgreSQL instance.
 - It is never reachable from the internet. Only the core talks to it, over the private network, and
   its route auth accepts only the core's signed assertion. eve has no per-session access list and no
   tenant separation in its store, so the core alone maps a conversation to a session id, and only
@@ -150,9 +150,10 @@ It holds no credentials and decides nothing about access:
 - A bug in eve can break a conversation; it cannot widen access or leak a credential.
 
 ### 8.3 Data
-One Aurora PostgreSQL cluster ("Aurora serverless", scales to zero). Every table has a tenant id and
-row-level security keyed on it; the core sets the tenant per transaction. eve's workflow world uses
-a separate schema in the same cluster.
+One RDS PostgreSQL instance (a small single-AZ instance in dev; Aurora Serverless never paused
+because the core polls every second). Every table has a tenant id and row-level security keyed on
+it; the core sets the tenant per transaction. eve's workflow world uses a separate database on the
+same instance.
 
 ### 8.4 Browser
 AgentCore Browser, one session per task: live view with takeover at approval points, recordings to
@@ -249,5 +250,4 @@ Browser profiles: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/
 AgentCore Identity: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/key-features-and-benefits.html .
 WorkSpaces for AI agents: https://aws.amazon.com/about-aws/whats-new/2026/06/amazon-workspaces-ai/ .
 Bedrock Guardrails: https://aws.amazon.com/bedrock/guardrails/ .
-Aurora auto-pause: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2-auto-pause.html .
 Rust MCP SDK: https://crates.io/crates/rmcp .

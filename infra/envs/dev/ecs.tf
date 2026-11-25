@@ -2,8 +2,13 @@ resource "aws_ecs_cluster" "main" {
   name = local.name
 }
 
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+}
+
 resource "aws_cloudwatch_log_group" "this" {
-  for_each          = toset(["core", "eve", "migrate"])
+  for_each          = toset(["core", "eve", "migrate", "db-bootstrap"])
   name              = "/${local.name}/${each.key}"
   retention_in_days = 30
 }
@@ -28,7 +33,14 @@ resource "aws_service_discovery_service" "this" {
 }
 
 locals {
-  internal = aws_service_discovery_private_dns_namespace.main.name
+  # cloudflare/cloudflared:2026.10.7, multi-arch index; ECS picks the linux/amd64 image.
+  cloudflared_image = "docker.io/cloudflare/cloudflared@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba"
+  # postgres:17-alpine (17.12), linux/amd64 manifest; bump with the mirror step in docs/deploy.md.
+  db_bootstrap_image_digest = "sha256:e80acae3f1109e8e4533618b594918936f2858c63afc7204c4773148a673add8"
+  # The RDS root CAs for ap-south-1 (truststore.pki.rds.amazonaws.com); tests pin its SHA-256.
+  # Every database client writes it to a file and connects with sslmode=verify-full.
+  rds_ca_pem = file("${path.module}/rds-ca/ap-south-1-bundle.crt")
+  internal   = aws_service_discovery_private_dns_namespace.main.name
   # Secret env names per task. The core entrypoint turns *_PEM values into 0600 files; eve reads
   # MANDATE_ASSERTION_PUBLIC_KEY as PEM text (lane D).
   secret_env = {
@@ -38,17 +50,18 @@ locals {
     "core/assertion-private-key" = "MANDATE_ASSERTION_PRIVATE_KEY_PEM"
     "core/event-signing-key"     = "MANDATE_EVENT_SIGNING_KEY_PEM"
     "core/event-public-key"      = "MANDATE_EVENT_PUBLIC_KEY_PEM"
-    "migrate/database-url"       = "MANDATE_MIGRATION_DATABASE_URL"
     "eve/database-url"           = "WORKFLOW_POSTGRES_URL"
-    "eve/ai-gateway-key"         = "MANDATE_AI_GATEWAY_KEY"
+    "eve/ai-gateway-key"         = "MANDATE_AI_GATEWAY_KEY" # Cloudflare AI Gateway token (AI Gateway Run)
     "eve/assertion-public-key"   = "MANDATE_ASSERTION_PUBLIC_KEY"
   }
   core_environment = {
+    RDS_CA_PEM         = local.rds_ca_pem
     AWS_REGION         = var.region
     MANDATE_READ_HOSTS = var.read_hosts
     MANDATE_WEB_ORIGIN = "https://app.${var.domain}"
     MANDATE_API_ORIGIN = "https://${local.api_host}"
-    # Safe only because the ALB forwards nothing without Cloudflare's secret origin header (edge.tf).
+    # The web API arrives only through cloudflared on localhost, which sets CF-Connecting-IP; the
+    # core honours it only from a loopback peer, so eve (which reaches :8080 directly) cannot forge it.
     MANDATE_TRUST_CF_IP = "1"
     MANDATE_EVE_URL     = "http://eve.${local.internal}:3000"
     MANDATE_EVENT_BUS   = awscc_eventsv2_event_bus.main.event_bus_arn
@@ -59,6 +72,7 @@ locals {
     MANDATE_GUARDRAIL_VERSION  = aws_bedrock_guardrail_version.main.version
   }
   eve_environment = {
+    RDS_CA_PEM             = local.rds_ca_pem
     PORT                   = "3000"
     MANDATE_CORE_MCP_URL   = "http://core.${local.internal}:8080/mcp"
     MANDATE_AI_GATEWAY_URL = var.ai_gateway_url
@@ -72,7 +86,9 @@ locals {
       name      = task
       essential = true
       image     = "${aws_ecr_repository.this[task == "eve" ? "eve" : "core"].repository_url}:${task == "migrate" ? "migrate-" : ""}${var.image_tag}"
-      secrets   = [for k, arn in local.task_secrets[task] : { name = local.secret_env[k], valueFrom = arn }]
+      # migrate reads the master password live from the RDS-managed secret, so rotation never stales it.
+      secrets = concat([for k, arn in local.task_secrets[task] : { name = local.secret_env[k], valueFrom = arn }],
+      task == "migrate" ? [{ name = "PGPASSWORD", valueFrom = "${local.db_master_secret_arn}:password::" }] : [])
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -97,10 +113,37 @@ resource "aws_ecs_task_definition" "core" {
     operating_system_family = "LINUX"
     cpu_architecture        = "X86_64"
   }
+  # The core stays first: the deploy workflow swaps the image of containerDefinitions[0].
   container_definitions = jsonencode([merge(local.container["core"], {
     portMappings = [{ containerPort = 8080, protocol = "tcp" }]
     environment  = [for k, v in local.core_environment : { name = k, value = v }]
-  })])
+    # The image has no curl: the binary probes its own /healthz on loopback.
+    healthCheck = {
+      command     = ["CMD", "/usr/local/bin/mandate", "healthcheck"]
+      interval    = 10
+      timeout     = 5
+      retries     = 3
+      startPeriod = 30
+    }
+    }), {
+    name      = "cloudflared"
+    essential = true
+    image     = local.cloudflared_image
+    # The image's own nonroot user, stated so a retagged image cannot run as root.
+    user    = "65532:65532"
+    command = ["tunnel", "--no-autoupdate", "run"]
+    # Register with Cloudflare only once the core answers, so the edge never routes to a cold core.
+    dependsOn = [{ containerName = "core", condition = "HEALTHY" }]
+    secrets   = [{ name = "TUNNEL_TOKEN", valueFrom = aws_secretsmanager_secret.tunnel_token.arn }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.this["core"].name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "cloudflared"
+      }
+    }
+  }])
 }
 
 resource "aws_ecs_task_definition" "eve" {
@@ -132,7 +175,59 @@ resource "aws_ecs_task_definition" "migrate" {
     operating_system_family = "LINUX"
     cpu_architecture        = "X86_64"
   }
-  container_definitions = jsonencode([local.container["migrate"]])
+  container_definitions = jsonencode([merge(local.container["migrate"], {
+    environment = [for k, v in {
+      RDS_CA_PEM = local.rds_ca_pem
+      # No password: sqlx and psql take it from PGPASSWORD.
+      MANDATE_MIGRATION_DATABASE_URL = "postgres://${aws_db_instance.main.username}@${aws_db_instance.main.address}:5432/${aws_db_instance.main.db_name}?sslmode=verify-full&sslrootcert=/run/mandate/rds-ca.pem"
+    } : { name = k, value = v }]
+  })])
+}
+
+# One-off, run by the owner (docs/deploy.md step 4): creates the app and eve roles and eve's
+# database. Role passwords come from the URLs already in their secrets, so none is in state or logs.
+resource "aws_ecs_task_definition" "db_bootstrap" {
+  family                   = "${local.name}-db-bootstrap"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.db_bootstrap_execution.arn
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+  container_definitions = jsonencode([{
+    name      = "db-bootstrap"
+    essential = true
+    # The image's unprivileged user; /tmp stays writable for the CA file.
+    user = "postgres"
+    # Pinned by digest: the official postgres image mirrored into the core repository (deploy.md step 4).
+    image   = "${aws_ecr_repository.this["core"].repository_url}@${local.db_bootstrap_image_digest}"
+    command = ["sh", "-c", "printf '%s\\n' \"$RDS_CA_PEM\" > /tmp/rds-ca.pem && printf '%s\\n' \"$BOOTSTRAP_SQL\" | psql -v ON_ERROR_STOP=1 -f -"]
+    environment = [for k, v in {
+      PGHOST        = aws_db_instance.main.address
+      PGUSER        = aws_db_instance.main.username
+      PGDATABASE    = aws_db_instance.main.db_name
+      PGSSLMODE     = "verify-full"
+      PGSSLROOTCERT = "/tmp/rds-ca.pem"
+      RDS_CA_PEM    = local.rds_ca_pem
+      BOOTSTRAP_SQL = file("${path.module}/sql/db_bootstrap.sql")
+    } : { name = k, value = v }]
+    secrets = [
+      { name = "PGPASSWORD", valueFrom = "${local.db_master_secret_arn}:password::" },
+      { name = "APP_DATABASE_URL", valueFrom = aws_secretsmanager_secret.this["core/database-url"].arn },
+      { name = "EVE_DATABASE_URL", valueFrom = aws_secretsmanager_secret.this["eve/database-url"].arn },
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.this["db-bootstrap"].name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "db-bootstrap"
+      }
+    }
+  }])
 }
 
 resource "aws_ecs_service" "core" {
@@ -140,17 +235,17 @@ resource "aws_ecs_service" "core" {
   cluster                = aws_ecs_cluster.main.id
   task_definition        = aws_ecs_task_definition.core.arn
   desired_count          = 1
-  launch_type            = "FARGATE"
   enable_execute_command = false
-  network_configuration {
-    subnets          = aws_subnet.private[*].id
-    security_groups  = [aws_security_group.core.id]
-    assign_public_ip = false
+  # A Spot interruption only stops the task; the service starts a new one.
+  capacity_provider_strategy {
+    capacity_provider = var.use_fargate_spot ? "FARGATE_SPOT" : "FARGATE"
+    weight            = 1
   }
-  load_balancer {
-    target_group_arn = aws_lb_target_group.core.arn
-    container_name   = "core"
-    container_port   = 8080
+  # Public subnets and a public IP instead of a NAT gateway; the security group admits no internet.
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.core.id]
+    assign_public_ip = true
   }
   service_registries {
     registry_arn = aws_service_discovery_service.this["core"].arn
@@ -163,7 +258,7 @@ resource "aws_ecs_service" "core" {
   lifecycle {
     ignore_changes = [task_definition]
   }
-  depends_on = [aws_lb_listener.https]
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
 }
 
 resource "aws_ecs_service" "eve" {
@@ -171,12 +266,17 @@ resource "aws_ecs_service" "eve" {
   cluster                = aws_ecs_cluster.main.id
   task_definition        = aws_ecs_task_definition.eve.arn
   desired_count          = 1
-  launch_type            = "FARGATE"
   enable_execute_command = false
+  # A Spot interruption only stops the task; the service starts a new one.
+  capacity_provider_strategy {
+    capacity_provider = var.use_fargate_spot ? "FARGATE_SPOT" : "FARGATE"
+    weight            = 1
+  }
+  # Public subnets and a public IP instead of a NAT gateway; the security group admits no internet.
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.eve.id]
-    assign_public_ip = false
+    assign_public_ip = true
   }
   service_registries {
     registry_arn = aws_service_discovery_service.this["eve"].arn
@@ -188,4 +288,5 @@ resource "aws_ecs_service" "eve" {
   lifecycle {
     ignore_changes = [task_definition]
   }
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
 }

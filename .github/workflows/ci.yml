@@ -84,6 +84,21 @@ jobs:
 
   infra:
     runs-on: ubuntu-latest
+    # A scratch server of its own: the db-bootstrap SQL test drops and recreates databases and roles.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: scratch
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      INFRA_TEST_DATABASE_URL: postgres://postgres:scratch@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -92,6 +107,7 @@ jobs:
         with:
           tofu_version: 1.13.1
           tofu_wrapper: false
-      # Offline: fmt, validate and plan-time tests against mock providers; no cloud credentials.
+      # Offline: fmt, validate, plan-time tests against mock providers and the db-bootstrap SQL test;
+      # no cloud credentials.
       - name: Check infra
         run: infra/check.sh

@@ -1,8 +1,15 @@
 # The deploy workflow's role: GitHub OIDC, no long-lived keys. It pushes images, runs the migrate
 # task and rolls the two services; it cannot change infrastructure.
+# An account has one GitHub OIDC provider; when another stack already made it, reuse it by ARN so
+# this stack never owns, retags or destroys it.
 resource "aws_iam_openid_connect_provider" "github" {
+  count          = var.github_oidc_provider_arn == "" ? 1 : 0
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
+}
+
+locals {
+  github_oidc_provider_arn = var.github_oidc_provider_arn != "" ? var.github_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
 }
 
 resource "aws_iam_role" "deploy" {
@@ -12,12 +19,12 @@ resource "aws_iam_role" "deploy" {
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Federated = aws_iam_openid_connect_provider.github.arn }
+      Principal = { Federated = local.github_oidc_provider_arn }
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:environment:${var.env}"
+          "token.actions.githubusercontent.com:sub" = "${var.github_oidc_sub_prefix}:environment:${var.env}"
           # Only the deploy workflow as it is on main, so a branch cannot ship its own steps.
           "token.actions.githubusercontent.com:job_workflow_ref" = "${var.github_repository}/.github/workflows/deploy.yml@refs/heads/main"
         }

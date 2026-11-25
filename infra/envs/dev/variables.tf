@@ -22,10 +22,28 @@ locals {
   }
 }
 
-# Needs a version with auto-pause (min capacity 0); check `aws rds describe-db-engine-versions`.
-variable "aurora_engine_version" {
+# Check it is offered: `aws rds describe-db-engine-versions --engine postgres` (docs/deploy.md step 2).
+variable "db_engine_version" {
   type    = string
-  default = "17.5"
+  default = "17.11"
+}
+
+# db.t4g.small is the next step up if the core or eve outgrow it.
+variable "db_instance_class" {
+  type    = string
+  default = "db.t4g.micro"
+}
+
+# Off only to tear dev down on purpose.
+variable "db_deletion_protection" {
+  type    = bool
+  default = true
+}
+
+# Dev keeps a final snapshot by default; set true to destroy without one.
+variable "db_skip_final_snapshot" {
+  type    = bool
+  default = false
 }
 
 # The Cloudflare zone's domain: the API is api.<domain>, the web app app.<domain>.
@@ -37,19 +55,33 @@ variable "cloudflare_zone_id" {
   type = string
 }
 
+# The account that owns the zone; the tunnel is an account resource.
+variable "cloudflare_account_id" {
+  type = string
+}
+
+# Core and eve on Fargate Spot (about 70% cheaper); false puts them back on on-demand Fargate.
+variable "use_fargate_spot" {
+  type    = bool
+  default = true
+}
+
 # MANDATE_READ_HOSTS: a data-egress allowlist (docs/security.md); list only hosts trusted with data.
 variable "read_hosts" {
   type    = string
   default = ""
 }
 
+# MANDATE_AI_GATEWAY_URL: Cloudflare AI Gateway's OpenAI-compatible base; eve appends /chat/completions.
 variable "ai_gateway_url" {
-  type = string
+  type        = string
+  description = "https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/compat"
 }
 
 # Model ids are configuration, never code (docs/design.md 8.6).
 variable "model_default" {
-  type = string
+  type        = string
+  description = "MANDATE_MODEL_DEFAULT as the gateway names it, e.g. dynamic/mandate-default"
 }
 
 # Tag of the first task definitions; the deploy workflow registers new revisions per commit.
@@ -62,4 +94,17 @@ variable "image_tag" {
 variable "github_repository" {
   type    = string
   default = "Shubham04-oss/mandate"
+}
+
+# GitHub's immutable subject (owner and repo ids), so a renamed or re-created repo cannot take the role.
+# `gh api repos/OWNER/REPO/actions/oidc/customization/sub` prints it as sub_claim_prefix.
+variable "github_oidc_sub_prefix" {
+  type    = string
+  default = "repo:Shubham04-oss@218535561/mandate@1466076280"
+}
+
+variable "github_oidc_provider_arn" {
+  type        = string
+  default     = ""
+  description = "ARN of an existing GitHub OIDC provider in the account; empty creates one"
 }
