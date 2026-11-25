@@ -93,8 +93,9 @@ export function activityRow(a: Activity, clock: Clock = "system"): ActivityRow {
 /** How many actions agents carried out today, refusals left out. */
 export function handledToday(items: Activity[], now = new Date()): number {
 	const day = now.toDateString();
+	// Only runs did something: an approved ask is followed by its own run, a denied one did nothing.
 	return items.filter(
-		(a) => a.decision !== "refuse" && new Date(a.at).toDateString() === day,
+		(a) => a.decision === "run" && new Date(a.at).toDateString() === day,
 	).length;
 }
 
