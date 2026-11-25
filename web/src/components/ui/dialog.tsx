@@ -56,7 +56,7 @@ function DialogContent({
 				data-slot="dialog-content"
 				data-scene={scene || undefined}
 				className={cn(
-					"fixed top-1/2 left-1/2 z-50 flex w-[420px] max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl bg-popover text-[13px] text-popover-foreground shadow-dialog duration-150 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+					"fixed top-1/2 left-1/2 z-50 flex w-[420px] max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[22px] bg-popover text-[13px] text-popover-foreground rim-glass duration-150 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
 					className,
 				)}
 				{...props}

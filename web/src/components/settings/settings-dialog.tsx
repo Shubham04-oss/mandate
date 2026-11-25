@@ -90,7 +90,7 @@ export function SettingsDialog({
 				if (!open) onSection(undefined);
 			}}
 		>
-			<DialogContent className="h-[min(760px,calc(100dvh-2rem))] w-[min(1080px,calc(100%-2rem))] max-w-none rounded-window max-[720px]:h-dvh max-[720px]:w-full max-[720px]:max-w-full max-[720px]:rounded-none min-[721px]:flex-row">
+			<DialogContent className="h-[min(760px,calc(100dvh-2rem))] w-[min(1080px,calc(100%-2rem))] max-w-none rounded-[28px] max-[720px]:h-dvh max-[720px]:w-full max-[720px]:max-w-full max-[720px]:rounded-none max-[720px]:border-0 min-[721px]:flex-row">
 				<nav
 					aria-label="Settings"
 					className="flex flex-none flex-col gap-4 bg-background px-3 pt-5 pb-3 max-[720px]:flex-row max-[720px]:items-center max-[720px]:gap-1 max-[720px]:overflow-x-auto max-[720px]:pt-3 max-[720px]:pr-14 min-[721px]:w-56"

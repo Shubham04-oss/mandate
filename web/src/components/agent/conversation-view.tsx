@@ -125,7 +125,7 @@ export function ConversationView({
 				<div className="sticky bottom-0 bg-linear-to-t from-60% from-canvas to-transparent pt-6 pb-3.5">
 					<div className="mx-auto max-w-[620px]">
 						{failed ? (
-							<div className="flex flex-wrap items-center gap-3 rounded-[20px] bg-raised py-3 pr-3 pl-[18px] shadow-[inset_0_0_0_1px_var(--border-quiet),0_10px_30px_var(--shade-66)]">
+							<div className="rim-lift flex flex-wrap items-center gap-3 rounded-window bg-raised py-3 pr-3 pl-[18px]">
 								<span className="flex-1 text-[13px] text-soft-foreground leading-normal">
 									This conversation can't take a reply. Start again with the
 									same words as a new one.

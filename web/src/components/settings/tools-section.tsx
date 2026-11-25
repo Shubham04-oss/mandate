@@ -112,7 +112,7 @@ export function ToolsSection() {
 			{access === "not_admin" ? (
 				<NotAdmin org={me.org.name} />
 			) : error ? (
-				<div className="flex flex-wrap items-center gap-3 rounded-card bg-raised px-5 py-4 shadow-card">
+				<div className="rim flex flex-wrap items-center gap-3 rounded-window bg-raised px-5 py-4">
 					<p
 						role="alert"
 						className="m-0 flex-1 text-[13px] text-soft-foreground"
@@ -125,8 +125,8 @@ export function ToolsSection() {
 				</div>
 			) : !data ? (
 				<div className="flex flex-col gap-4" aria-busy="true">
-					<Skeleton className="h-36 rounded-card" />
-					<Skeleton className="h-36 rounded-card" />
+					<Skeleton className="h-36 rounded-window" />
+					<Skeleton className="h-36 rounded-window" />
 				</div>
 			) : (
 				<>
@@ -151,7 +151,7 @@ export function ToolsSection() {
 
 function NotAdmin({ org }: { org: string }) {
 	return (
-		<section className="flex items-start gap-3.5 rounded-card bg-raised p-[22px] shadow-card">
+		<section className="rim flex items-start gap-3.5 rounded-window bg-raised p-[22px]">
 			<span className="grid size-9 flex-none place-items-center rounded-[11px] bg-hover text-soft-foreground">
 				<Icon name="lock" size={17} strokeWidth={1.9} />
 			</span>
@@ -200,7 +200,7 @@ function ToolCard({
 	return (
 		<section
 			aria-labelledby={headingId}
-			className="overflow-hidden rounded-card bg-raised shadow-card"
+			className="rim overflow-hidden rounded-window bg-raised"
 		>
 			<div className="flex flex-wrap items-center gap-3 p-4">
 				<span className="grid size-9 flex-none place-items-center rounded-[11px] bg-sky-soft text-sea">

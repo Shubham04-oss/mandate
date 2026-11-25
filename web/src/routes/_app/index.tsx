@@ -255,7 +255,7 @@ function SidePanel({
 		<section
 			data-area={area}
 			aria-labelledby={id}
-			className="flex flex-col gap-0.5 overflow-hidden rounded-card bg-raised px-1.5 pb-1.5 shadow-card"
+			className="rim flex flex-col gap-0.5 overflow-hidden rounded-window bg-raised px-1.5 pb-1.5"
 		>
 			<div
 				aria-hidden="true"
