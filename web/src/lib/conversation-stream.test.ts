@@ -210,6 +210,27 @@ describe("the conversation stream", () => {
 		expect(s.closed).toBe(true);
 	});
 
+	it("stays open for a reply sent just after a turn ended", async () => {
+		const { sources, stream, seen, clock: c } = setup();
+		stream.subscribe((e) => seen.push(e));
+		await flush();
+		const s = sources[0] as FakeSource;
+		s.open();
+		s.send(1, "message", { role: "user", text: "Hi" });
+		s.send(2, "done", {});
+		expect(c.pending.map((t) => t.ms)).toEqual([SETTLE_MS]);
+
+		// The person replies within the 1.5 s: the pending close is dropped.
+		stream.resume();
+		expect(c.pending).toHaveLength(0);
+		c.next();
+		expect(s.closed).toBe(false);
+		expect(sources).toHaveLength(1);
+
+		s.send(3, "message", { role: "user", text: "And this?" });
+		expect(seen.map((e) => e.id)).toEqual([1, 2, 3]);
+	});
+
 	it("reopens on resume, showing only what's new", async () => {
 		const { sources, stream, seen, clock: c } = setup();
 		stream.subscribe((e) => seen.push(e));

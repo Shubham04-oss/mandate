@@ -188,7 +188,11 @@ export class ConversationStream {
 
 	/** Opens the stream again after a turn ended, the page was hidden, or it gave up. */
 	resume() {
-		if (!this.closed || this.listeners.size === 0) return;
+		if (this.listeners.size === 0) return;
+		// Still open but about to close because the last turn ended: a send means a new turn, so keep it.
+		if (this.settle !== null) this.timers.clear(this.settle);
+		this.settle = null;
+		if (!this.closed) return;
 		this.closed = false;
 		this.failures = 0;
 		this.open();
