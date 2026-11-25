@@ -1683,7 +1683,11 @@ fn classify(e: workos::Error) -> AuthError {
     if let Some(step) = step(code, &body) {
         return AuthError::Step(step);
     }
-    match code {
+    // A failed create names its real reason in `errors[].code`; classify by that reason.
+    let reason = (code == "user_creation_error")
+        .then(|| body.pointer("/errors/0/code").and_then(Value::as_str))
+        .flatten();
+    match reason.unwrap_or(code) {
         "invalid_credentials" | "invalid_grant" => AuthError::InvalidCredentials,
         "invalid_one_time_code"
         | "one_time_code_previously_used"
@@ -1697,9 +1701,10 @@ fn classify(e: workos::Error) -> AuthError {
         | "email_not_available"
         | "email_already_in_use"
         | "user_already_organization_member" => AuthError::Conflict,
-        "password_strength_error" | "invalid_email" | "invalid_request_parameters" => {
-            AuthError::Invalid
-        }
+        "password_strength_error"
+        | "password_not_allowed"
+        | "invalid_email"
+        | "invalid_request_parameters" => AuthError::Invalid,
         "entity_not_found"
         | "organization_not_found"
         | "invalid_invite"
@@ -2239,14 +2244,30 @@ mod tests {
             e.to_string(),
             "workos request failed: status 429 rate_limit_exceeded"
         );
+        // WorkOS wraps the real reason of a failed create in `errors[].code`.
+        for (reason, want) in [
+            ("email_not_available", "already exists"),
+            ("email_already_in_use", "already exists"),
+            ("user_already_exists", "already exists"),
+            ("password_strength_error", "rejected input"),
+            ("password_not_allowed", "rejected input"),
+            ("invalid_email", "rejected input"),
+        ] {
+            let e = classify(api_error(
+                400,
+                json!({ "code": "user_creation_error", "message": "ann@x.com",
+                        "errors": [{ "code": reason, "message": "ann@x.com" }] }),
+            ));
+            assert_eq!(e.to_string(), want, "{reason}");
+        }
         let e = classify(api_error(
             400,
             json!({ "code": "user_creation_error", "message": "ann@x.com",
-                    "errors": [{ "code": "password_not_allowed", "message": "ann@x.com" }, { "code": "Bad ann@x.com" }] }),
+                    "errors": [{ "code": "something_new", "message": "ann@x.com" }, { "code": "Bad ann@x.com" }] }),
         ));
         assert_eq!(
             e.to_string(),
-            "workos request failed: status 400 user_creation_error (password_not_allowed)"
+            "workos request failed: status 400 user_creation_error (something_new)"
         );
         let leak = "error sending request for url (https://api.workos.com/x?email=ann%40x.com)";
         let net = workos::Error::Network(workos::transport::TransportError::new(
