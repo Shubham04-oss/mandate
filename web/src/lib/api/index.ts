@@ -76,6 +76,8 @@ export type Activity = {
 	reason?: string;
 	approval_id?: string;
 	approved_by?: Person;
+	/** How an ask's approval ended; null for runs, refusals and asks from before it was recorded. */
+	outcome?: "approved" | "denied" | "expired" | "pending" | null;
 };
 export type Page<T> = { items: T[]; next: string | null };
 

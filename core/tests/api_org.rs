@@ -106,6 +106,102 @@ async fn activity_shows_my_agent_only() {
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
 
+/// An ask by Ann's agent for approval `id`, audited as the gate does.
+async fn audit_ask(s: &Store, t: &TenantId, id: Option<Uuid>) {
+    let mut tx = s.begin(t).await.unwrap();
+    store::audit(
+        &mut tx,
+        &AuditEntry {
+            agent: AgentId::parse("ann-bot").unwrap(),
+            member: member("ann"),
+            tool: ToolId::parse("web.submit_form").unwrap(),
+            args_hash: [0; 32],
+            decision: "ask".into(),
+            reason: None,
+            approval_id: id,
+            approved_by: None,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn activity_shows_how_each_ask_ended() {
+    use mandate::api::approvals::{Decision, decide_approval};
+    use time::{Duration, OffsetDateTime};
+    let s = app_store().await;
+    let t = org(&s).await;
+    let now = OffsetDateTime::now_utc();
+    let decide = |id: Uuid, d: Decision| {
+        let s = s.clone();
+        let t = t.clone();
+        async move {
+            let mut tx = s.begin(&t).await.unwrap();
+            decide_approval(&mut tx, id, &member("ann"), d, now)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    let pending = ask(&s, &t, "ann-bot", "ann", json!({ "n": 1 })).await;
+    let approved = ask(&s, &t, "ann-bot", "ann", json!({ "n": 2 })).await;
+    let denied = ask(&s, &t, "ann-bot", "ann", json!({ "n": 3 })).await;
+    decide(approved, Decision::Approved).await;
+    decide(denied, Decision::Denied).await;
+    // Asked long enough ago that nobody decided in time.
+    let mut tx = s.begin(&t).await.unwrap();
+    let args = json!({ "n": 4 });
+    let expired = store::request_approval(
+        &mut tx,
+        &AgentId::parse("ann-bot").unwrap(),
+        &member("ann"),
+        &ToolId::parse("web.submit_form").unwrap(),
+        &args,
+        &mandate::gate::args_hash(&args),
+        now - Duration::days(1),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    // Asks from before the gate recorded their approval have no outcome to show.
+    audit_ask(&s, &t, None).await;
+    for id in [pending, approved, denied, expired] {
+        audit_ask(&s, &t, Some(id)).await;
+    }
+    audit(&s, &t, "ann-bot", "ann", "run", None).await;
+
+    let (st, v) = call(
+        &app(s.clone()),
+        "GET",
+        "/v1/activity",
+        Some((&t, "ann")),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let outcomes: Vec<Value> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["outcome"].clone())
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            json!(null),
+            json!("expired"),
+            json!("denied"),
+            json!("approved"),
+            json!("pending"),
+            json!(null)
+        ],
+        "{v}"
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn admin_sees_all_activity() {

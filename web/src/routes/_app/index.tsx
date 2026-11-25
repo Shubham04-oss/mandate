@@ -72,9 +72,7 @@ function Home() {
 				<p className="m-0 text-center text-[12px] text-muted-foreground">
 					{handled === 0
 						? "Nothing handled yet today."
-						: `Agents handled ${handled} ${handled === 1 ? "action" : "actions"} today.`}{" "}
-					{/* ponytail: links to activity once that page exists */}
-					<span className="font-semibold text-foreground">See activity</span>
+						: `Agents handled ${handled} ${handled === 1 ? "action" : "actions"} today.`}
 				</p>
 			</div>
 			<WorkingNow conversations={conversations} />
@@ -267,7 +265,7 @@ function SidePanel({
 	scene: string;
 	title: string;
 	count?: number;
-	more: ReactNode;
+	more?: ReactNode;
 	rows: Row[];
 	/** Said in place of the rows when there are none. */
 	empty: string;
@@ -380,8 +378,6 @@ function Recent({ rows }: { rows: Row[] }) {
 			area="right"
 			scene="/scenes/harbour.webp"
 			title="Recent"
-			// ponytail: opens the activity page once it exists
-			more="All"
 			rows={rows}
 			empty="Nothing yet. What your agents do shows up here."
 		/>
