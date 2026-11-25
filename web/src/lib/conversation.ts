@@ -111,6 +111,30 @@ export function applyEvent(view: View, e: ConversationEvent): View {
 	}
 }
 
+/** An approval as it stands now: a pending one past its time can no longer be decided. */
+export function approvalState(
+	a: Pick<Approval, "state" | "expires_at">,
+	now = Date.now(),
+): ApprovalState {
+	return a.state === "pending" && Date.parse(a.expires_at) <= now
+		? "expired"
+		: a.state;
+}
+
+/** A wait whose approvals have all run out waits for no one: it reads expired. */
+export function shownState(
+	state: ConversationState,
+	steps: Step[],
+	now = Date.now(),
+): ConversationState {
+	if (state !== "waiting") return state;
+	const asks = steps.flatMap((s) => (s.approval ? [s.approval] : []));
+	return asks.length > 0 &&
+		asks.every((a) => approvalState(a, now) !== "pending")
+		? "expired"
+		: state;
+}
+
 const tools: Record<
 	string,
 	{ doing: string; done: string; denied: string; failed: string }

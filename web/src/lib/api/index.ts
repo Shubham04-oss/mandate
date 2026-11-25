@@ -82,7 +82,13 @@ export type Activity = {
 export type Page<T> = { items: T[]; next: string | null };
 
 /** A conversation with the person's own agent (core/src/api/conversations.rs). */
-export type ConversationState = "working" | "waiting" | "idle" | "failed";
+/** `expired`: it waited for an OK nobody gave in time; Stop ends it. */
+export type ConversationState =
+	| "working"
+	| "waiting"
+	| "expired"
+	| "idle"
+	| "failed";
 export type Conversation = {
 	id: string;
 	title: string;

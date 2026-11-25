@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Approval, ConversationEvent } from "./api/index.ts";
-import { applyEvent, emptyView, stepLabel } from "./conversation.ts";
+import {
+	applyEvent,
+	approvalState,
+	emptyView,
+	shownState,
+	stepLabel,
+} from "./conversation.ts";
 
 const approval = {
 	id: "apv_1",
@@ -86,5 +92,41 @@ describe("stepLabel", () => {
 		expect(stepLabel({ tool: "crm.export", status: "completed" })).toBe(
 			"crm.export",
 		);
+	});
+});
+
+describe("an approval nobody decided in time", () => {
+	const now = Date.parse("2026-11-25T18:00:00Z");
+	const at = (expires_at: string) => ({
+		state: "pending" as const,
+		expires_at,
+	});
+
+	it("reads expired once its time is up, and pending before", () => {
+		expect(approvalState(at("2026-11-25T17:55:00Z"), now)).toBe("expired");
+		expect(approvalState(at("2026-11-25T18:05:00Z"), now)).toBe("pending");
+		expect(
+			approvalState(
+				{ state: "denied", expires_at: "2026-11-25T17:00:00Z" },
+				now,
+			),
+		).toBe("denied");
+	});
+
+	it("turns a wait with no live approval into expired", () => {
+		const v = fold([
+			{ id: 1, kind: "tool", name: "web.submit_form", status: "requested" },
+			{
+				id: 2,
+				kind: "approval_wait",
+				approval: { ...approval, expires_at: "2026-11-25T17:55:00Z" },
+			},
+		]);
+		expect(v.state).toBe("waiting");
+		expect(shownState("waiting", v.steps, now)).toBe("expired");
+		expect(
+			shownState("waiting", v.steps, Date.parse("2026-11-25T17:00:00Z")),
+		).toBe("waiting");
+		expect(shownState("working", v.steps, now)).toBe("working");
 	});
 });

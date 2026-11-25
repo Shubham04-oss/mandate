@@ -20,6 +20,7 @@ import {
 	applyEvent,
 	emptyView,
 	type Line,
+	shownState,
 	WITHHELD,
 } from "#/lib/conversation.ts";
 import { type Listening, listen } from "#/lib/conversation-stream.ts";
@@ -54,7 +55,9 @@ export function ConversationView({
 
 	// Failed means the agent never started: the stream can't say so, the list can.
 	const failed = conversation.state === "failed";
-	const state = failed ? "failed" : (view.state ?? conversation.state);
+	const state = failed
+		? "failed"
+		: shownState(view.state ?? conversation.state, view.steps);
 
 	const end = useRef<HTMLDivElement>(null);
 	const count = view.lines.length;
@@ -82,6 +85,8 @@ export function ConversationView({
 	const stop = async () => {
 		try {
 			await api.conversations.cancel(conversation.id);
+			// A stopped wait ends with a `done` the stream must be open to hear.
+			stream.current?.resume();
 		} catch (e) {
 			toast(
 				e instanceof ApiError ? e.message : "Something went wrong. Try again.",
@@ -113,6 +118,11 @@ export function ConversationView({
 								Waiting for your OK
 							</p>
 						) : null}
+						{state === "expired" ? (
+							<p className="m-0 text-[13px] text-muted-foreground leading-normal">
+								No one gave the OK in time. Stop this, then ask again.
+							</p>
+						) : null}
 						{lost ? (
 							<output className="m-0 block text-[13px] text-muted-foreground leading-normal">
 								Lost touch with your agent. It tries again when you send a
@@ -137,7 +147,11 @@ export function ConversationView({
 								label="Reply to your agent"
 								placeholder="Reply to your agent"
 								onSend={send}
-								working={state === "working"}
+								working={
+									state === "working" ||
+									state === "waiting" ||
+									state === "expired"
+								}
 								onStop={stop}
 							/>
 						)}
