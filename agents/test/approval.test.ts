@@ -16,8 +16,19 @@ test("an ask tool pauses for a person; a run tool is left alone", async () => {
   assert.equal(await approvalFor("mandate__web.read_page", caller, list), undefined);
 });
 
+test("eve__search runs, so the model can find the core's tools", async () => {
+  // eve reaches connection tools only through eve__search; a call through eve__tool is checked under its own name.
+  assert.equal(await approvalFor("eve__search", caller, list), undefined);
+});
+
 test("anything the core does not list is denied", async () => {
-  for (const name of ["mandate__web.delete_all", "bash", "other__web.read_page"]) {
+  for (const name of [
+    "mandate__web.delete_all",
+    "bash",
+    "other__web.read_page",
+    "eve__tool",
+    "eve__skill",
+  ]) {
     const s = await approvalFor(name, caller, list);
     assert.equal(typeof s === "object" && s?.type, "denied", name);
   }
