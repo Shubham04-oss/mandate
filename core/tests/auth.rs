@@ -2528,8 +2528,8 @@ async fn personal_operator_only_through_the_narrow_function() {
         }
     };
     let operators = |t: TenantId| async move {
-        let rows: Vec<(String, String, bool)> = sqlx::query_as(
-            "select id, kind, disabled from agents where tenant_id = $1 order by id",
+        let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(
+            "select id, kind, disabled, name from agents where tenant_id = $1 order by id",
         )
         .bind(t.as_str())
         .fetch_all(&common::admin_pool().await)
@@ -2550,7 +2550,9 @@ async fn personal_operator_only_through_the_narrow_function() {
         vec![(
             "op-49915e0d7d4b402e3017d010bc1c0e83".into(),
             "personal".into(),
-            false
+            false,
+            // A name to show, not the id.
+            Some("Personal agent".into())
         )]
     );
     assert_eq!(
@@ -2584,7 +2586,7 @@ async fn personal_operator_only_through_the_narrow_function() {
         operators(a)
             .await
             .iter()
-            .all(|(_, kind, disabled)| kind == "personal" && *disabled)
+            .all(|(_, kind, disabled, _)| kind == "personal" && *disabled)
     );
 }
 

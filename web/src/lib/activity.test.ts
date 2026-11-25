@@ -49,13 +49,44 @@ describe("activityRow", () => {
 		);
 	});
 
-	it("names who approved an asked action", () => {
-		expect(
-			activityRow(entry({ decision: "ask", approved_by: raya })).detail,
-		).toBe("Approved by Raya");
-		expect(activityRow(entry({ decision: "ask" })).detail).toBe(
-			"Waited for approval",
-		);
+	it("says how an ask ended, not that it was done", () => {
+		const ask = (outcome: Activity["outcome"]) =>
+			activityRow(entry({ decision: "ask", tool: "web.submit_form", outcome }));
+		expect(ask("denied")).toMatchObject({
+			kind: "refused",
+			title: "Ops bot asked to submit a form",
+			detail: "Denied",
+		});
+		expect(ask("approved")).toMatchObject({
+			kind: "approved",
+			detail: "Approved",
+		});
+		expect(ask("expired")).toMatchObject({ kind: "refused" });
+		expect(ask("pending")).toMatchObject({
+			kind: "waiting",
+			detail: "Waiting for approval",
+		});
+		expect(ask(null)).toMatchObject({
+			kind: "waiting",
+			detail: "Asked for approval",
+		});
+	});
+
+	it("names who approved a run that needed it", () => {
+		expect(activityRow(entry({ approved_by: raya }))).toMatchObject({
+			kind: "approved",
+			title: "Ops bot replied in Slack",
+			detail: "Approved by Raya",
+		});
+	});
+
+	it("shows a name, not an id, for an agent the core has no name for", () => {
+		const unnamed = (kind: Agent["kind"]) =>
+			activityRow(
+				entry({ agent: { ...bot, id: "op-a616", name: "op-a616", kind } }),
+			).title;
+		expect(unnamed("personal")).toBe("Personal agent replied in Slack");
+		expect(unnamed(null)).toBe("An agent replied in Slack");
 	});
 
 	it("falls back to the tool's name for tools it doesn't know", () => {
@@ -116,6 +147,6 @@ describe("describeApproval", () => {
 		expect(describeApproval(gone)).toBeTypeOf("string");
 		expect(
 			activityRow(entry({ agent: gone.agent, member: gone.requested_by })),
-		).toMatchObject({ title: expect.stringContaining("a9") });
+		).toMatchObject({ title: "An agent replied in Slack" });
 	});
 });
