@@ -6,6 +6,7 @@ import {
 	listen,
 	MAX_FAILURES,
 	parseEvent,
+	SETTLE_MS,
 } from "./conversation-stream.ts";
 
 /** A browser EventSource the test drives: what the core sends, and how the connection ends. */
@@ -51,15 +52,20 @@ class FakeSource implements EventSourceLike {
 
 /** Timers the test runs by hand. */
 function clock() {
-	const pending: { fn: () => void; ms: number }[] = [];
+	const pending: { id: number; fn: () => void; ms: number }[] = [];
+	let ids = 0;
 	return {
 		pending,
 		timers: {
 			set: (fn: () => void, ms: number) => {
-				pending.push({ fn, ms });
-				return pending.length;
+				ids += 1;
+				pending.push({ id: ids, fn, ms });
+				return ids;
 			},
-			clear: () => {},
+			clear: (id: unknown) => {
+				const at = pending.findIndex((t) => t.id === id);
+				if (at >= 0) pending.splice(at, 1);
+			},
 		},
 		next() {
 			const t = pending.shift();
@@ -131,7 +137,7 @@ describe("the conversation stream", () => {
 		const second = sources[1] as FakeSource;
 		second.send(1, "message", { role: "user", text: "Hi" });
 		second.send(2, "message", { role: "assistant", text: "Hello" });
-		second.send(3, "done", {});
+		second.send(3, "tool", { name: "web.read_page", status: "running" });
 		expect(seen.map((e) => e.id)).toEqual([1, 2, 3]);
 
 		// Refused again before it opened: the pause grows.
@@ -174,6 +180,98 @@ describe("the conversation stream", () => {
 		expect(lost).toEqual([true]);
 	});
 
+	it("closes once a turn has ended, and not on an earlier turn's done in a replay", async () => {
+		const { sources, stream, clock: c } = setup();
+		stream.subscribe(() => {});
+		await flush();
+		const s = sources[0] as FakeSource;
+		s.open();
+		// The replay: turn one ended, turn two carries on straight after.
+		s.send(1, "message", { role: "user", text: "One" });
+		s.send(2, "done", {});
+		s.send(3, "message", { role: "user", text: "Two" });
+		expect(c.pending).toHaveLength(0);
+		expect(s.closed).toBe(false);
+
+		s.send(4, "message", { role: "assistant", text: "Done" });
+		s.send(5, "done", {});
+		expect(c.next()).toBe(SETTLE_MS);
+		expect(s.closed).toBe(true);
+		expect(c.pending).toHaveLength(0);
+	});
+
+	it("closes when a turn ends in an error", async () => {
+		const { sources, stream, clock: c } = setup();
+		stream.subscribe(() => {});
+		await flush();
+		const s = sources[0] as FakeSource;
+		s.send(1, "error", { code: "internal", message: "No" });
+		c.next();
+		expect(s.closed).toBe(true);
+	});
+
+	it("reopens on resume, showing only what's new", async () => {
+		const { sources, stream, seen, clock: c } = setup();
+		stream.subscribe((e) => seen.push(e));
+		await flush();
+		const first = sources[0] as FakeSource;
+		first.send(1, "message", { role: "user", text: "Hi" });
+		first.send(2, "done", {});
+		c.next();
+		expect(first.closed).toBe(true);
+
+		stream.resume();
+		await flush();
+		const second = sources[1] as FakeSource;
+		second.send(1, "message", { role: "user", text: "Hi" });
+		second.send(2, "done", {});
+		second.send(3, "message", { role: "user", text: "And this" });
+		expect(seen.map((e) => e.id)).toEqual([1, 2, 3]);
+	});
+
+	it("pauses while the page is hidden and opens again when it's back", async () => {
+		const sources: FakeSource[] = [];
+		const page = listen("cnv_hidden", () => {}, {
+			connect: () => {
+				const s = new FakeSource();
+				sources.push(s);
+				return s;
+			},
+		});
+		await flush();
+		page.pause();
+		expect((sources[0] as FakeSource).closed).toBe(true);
+		page.resume();
+		await flush();
+		expect(sources).toHaveLength(2);
+		expect((sources[1] as FakeSource).closed).toBe(false);
+		// Resuming an open stream does nothing.
+		page.resume();
+		await flush();
+		expect(sources).toHaveLength(2);
+		page.stop();
+	});
+
+	it("can be resumed after it gave up", async () => {
+		const { sources, stream, clock: c } = setup();
+		const lost: boolean[] = [];
+		stream.subscribe(
+			() => {},
+			(l) => lost.push(l),
+		);
+		await flush();
+		for (let i = 0; i <= MAX_FAILURES; i++) {
+			(sources.at(-1) as FakeSource).fail();
+			c.next();
+			await flush();
+		}
+		expect(stream.gaveUp).toBe(true);
+		stream.resume();
+		await flush();
+		(sources.at(-1) as FakeSource).open();
+		expect(lost).toEqual([true, false]);
+	});
+
 	it("ignores events it doesn't understand", async () => {
 		const { sources, stream, seen } = setup();
 		stream.subscribe((e) => seen.push(e));
@@ -206,13 +304,13 @@ describe("listen", () => {
 		const b = listen("cnv_shared", () => {}, { connect });
 		await flush();
 		expect(opened).toBe(1);
-		a();
-		b();
+		a.stop();
+		b.stop();
 		// Gone with its last listener: the next one opens afresh.
 		const c = listen("cnv_shared", () => {}, { connect });
 		await flush();
 		expect(opened).toBe(2);
-		c();
+		c.stop();
 	});
 });
 

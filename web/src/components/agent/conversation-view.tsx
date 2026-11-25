@@ -22,7 +22,7 @@ import {
 	type Line,
 	WITHHELD,
 } from "#/lib/conversation.ts";
-import { listen } from "#/lib/conversation-stream.ts";
+import { type Listening, listen } from "#/lib/conversation-stream.ts";
 
 /**
  * A conversation with your agent: the words on the left, what your agent did on the right.
@@ -37,10 +37,20 @@ export function ConversationView({
 }) {
 	const [view, dispatch] = useReducer(applyEvent, emptyView);
 	const [lost, setLost] = useState(false);
-	useEffect(
-		() => listen(conversation.id, dispatch, { onLost: setLost }),
-		[conversation.id],
-	);
+	const stream = useRef<Listening | null>(null);
+	useEffect(() => {
+		const listening = listen(conversation.id, dispatch, { onLost: setLost });
+		stream.current = listening;
+		// A hidden page holds none of the core's streams; it picks up where it was when shown again.
+		const onVisibility = () =>
+			document.hidden ? listening.pause() : listening.resume();
+		document.addEventListener("visibilitychange", onVisibility);
+		return () => {
+			document.removeEventListener("visibilitychange", onVisibility);
+			listening.stop();
+			stream.current = null;
+		};
+	}, [conversation.id]);
 
 	// Failed means the agent never started: the stream can't say so, the list can.
 	const failed = conversation.state === "failed";
@@ -59,6 +69,8 @@ export function ConversationView({
 	const send = async (text: string) => {
 		try {
 			await api.conversations.send(conversation.id, text);
+			// The stream closed when the last turn ended; this one needs it again.
+			stream.current?.resume();
 			return true;
 		} catch (e) {
 			toast(
@@ -103,7 +115,8 @@ export function ConversationView({
 						) : null}
 						{lost ? (
 							<output className="m-0 block text-[13px] text-muted-foreground leading-normal">
-								Lost touch with your agent. Reload the page to see what it did.
+								Lost touch with your agent. It tries again when you send a
+								message or come back to this page.
 							</output>
 						) : null}
 						<div ref={end} />

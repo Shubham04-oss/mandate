@@ -109,6 +109,10 @@ export const MAX_FAILURES = BACKOFF_MS.length;
 /** Told when the stream loses the core after its last retry, and when it has it again. */
 export type OnLost = (lost: boolean) => void;
 
+// A turn has ended once `done` or `error` is followed by this much quiet: a fresh stream replays
+// every earlier turn's `done` on its way to the latest events, which arrive straight after.
+export const SETTLE_MS = 1_500;
+
 /**
  * One live stream of a conversation's events, shared by everyone listening to it.
  *
@@ -125,6 +129,7 @@ export class ConversationStream {
 	private lastId = 0;
 	private failures = 0;
 	private retry: unknown = null;
+	private settle: unknown = null;
 	private closed = true;
 
 	constructor(
@@ -170,12 +175,23 @@ export class ConversationStream {
 		for (const fn of this.lostListeners) fn(lost);
 	}
 
+	/** Closes the connection; listeners stay, and resume() opens it again. */
 	close() {
 		this.closed = true;
 		if (this.retry !== null) this.timers.clear(this.retry);
+		if (this.settle !== null) this.timers.clear(this.settle);
 		this.retry = null;
+		this.settle = null;
 		this.source?.close();
 		this.source = null;
+	}
+
+	/** Opens the stream again after a turn ended, the page was hidden, or it gave up. */
+	resume() {
+		if (!this.closed || this.listeners.size === 0) return;
+		this.closed = false;
+		this.failures = 0;
+		this.open();
 	}
 
 	private async open() {
@@ -220,6 +236,14 @@ export class ConversationStream {
 		if (!event) return;
 		this.lastId = id;
 		for (const fn of this.listeners) fn(event);
+		// Close once the turn has ended, so an idle conversation holds none of the core's streams.
+		if (this.settle !== null) this.timers.clear(this.settle);
+		this.settle = null;
+		if (event.kind === "done" || event.kind === "error")
+			this.settle = this.timers.set(() => {
+				this.settle = null;
+				this.close();
+			}, SETTLE_MS);
 	}
 }
 
@@ -251,7 +275,16 @@ const connectToCore: Connect = async (id) => {
 // At most one stream per conversation: the core allows five per person.
 const streams = new Map<string, ConversationStream>();
 
-/** Listens to a conversation's events; the stream closes when its last listener goes. */
+export type Listening = {
+	/** Stops listening; the stream closes when its last listener goes. */
+	stop(): void;
+	/** Closes the connection for now, for a page that is hidden. */
+	pause(): void;
+	/** Opens it again: the page is visible, or the person sent something. */
+	resume(): void;
+};
+
+/** Listens to a conversation's events. */
 export function listen(
 	conversationId: string,
 	fn: (e: ConversationEvent) => void,
@@ -259,7 +292,7 @@ export function listen(
 		connect = connectToCore,
 		onLost,
 	}: { connect?: Connect; onLost?: OnLost } = {},
-): () => void {
+): Listening {
 	let stream = streams.get(conversationId);
 	if (!stream) {
 		stream = new ConversationStream(conversationId, connect);
@@ -267,8 +300,12 @@ export function listen(
 	}
 	const s = stream;
 	const stop = s.subscribe(fn, onLost);
-	return () => {
-		stop();
-		if (s.listening === 0) streams.delete(conversationId);
+	return {
+		stop() {
+			stop();
+			if (s.listening === 0) streams.delete(conversationId);
+		},
+		pause: () => s.close(),
+		resume: () => s.resume(),
 	};
 }
