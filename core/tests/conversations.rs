@@ -1235,6 +1235,53 @@ async fn ask_emits_approval_wait_with_the_approval() {
     assert!(answers(&h).is_empty());
 }
 
+#[tokio::test]
+#[ignore]
+async fn a_wait_whose_approval_expired_reads_expired_and_can_be_stopped() {
+    let h = harness().await;
+    let t = tenant();
+    let (id, approval) = asked(&h, &t).await;
+    let app = h.app(&t, "ann").await;
+    let (_, one) = call(&app, "GET", &format!("/v1/conversations/{id}"), None).await;
+    assert_eq!(one["state"], "waiting");
+    let mut tx = h.store.begin(&t).await.unwrap();
+    sqlx::query("update approvals set requested_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' where id = $1")
+        .bind(approval)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    // Nobody can approve it any more, so the chat no longer says it waits for you.
+    let (_, one) = call(&app, "GET", &format!("/v1/conversations/{id}"), None).await;
+    assert_eq!(one["state"], "expired");
+    let (_, list) = call(&app, "GET", "/v1/conversations", None).await;
+    assert_eq!(list["items"][0]["state"], "expired");
+    // A later turn that pauses without asking is not held to the old, expired approval.
+    let mut tx = h.store.begin(&t).await.unwrap();
+    sqlx::query(
+        "insert into conversation_events (tenant_id, conversation, seq, kind, data) \
+         select tenant_id, conversation, max(seq) + 1, 'message', '{\"role\":\"user\",\"text\":\"again\"}' \
+         from conversation_events where conversation = $1::uuid group by tenant_id, conversation",
+    )
+    .bind(&id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (_, one) = call(&app, "GET", &format!("/v1/conversations/{id}"), None).await;
+    assert_eq!(one["state"], "waiting");
+    // Stop still reaches eve: the turn there is still paused.
+    let (status, _) = call(
+        &app,
+        "POST",
+        &format!("/v1/conversations/{id}/cancel"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(h.fake.seen().iter().any(|s| s.path.ends_with("/cancel")));
+}
+
 /// `ann` decides through lane C's `decide_approval`, which publishes `approval.decided.v1`.
 async fn decide(h: &Harness, t: &TenantId, approval: Uuid, d: Decision) {
     let mut tx = h.store.begin(t).await.unwrap();

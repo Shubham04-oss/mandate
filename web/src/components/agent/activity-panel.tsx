@@ -4,7 +4,12 @@ import { Spinner } from "#/components/agent/marks.tsx";
 import { Icon } from "#/components/icons/icon.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import { ApiError, type Approval, api } from "#/lib/api/index.ts";
-import { type Step, stepLabel, toolTitle } from "#/lib/conversation.ts";
+import {
+	approvalState,
+	type Step,
+	stepLabel,
+	toolTitle,
+} from "#/lib/conversation.ts";
 import { clock, formatTime, usePref } from "#/lib/preferences.ts";
 
 /** Beside the conversation: what your agent did and is doing, with any OK it needs. */
@@ -44,7 +49,9 @@ const decided: Record<string, string> = {
 };
 
 function StepItem({ step }: { step: Step }) {
-	const waiting = step.approval?.state === "pending";
+	const waiting = step.approval
+		? approvalState(step.approval) === "pending"
+		: false;
 	return (
 		<li className="grid grid-cols-[20px_minmax(0,1fr)] gap-x-3">
 			<span className="mt-px grid size-5 place-items-center">
@@ -104,11 +111,12 @@ function StepIcon({ step, waiting }: { step: Step; waiting: boolean }) {
 
 function ApprovalNote({ approval }: { approval: Approval }) {
 	const timeFormat = usePref(clock);
+	const state = approvalState(approval);
 	return (
 		<span className="text-[12px] text-muted-foreground">
-			{approval.state === "pending"
+			{state === "pending"
 				? `Needs your OK · waits until ${formatTime(approval.expires_at, timeFormat)}`
-				: (decided[approval.state] ?? approval.state)}
+				: (decided[state] ?? state)}
 		</span>
 	);
 }

@@ -111,6 +111,37 @@ export function applyEvent(view: View, e: ConversationEvent): View {
 	}
 }
 
+/** An approval as it stands now: a pending one past its time can no longer be decided. */
+export function approvalState(
+	a: Pick<Approval, "state" | "expires_at">,
+	now = Date.now(),
+): ApprovalState {
+	return a.state === "pending" && Date.parse(a.expires_at) <= now
+		? "expired"
+		: a.state;
+}
+
+/** The approvals asked for since you last wrote; an older turn's never hold this one up. */
+export function currentAsks(view: Pick<View, "lines" | "steps">) {
+	const you = lastIndex(view.lines, (l) => l.kind === "you");
+	const since = you < 0 ? 0 : Number(view.lines[you]?.key);
+	return view.steps.flatMap((s) =>
+		s.approval && Number(s.key) > since ? [s.approval] : [],
+	);
+}
+
+/** A wait whose latest ask has run out waits for no one: it reads expired. */
+export function shownState(
+	state: ConversationState,
+	view: Pick<View, "lines" | "steps">,
+	now = Date.now(),
+): ConversationState {
+	const last = currentAsks(view).at(-1);
+	return state === "waiting" && last && approvalState(last, now) === "expired"
+		? "expired"
+		: state;
+}
+
 const tools: Record<
 	string,
 	{ doing: string; done: string; denied: string; failed: string }
