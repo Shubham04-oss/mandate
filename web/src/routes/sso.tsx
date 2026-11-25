@@ -28,7 +28,7 @@ export const Route = createFileRoute("/sso")({
 
 function Sso() {
 	const [email] = useState(() => readFlow().email ?? "");
-	const { busy, error, act } = useSignIn();
+	const { busy, error, act, goToProvider } = useSignIn();
 
 	return (
 		<AuthLayout scene="harbour">
@@ -37,7 +37,7 @@ function Sso() {
 				onSubmit={(data) =>
 					act(
 						() => api.auth.ssoStart(field(data, "email")),
-						({ redirect_url }) => window.location.assign(redirect_url),
+						({ redirect_url }) => goToProvider(redirect_url),
 					)
 				}
 			>

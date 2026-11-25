@@ -77,6 +77,27 @@ export function planOutcome(outcome: SignInOutcome, email?: string): Plan {
 	}
 }
 
+/**
+ * The identity provider's address from single sign-on, only if it is https. In dev, http on
+ * localhost passes too, for the stand-ins. Anything else (javascript:, http:, data:) is null.
+ */
+export function providerUrl(
+	raw: string,
+	base: string,
+	dev: boolean,
+): string | null {
+	let url: URL;
+	try {
+		url = new URL(raw, base);
+	} catch {
+		return null;
+	}
+	if (url.protocol === "https:") return url.href;
+	const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+	if (dev && url.protocol === "http:" && local) return url.href;
+	return null;
+}
+
 /** Errors that end the current attempt and take the person elsewhere; the rest show in place. */
 export function errorDestination(
 	error: ApiError,

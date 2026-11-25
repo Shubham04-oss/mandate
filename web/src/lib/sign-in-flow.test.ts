@@ -4,6 +4,7 @@ import {
 	callbackMessage,
 	errorDestination,
 	planOutcome,
+	providerUrl,
 } from "./sign-in-flow.ts";
 
 const me = {} as Me;
@@ -72,6 +73,32 @@ describe("planOutcome", () => {
 			kind: "step",
 			to: "/sso",
 		});
+	});
+});
+
+describe("providerUrl", () => {
+	const app = "https://app.oryxa.in";
+
+	it("opens an https identity provider", () => {
+		expect(providerUrl("https://login.northstar.io/sso?x=1", app, false)).toBe(
+			"https://login.northstar.io/sso?x=1",
+		);
+	});
+
+	it("refuses javascript:, http: and data: addresses", () => {
+		expect(providerUrl("javascript:alert(1)", app, false)).toBeNull();
+		expect(providerUrl("JavaScript:alert(1)", app, true)).toBeNull();
+		expect(providerUrl("http://login.northstar.io/sso", app, false)).toBeNull();
+		expect(providerUrl("http://login.northstar.io/sso", app, true)).toBeNull();
+		expect(providerUrl("data:text/html,hi", app, false)).toBeNull();
+	});
+
+	it("lets the stand-ins use http on localhost, in dev only", () => {
+		const local = "http://localhost:3000";
+		expect(providerUrl("/sign-in?standin=sso", local, true)).toBe(
+			"http://localhost:3000/sign-in?standin=sso",
+		);
+		expect(providerUrl("/sign-in?standin=sso", local, false)).toBeNull();
 	});
 });
 

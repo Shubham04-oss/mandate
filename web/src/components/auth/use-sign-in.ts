@@ -5,6 +5,7 @@ import {
 	clearFlow,
 	errorDestination,
 	planOutcome,
+	providerUrl,
 	readFlow,
 	saveFlow,
 } from "#/lib/sign-in-flow.ts";
@@ -38,6 +39,18 @@ export function useSignIn() {
 		}
 	};
 
+	/** Leaves for the identity provider, but only for an https address. */
+	const goToProvider = (raw: string) => {
+		const url = providerUrl(raw, window.location.origin, import.meta.env.DEV);
+		if (!url) {
+			setError(
+				"Single sign-on gave an address oryxa won't open. Ask your admin to check it.",
+			);
+			return;
+		}
+		window.location.assign(url);
+	};
+
 	/** A call whose answer is a sign-in outcome. */
 	const run = async (
 		call: () => Promise<SignInOutcome | undefined>,
@@ -54,7 +67,7 @@ export function useSignIn() {
 				await router.invalidate();
 				await navigate({ to: opts.signedInTo ?? "/" });
 			} else if (plan.kind === "redirect") {
-				window.location.assign(plan.url);
+				goToProvider(plan.url);
 			} else {
 				saveFlow(plan.flow);
 				await navigate({ to: plan.to });
@@ -83,7 +96,7 @@ export function useSignIn() {
 		}
 	};
 
-	return { busy, error, setError, run, act };
+	return { busy, error, setError, run, act, goToProvider };
 }
 
 /** Reads a form field as trimmed text. */
