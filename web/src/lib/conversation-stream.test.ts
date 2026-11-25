@@ -231,6 +231,47 @@ describe("the conversation stream", () => {
 		expect(seen.map((e) => e.id)).toEqual([1, 2, 3]);
 	});
 
+	it("closes again when a finished conversation is shown again and nothing is new", async () => {
+		const { sources, stream, clock: c } = setup();
+		stream.subscribe(() => {});
+		await flush();
+		const first = sources[0] as FakeSource;
+		first.open();
+		first.send(1, "message", { role: "user", text: "Hi" });
+		first.send(2, "done", {});
+		c.next();
+		expect(first.closed).toBe(true);
+
+		// The tab is shown again: the replay holds only what was already shown.
+		stream.resume();
+		await flush();
+		const second = sources[1] as FakeSource;
+		second.open();
+		second.send(1, "message", { role: "user", text: "Hi" });
+		second.send(2, "done", {});
+		expect(c.next()).toBe(SETTLE_MS);
+		expect(second.closed).toBe(true);
+		expect(c.pending).toHaveLength(0);
+	});
+
+	it("stays open when something new arrives after a finished conversation reopens", async () => {
+		const { sources, stream, clock: c } = setup();
+		stream.subscribe(() => {});
+		await flush();
+		const first = sources[0] as FakeSource;
+		first.send(1, "done", {});
+		c.next();
+
+		stream.resume();
+		await flush();
+		const second = sources[1] as FakeSource;
+		second.open();
+		second.send(1, "done", {});
+		second.send(2, "message", { role: "user", text: "From another tab" });
+		expect(c.pending).toHaveLength(0);
+		expect(second.closed).toBe(false);
+	});
+
 	it("reopens on resume, showing only what's new", async () => {
 		const { sources, stream, seen, clock: c } = setup();
 		stream.subscribe((e) => seen.push(e));

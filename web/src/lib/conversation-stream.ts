@@ -130,6 +130,8 @@ export class ConversationStream {
 	private failures = 0;
 	private retry: unknown = null;
 	private settle: unknown = null;
+	/** Whether the last event passed on ended a turn (done or error). */
+	private ended = false;
 	private closed = true;
 
 	constructor(
@@ -179,9 +181,8 @@ export class ConversationStream {
 	close() {
 		this.closed = true;
 		if (this.retry !== null) this.timers.clear(this.retry);
-		if (this.settle !== null) this.timers.clear(this.settle);
 		this.retry = null;
-		this.settle = null;
+		this.clearSettle();
 		this.source?.close();
 		this.source = null;
 	}
@@ -190,9 +191,10 @@ export class ConversationStream {
 	resume() {
 		if (this.listeners.size === 0) return;
 		// Still open but about to close because the last turn ended: a send means a new turn, so keep it.
-		if (this.settle !== null) this.timers.clear(this.settle);
-		this.settle = null;
-		if (!this.closed) return;
+		if (!this.closed) {
+			this.clearSettle();
+			return;
+		}
 		this.closed = false;
 		this.failures = 0;
 		this.open();
@@ -211,6 +213,9 @@ export class ConversationStream {
 		source.onopen = () => {
 			this.failures = 0;
 			this.setLost(false);
+			// Reopened on a conversation whose turn had ended: the replay is all old ids, which are
+			// dropped, so close again unless something new arrives.
+			if (this.ended) this.scheduleSettle();
 		};
 		source.onerror = () => {
 			// Still connecting: the browser is reconnecting on its own, with Last-Event-ID.
@@ -241,13 +246,22 @@ export class ConversationStream {
 		this.lastId = id;
 		for (const fn of this.listeners) fn(event);
 		// Close once the turn has ended, so an idle conversation holds none of the core's streams.
+		this.clearSettle();
+		this.ended = event.kind === "done" || event.kind === "error";
+		if (this.ended) this.scheduleSettle();
+	}
+
+	private scheduleSettle() {
+		this.clearSettle();
+		this.settle = this.timers.set(() => {
+			this.settle = null;
+			this.close();
+		}, SETTLE_MS);
+	}
+
+	private clearSettle() {
 		if (this.settle !== null) this.timers.clear(this.settle);
 		this.settle = null;
-		if (event.kind === "done" || event.kind === "error")
-			this.settle = this.timers.set(() => {
-				this.settle = null;
-				this.close();
-			}, SETTLE_MS);
 	}
 }
 
