@@ -48,8 +48,9 @@ export interface Caller {
 }
 
 /**
- * The agent-wide approval policy. Anything that is not a core tool is denied; a core tool the
- * core does not list is denied; an `ask` tool pauses for a person. Any error denies.
+ * The agent-wide approval policy. Searching the catalog runs; anything else that is not a core
+ * tool is denied; a core tool the core does not list is denied; an `ask` tool pauses for a person.
+ * Any error denies.
  */
 export async function approvalFor(
   toolName: string,
@@ -57,7 +58,8 @@ export async function approvalFor(
   list: (token: string) => Promise<Listing>,
 ): Promise<Status> {
   const prefix = `${CONNECTION}__`;
-  if (!toolName.startsWith(prefix)) {
+  const search = toolName === "eve__search";
+  if (!search && !toolName.startsWith(prefix)) {
     return { type: "denied", reason: "Only the core's tools are available." };
   }
   const { current, initiator, token } = caller;
@@ -72,6 +74,9 @@ export async function approvalFor(
   ) {
     return { type: "denied", reason: "This turn has no valid caller." };
   }
+  // eve reaches connection tools only through this search. It only lists; each call it leads to
+  // comes back here under its own name.
+  if (search) return undefined;
   let listing: Listing;
   try {
     listing = await list(token);
