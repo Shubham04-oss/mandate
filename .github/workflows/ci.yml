@@ -63,6 +63,27 @@ jobs:
       - run: npm ci
       - run: npm run check
 
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      # A production build must name the core; a placeholder proves it builds. The refusal without
+      # one is covered by src/lib/api/api-url.test.ts.
+      - run: npm run build
+        env:
+          VITE_MANDATE_API_URL: https://api.example.com
+      # Serves that build in the Worker runtime and checks a rendered page's headers and nonces.
+      - run: npm run test:dist
+
   infra:
     runs-on: ubuntu-latest
     # A scratch server of its own: the db-bootstrap SQL test drops and recreates databases and roles.

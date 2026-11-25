@@ -1,0 +1,434 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/plus-jakarta-sans";
+
+/* Dark is the default; `.light` on <html> switches theme (set from the device's setting, see __root). */
+@custom-variant dark (&:not(.light *));
+
+/*
+ * Tokens from the oryxa design system (canvas "oryxa workspace redesign", ds/oryxa/tokens.json), with
+ * the light theme and the accents taken from the "Oryxa Website Language" system: a warm-grey page,
+ * white cards, ink text, sky and sea for anything the agent does, and one orange kept for section
+ * dashes, the wordmark dot and what needs the person.
+ * shadcn's variable names are mapped onto them below, so library components take the design as is.
+ */
+:root {
+	color-scheme: dark;
+
+	/* surfaces */
+	--base: #111111;
+	--canvas: #1e1e1e;
+	--raised: #242424;
+	--hover: #1d1d1d;
+	--selected: #262626;
+	--active: #303030;
+
+	/* lines */
+	--border-quiet: #353535;
+	--border-strong: #555555;
+	--field: #3a3a3a;
+
+	/* text */
+	--text: #f2f2f2;
+	--text-soft: #a8a8a8;
+	--text-muted: #999999;
+
+	/* shadows and scrims */
+	--shade-66: #00000066;
+	--shade-88: #00000088;
+	--shade-99: #00000099;
+
+	/* the canvas edge: dark separates by tone alone, light needs a hairline */
+	--canvas-edge: transparent;
+
+	/* card depth: a 1px line, then a low shadow */
+	--shade-card-1: #00000040;
+	--shade-card-2: #00000033;
+	--shade-card-3: #00000052;
+
+	/* status */
+	--ok-fill: #1f3329;
+	--ok-text: #9fdcb8;
+	--ok-solid: #3f9d63;
+	--danger: #d4544f;
+	--danger-text: #ef7a75;
+	--warn: #d9c27a;
+
+	/* brand: the orange marks, it is never text */
+	--gold-deep: #d98e62;
+	--gold: #f2b79f;
+	--gold-soft: #3a2b21;
+
+	/* the agent: sky and sea */
+	--sky-soft: #1f2835;
+	--sea: #a9c1ea;
+	--sea-soft: #1b2431;
+	--sea-deep: #1c3350;
+}
+
+/* The website's own palette: page, card, ink, line, subtle, and warm shadows. */
+.light {
+	color-scheme: light;
+
+	--base: #f5f5f4;
+	--canvas: #fafaf9;
+	--raised: #ffffff;
+	--hover: #f0efed;
+	--selected: #ebe9e7;
+	--active: #e7e5e4;
+
+	--border-quiet: #e7e5e4;
+	--border-strong: #d6d3d1;
+	--field: #dcd9d6;
+
+	--text: #111111;
+	--text-soft: #57534e;
+	--text-muted: #6f6a66;
+
+	--shade-66: #1a140f14;
+	--shade-88: #1a140f24;
+	--shade-99: #1a140f2e;
+
+	--canvas-edge: var(--border-quiet);
+
+	--shade-card-1: #1a140f0a;
+	--shade-card-2: #1a140f0d;
+	--shade-card-3: #1a140f17;
+
+	--ok-fill: #e9f7f0;
+	--ok-text: #237a52;
+	--ok-solid: #237a52;
+	--danger-text: #b4342f;
+	--warn: #93761b;
+
+	--gold-soft: #fbe6da;
+	--sky-soft: #e8eef9;
+	--sea: #2f4c6e;
+	--sea-soft: #dfe6ef;
+}
+
+/* shadcn's names, pointed at the oryxa roles */
+:root,
+.light {
+	--background: var(--base);
+	--foreground: var(--text);
+	--card: var(--raised);
+	--card-foreground: var(--text);
+	--popover: var(--raised);
+	--popover-foreground: var(--text);
+	--primary: var(--text);
+	--primary-foreground: var(--canvas);
+	--secondary: var(--raised);
+	--secondary-foreground: var(--text);
+	--muted: var(--hover);
+	--muted-foreground: var(--text-muted);
+	--accent: var(--selected);
+	--accent-foreground: var(--text);
+	--destructive: var(--danger);
+	--border: var(--border-quiet);
+	--input: var(--border-quiet);
+	--ring: var(--text-muted);
+}
+
+@theme inline {
+	--font-sans: "Plus Jakarta Sans Variable", ui-sans-serif, system-ui, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+
+	/* surface steps shadcn has no name for */
+	--color-canvas: var(--canvas);
+	--color-raised: var(--raised);
+	--color-hover: var(--hover);
+	--color-selected: var(--selected);
+	--color-active: var(--active);
+	--color-field: var(--field);
+	--color-border-strong: var(--border-strong);
+	--color-soft-foreground: var(--text-soft);
+	--color-ok: var(--ok-fill);
+	--color-ok-foreground: var(--ok-text);
+	--color-ok-solid: var(--ok-solid);
+	--color-danger-foreground: var(--danger-text);
+	--color-warn: var(--warn);
+	--color-gold-deep: var(--gold-deep);
+	--color-gold: var(--gold);
+	--color-gold-soft: var(--gold-soft);
+	--color-sky-soft: var(--sky-soft);
+	--color-sea: var(--sea);
+	--color-sea-soft: var(--sea-soft);
+	--color-sea-deep: var(--sea-deep);
+
+	/* radius scale from the tokens: button-sm, control, choice, card, panel, dialog */
+	--radius-sm: 8px;
+	--radius-md: 10px;
+	--radius-lg: 12px;
+	--radius-xl: 14px;
+	--radius-2xl: 18px;
+	--radius-3xl: 22px;
+	--radius-item: 9px;
+	--radius-row: 11px;
+	--radius-section: 16px;
+	--radius-card: 20px;
+	--radius-window: 24px;
+
+	/* depth is a 1px ring plus a short shadow; long shadows are for overlays only */
+	--shadow-ring: 0 0 0 1px var(--border-quiet);
+	--shadow-raised: 0 0 0 1px var(--border-quiet), 0 1px 3px var(--shade-66);
+	--shadow-card: 0 0 0 1px var(--border-quiet), 0 1px 2px var(--shade-card-1), 0 10px 30px var(--shade-card-2);
+	--shadow-card-hover: 0 0 0 1px var(--border-strong), 0 1px 2px var(--shade-card-2), 0 18px 40px var(--shade-card-3);
+	--shadow-tile: 0 0 0 1px var(--border-quiet), 0 4px 14px var(--shade-66);
+	--shadow-icon: 0 0 0 1px var(--border-quiet), 0 4px 12px var(--shade-66);
+	--shadow-field: inset 0 0 0 1px var(--border-quiet);
+	--shadow-field-focus: inset 0 0 0 1.5px var(--text), 0 0 0 4px var(--hover);
+	--shadow-field-invalid: inset 0 0 0 1.5px var(--danger);
+	--shadow-dialog: 0 0 0 1px var(--border-quiet), 0 24px 64px var(--shade-66);
+	--shadow-float: 0 0 0 1px var(--border-quiet), 0 12px 32px var(--shade-66);
+	--shadow-menu: 0 0 0 1px var(--border-quiet), 0 12px 34px var(--shade-88);
+
+	/* below this width the auth scene becomes a band */
+	--breakpoint-split: 800px;
+}
+
+@layer base {
+	* {
+		@apply border-border outline-ring/50;
+	}
+
+	html,
+	body {
+		min-height: 100%;
+	}
+
+	body {
+		margin: 0;
+		@apply bg-background font-sans text-foreground antialiased;
+		font-size: 13px;
+		/* phones flash a blue box on every tap otherwise; our controls show their own press */
+		-webkit-tap-highlight-color: transparent;
+	}
+}
+
+/*
+ * Calm motion: when the device asks, or when the person turns it on in Settings (.reduce-motion on
+ * <html>). Things still change, they just don't travel.
+ */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	::before,
+	::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+/* While the theme switches, nothing fades on its own (see chooseTheme). */
+.theme-switching *,
+.theme-switching ::before,
+.theme-switching ::after {
+	transition: none !important;
+}
+
+.reduce-motion *,
+.reduce-motion ::before,
+.reduce-motion ::after {
+	animation-duration: 0.01ms !important;
+	animation-iteration-count: 1 !important;
+	transition-duration: 0.01ms !important;
+	scroll-behavior: auto !important;
+}
+
+/*
+ * The eyebrow: a short orange dash, then a sentence-case label. It names the section a heading
+ * belongs to. Keep it to a few per screen; the orange stops meaning anything once it is everywhere.
+ */
+@layer components {
+	.eyebrow {
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+		margin: 0;
+		font-size: 12.5px;
+		font-weight: 500;
+		line-height: 1;
+		letter-spacing: 0.01em;
+		color: var(--text-soft);
+	}
+
+	.eyebrow::before {
+		content: "";
+		flex: none;
+		width: 18px;
+		height: 1.5px;
+		border-radius: 1px;
+		background: var(--gold-deep);
+	}
+
+	/* A status dot: answered, waiting, or (orange) needs the person. */
+	.status-dot {
+		flex: none;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+	}
+}
+
+/*
+ * Painted scenes. They sit at the edge of a surface and fade into it, so text sits on the surface,
+ * never on the painting. A touch muted in dark so they sit with the greys.
+ */
+@layer components {
+	.scene {
+		background-size: cover;
+		background-position: center;
+	}
+
+	.scene-fade-b {
+		mask-image: linear-gradient(to bottom, #000 0%, rgba(0, 0, 0, 0.7) 45%, transparent 100%);
+	}
+
+	.scene-fade-r {
+		mask-image: linear-gradient(to right, #000 30%, transparent);
+	}
+
+	.scene-dim {
+		filter: brightness(0.82) saturate(0.9);
+	}
+
+	.scene-soft {
+		filter: saturate(0.92);
+	}
+
+	.scene-band {
+		filter: brightness(0.86) saturate(0.92);
+	}
+
+	.light .scene-dim,
+	.light .scene-soft,
+	.light .scene-band {
+		filter: none;
+	}
+}
+
+/*
+ * Home. Narrow: one column that flows down. Wide: the ask box sits on the exact centre line with the
+ * question above it and the quick actions below, and the two side panels fill the margins.
+ */
+@layer components {
+	.home-grid {
+		flex: 1;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-areas: "greet" "ask" "below" "left" "right";
+		row-gap: 18px;
+		column-gap: 16px;
+		/* room at the top for the tab that hangs from the canvas edge */
+		padding: 60px 20px 40px;
+		align-content: start;
+	}
+
+	.home-grid > [data-area="greet"],
+	.home-grid > [data-area="ask"],
+	.home-grid > [data-area="below"] {
+		width: 100%;
+		max-width: 680px;
+		justify-self: center;
+	}
+
+	.home-grid > [data-area="greet"] { grid-area: greet; }
+	.home-grid > [data-area="ask"] { grid-area: ask; }
+	.home-grid > [data-area="below"] { grid-area: below; }
+	.home-grid > [data-area="left"] { grid-area: left; }
+	.home-grid > [data-area="right"] { grid-area: right; }
+
+	@media (min-width: 760px) {
+		.home-grid {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			grid-template-areas: "greet greet" "ask ask" "below below" "left right";
+		}
+	}
+
+	@media (min-width: 1240px) {
+		.home-grid {
+			grid-template-columns: minmax(0, 1fr) minmax(0, 680px) minmax(0, 1fr);
+			grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr);
+			grid-template-areas: "left greet right" "left ask right" "left below right";
+			column-gap: 48px;
+			row-gap: 20px;
+			padding: 24px 32px;
+			align-content: stretch;
+		}
+
+		.home-grid > [data-area="greet"] { align-self: end; }
+		.home-grid > [data-area="below"] { align-self: start; }
+		.home-grid > [data-area="left"],
+		.home-grid > [data-area="right"] {
+			align-self: center;
+			width: 100%;
+			max-width: 300px;
+		}
+		.home-grid > [data-area="left"] { justify-self: end; }
+		.home-grid > [data-area="right"] { justify-self: start; }
+	}
+
+	/* A tab cut out of the canvas in the surround colour, hanging from its top edge. The curved
+	   shoulders make it read as a slice taken out rather than a box laid on top. */
+	.tab-cut {
+		border-radius: 0 0 14px 14px;
+		background: var(--base);
+	}
+
+	.tab-cut::before,
+	.tab-cut::after {
+		content: "";
+		position: absolute;
+		top: 0;
+		width: 14px;
+		height: 14px;
+	}
+
+	.tab-cut::before {
+		left: -14px;
+		background: radial-gradient(circle at 0 100%, transparent 13.5px, var(--base) 14px);
+	}
+
+	.tab-cut::after {
+		right: -14px;
+		background: radial-gradient(circle at 100% 100%, transparent 13.5px, var(--base) 14px);
+	}
+
+	/* The painted band behind the quick actions, under a sea-deep veil so white text stays legible. */
+	.quick-band {
+		position: relative;
+		isolation: isolate;
+		overflow: hidden;
+		background: var(--sea-deep) url(/scenes/bottles.webp) center 62% / cover no-repeat;
+	}
+
+	.quick-band::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		z-index: -1;
+		background: linear-gradient(180deg, rgb(13 24 40 / 0.3), rgb(13 24 40 / 0.7));
+	}
+}
