@@ -32,23 +32,23 @@ import {
 	type GrantPrincipal,
 } from "#/lib/api/index.ts";
 import {
+	type Choice,
 	catalog,
 	type Directory,
 	expiresAt,
 	expiryChoices,
 	forTool,
+	grantChoices,
 	grantsAccess,
 	kindLabel,
 	principalKey,
 	principalName,
+	searchChoices,
 } from "#/lib/grants.ts";
 
 const appRoute = getRouteApi("/_app");
 
 type Tool = (typeof catalog)[number];
-
-/** Someone a grant can be for: a person, a team, or an agent. */
-type Choice = { principal: GrantPrincipal; name: string; detail: string };
 
 type Loaded = { grants: Grant[]; names: Directory; choices: Choice[] };
 
@@ -61,23 +61,7 @@ async function load(): Promise<Loaded> {
 		api.org.teams(),
 		api.agents(),
 	]);
-	const choices: Choice[] = [
-		...members.items.map((p) => ({
-			principal: { kind: "member" as const, id: p.id },
-			name: p.name,
-			detail: p.email,
-		})),
-		...teams.items.map((t) => ({
-			principal: { kind: "team" as const, id: t.id },
-			name: t.name,
-			detail: `${t.members} ${t.members === 1 ? "person" : "people"}`,
-		})),
-		...agents.items.map((a) => ({
-			principal: { kind: "agent" as const, id: a.id },
-			name: a.name,
-			detail: "Agent",
-		})),
-	];
+	const choices = grantChoices(members.items, teams.items, agents.items);
 	const names: Directory = new Map(
 		choices.map((c) => [principalKey(c.principal), c.name]),
 	);
@@ -395,14 +379,7 @@ function AllowDialog({
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
-	const q = query.trim().toLowerCase();
-	const shown = choices.filter(
-		(c) =>
-			principalKey(c.principal) === picked ||
-			!q ||
-			c.name.toLowerCase().includes(q) ||
-			c.detail.toLowerCase().includes(q),
-	);
+	const shown = searchChoices(choices, query, picked);
 	const until = new Date(expiresAt(Number(days))).toLocaleDateString([], {
 		weekday: "short",
 		day: "numeric",

@@ -13,7 +13,8 @@
 export type Person = {
 	id: string;
 	name: string;
-	email: string;
+	/** Null for a member who left (core/src/api/org.rs `person`). */
+	email: string | null;
 	avatar_url?: string;
 };
 export type Org = {

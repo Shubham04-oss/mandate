@@ -1,8 +1,11 @@
 import {
+	type Agent,
 	ApiError,
 	type Grant,
 	type GrantPrincipal,
 	type Me,
+	type Person,
+	type Team,
 } from "#/lib/api/index.ts";
 
 /**
@@ -70,6 +73,54 @@ export const principalKey = (p: GrantPrincipal) => `${p.kind}:${p.id}`;
 
 export function principalName(p: GrantPrincipal, names: Directory): string {
 	return names.get(principalKey(p)) ?? p.id;
+}
+
+/** Someone a grant can be for: a person, a team, or an agent. */
+export type Choice = {
+	principal: GrantPrincipal;
+	name: string;
+	detail: string;
+};
+
+export function grantChoices(
+	members: Person[],
+	teams: Team[],
+	agents: Agent[],
+): Choice[] {
+	return [
+		...members.map((p) => ({
+			principal: { kind: "member" as const, id: p.id },
+			name: p.name,
+			// A member who left has no email.
+			detail: p.email ?? "",
+		})),
+		...teams.map((t) => ({
+			principal: { kind: "team" as const, id: t.id },
+			name: t.name,
+			detail: `${t.members} ${t.members === 1 ? "person" : "people"}`,
+		})),
+		...agents.map((a) => ({
+			principal: { kind: "agent" as const, id: a.id },
+			name: a.name,
+			detail: "Agent",
+		})),
+	];
+}
+
+/** The choices matching a search by name or detail; the one already picked always stays. */
+export function searchChoices(
+	choices: Choice[],
+	query: string,
+	picked: string,
+): Choice[] {
+	const q = query.trim().toLowerCase();
+	return choices.filter(
+		(c) =>
+			principalKey(c.principal) === picked ||
+			!q ||
+			(c.name ?? "").toLowerCase().includes(q) ||
+			(c.detail ?? "").toLowerCase().includes(q),
+	);
 }
 
 export const kindLabel: Record<GrantPrincipal["kind"], string> = {

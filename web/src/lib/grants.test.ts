@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { ApiError, type Grant } from "./api/index.ts";
-import { expiresAt, forTool, grantsAccess, principalName } from "./grants.ts";
+import {
+	expiresAt,
+	forTool,
+	grantChoices,
+	grantsAccess,
+	principalName,
+	searchChoices,
+} from "./grants.ts";
 
 describe("the grants admin check", () => {
 	it("shows the controls to admins only", () => {
@@ -60,6 +67,31 @@ describe("forTool", () => {
 			"web.read_page",
 		);
 		expect(list.map((g) => g.id)).toEqual(["soon", "late", "gone"]);
+	});
+});
+
+describe("searching who to allow", () => {
+	const choices = grantChoices(
+		[
+			{ id: "m1", name: "Ada Brennan", email: "ada@northstar.io" },
+			{ id: "m2", name: "m2", email: null },
+		],
+		[{ id: "t1", name: "Platform", members: 3, is_admin: false }],
+		[],
+	);
+	const names = (q: string, picked = "") =>
+		searchChoices(choices, q, picked).map((c) => c.name);
+
+	it("includes a member with no email, without failing", () => {
+		expect(choices.find((c) => c.principal.id === "m2")?.detail).toBe("");
+		expect(names("")).toEqual(["Ada Brennan", "m2", "Platform"]);
+		expect(names("m2")).toEqual(["m2"]);
+	});
+
+	it("matches names and emails, and keeps the one already picked", () => {
+		expect(names("northstar")).toEqual(["Ada Brennan"]);
+		expect(names("plat")).toEqual(["Platform"]);
+		expect(names("zzz", "member:m2")).toEqual(["m2"]);
 	});
 });
 
