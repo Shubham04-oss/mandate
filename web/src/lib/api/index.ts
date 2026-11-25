@@ -37,11 +37,12 @@ export type Me = {
 	is_admin: boolean;
 	teams: TeamRef[];
 };
+/** `kind` and `owner` are null when the agent is gone (core/src/api/agents.rs `agent_view`). */
 export type Agent = {
 	id: string;
 	name: string;
-	kind: "personal" | "team";
-	owner: Person | TeamRef;
+	kind: "personal" | "team" | null;
+	owner: Person | TeamRef | null;
 	enabled: boolean;
 };
 export type ApprovalState =
@@ -55,13 +56,14 @@ export type Approval = {
 	agent: Agent;
 	tool: string;
 	args: Record<string, unknown>;
-	effect: string;
+	/** Null for a tool the core no longer serves (core/src/api/approvals.rs). */
+	effect: "read" | "write" | "external" | "delete" | null;
 	requested_by: Person;
 	requested_at: string;
 	expires_at: string;
 	state: ApprovalState;
-	decided_by?: Person;
-	decided_at?: string;
+	decided_by: Person | null;
+	decided_at: string | null;
 	can_decide: boolean;
 };
 export type Activity = {

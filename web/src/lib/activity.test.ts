@@ -97,4 +97,25 @@ describe("describeApproval", () => {
 			describeApproval(approval("web.read_page", { url: "not a url" })),
 		).toBe("Read a page");
 	});
+
+	it("copes with what the core sends as null: a removed tool and a deleted agent", () => {
+		const gone: Approval = {
+			id: "apv_1",
+			agent: { id: "a9", name: "a9", kind: null, owner: null, enabled: false },
+			tool: "crm.export",
+			args: {},
+			effect: null,
+			requested_by: { id: "m3", name: "m3", email: null },
+			requested_at: "2026-11-25T08:00:00Z",
+			expires_at: "2026-11-25T09:00:00Z",
+			state: "pending",
+			decided_by: null,
+			decided_at: null,
+			can_decide: false,
+		};
+		expect(describeApproval(gone)).toBeTypeOf("string");
+		expect(
+			activityRow(entry({ agent: gone.agent, member: gone.requested_by })),
+		).toMatchObject({ title: expect.stringContaining("a9") });
+	});
 });

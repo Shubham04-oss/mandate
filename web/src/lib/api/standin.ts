@@ -181,6 +181,8 @@ const approvals: Approval[] = [
 		requested_at: minutesAgo(6),
 		expires_at: inMinutes(54),
 		state: "pending",
+		decided_by: null,
+		decided_at: null,
 		can_decide: true,
 	},
 	{
@@ -196,6 +198,8 @@ const approvals: Approval[] = [
 		requested_at: minutesAgo(9),
 		expires_at: inMinutes(51),
 		state: "pending",
+		decided_by: null,
+		decided_at: null,
 		can_decide: true,
 	},
 	{
@@ -208,6 +212,8 @@ const approvals: Approval[] = [
 		requested_at: minutesAgo(12),
 		expires_at: inMinutes(48),
 		state: "pending",
+		decided_by: null,
+		decided_at: null,
 		can_decide: true,
 	},
 ];
@@ -462,6 +468,8 @@ function turn(id: string, message: string) {
 				requested_at: new Date().toISOString(),
 				expires_at: inMinutes(30),
 				state: "pending",
+				decided_by: null,
+				decided_at: null,
 				can_decide: true,
 			};
 			approvals.unshift(approval);
