@@ -7,6 +7,7 @@ import {
 	useSearch,
 } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
+import { toast } from "sonner";
 import { PersonAvatar } from "#/components/auth/parts.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import {
@@ -38,6 +39,7 @@ import {
 import { describeApproval } from "#/lib/activity.ts";
 import { type Approval, api, type Me, type Person } from "#/lib/api/index.ts";
 import { shortcutLabel, useShortcut } from "#/lib/shortcuts.ts";
+import { signOut } from "#/lib/sign-out.ts";
 import {
 	chooseTheme,
 	parseChoice,
@@ -170,19 +172,19 @@ function NeedsTab({ waiting }: { waiting: Approval[] }) {
 	);
 }
 
-/** Signs out on the core, then leaves the app. */
+/** Signs out on the core, then leaves the app; if that fails, says so and stays. */
 function useSignOut() {
 	const navigate = useNavigate();
 	const router = useRouter();
-	return async () => {
-		try {
-			await api.auth.signOut();
-		} finally {
-			// whatever the core said, this browser is done with the session
-			await router.invalidate();
-			await navigate({ to: "/sign-in" });
-		}
-	};
+	return () =>
+		signOut({
+			request: api.auth.signOut,
+			leave: async () => {
+				await router.invalidate();
+				await navigate({ to: "/sign-in" });
+			},
+			report: (message) => toast(message),
+		});
 }
 
 function AccountItems({
