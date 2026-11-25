@@ -125,7 +125,8 @@ export type NewGrant = {
 	expires_at: string;
 	reason?: string;
 };
-export type Invitation = { org: Org; inviter: Person; email: string };
+/** `inviter` is null when no one is named on the invitation (core/src/api/auth.rs). */
+export type Invitation = { org: Org; inviter: Person | null; email: string };
 export type MfaSetup = { qr_svg: string; secret: string; challenge: string };
 
 // ── Sign-in outcomes (4.2) ───────────────────────────────────────────────────────────────────────

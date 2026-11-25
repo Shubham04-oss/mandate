@@ -236,11 +236,17 @@ export function InviteCard({ invitation }: { invitation: Invitation }) {
 				</div>
 			</div>
 			<div className="flex items-center gap-2.5 border-t pt-3 text-[12.5px] text-soft-foreground leading-[1.45]">
-				<PersonAvatar person={inviter} className="size-7" />
-				<span>
-					<b className="text-foreground">{inviter.name}</b> invited{" "}
-					{invitation.email} to join as a member.
-				</span>
+				{inviter ? (
+					<>
+						<PersonAvatar person={inviter} className="size-7" />
+						<span>
+							<b className="text-foreground">{inviter.name}</b> invited{" "}
+							{invitation.email} to join as a member.
+						</span>
+					</>
+				) : (
+					<span>You're invited to {org.name}.</span>
+				)}
 			</div>
 		</Card>
 	);
