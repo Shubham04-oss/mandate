@@ -12,7 +12,8 @@ const apiUrl = import.meta.env.VITE_MANDATE_API_URL ?? "";
 
 /**
  * The Worker's entry: TanStack Start's handler, with a nonce for each page's inline scripts and
- * the security headers on every server-rendered response. public/_headers covers static files only.
+ * the security headers on every server-rendered response. Static files never reach the Worker;
+ * public/_headers gives them nosniff, Referrer-Policy and HSTS.
  */
 export default createServerEntry({
 	async fetch(request, opts) {

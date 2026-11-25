@@ -7,8 +7,10 @@ const origin = `http://localhost:${port}`;
 let preview: ChildProcess;
 
 beforeAll(async () => {
+	// Its own process group, so afterAll stops vite as well as npx and no stale server lingers.
 	preview = spawn("npx", ["vite", "preview", "--port", String(port), "--strictPort"], {
 		stdio: "ignore",
+		detached: true,
 	});
 	for (let i = 0; i < 60; i++) {
 		try {
@@ -22,7 +24,7 @@ beforeAll(async () => {
 }, 40_000);
 
 afterAll(() => {
-	preview?.kill();
+	if (preview?.pid) process.kill(-preview.pid, "SIGTERM");
 });
 
 describe("a server-rendered page", () => {
@@ -48,6 +50,18 @@ describe("a server-rendered page", () => {
 		const scripts = html.match(/<script\b[^>]*>/g) ?? [];
 		expect(scripts.length).toBeGreaterThan(1);
 		for (const tag of scripts) expect(tag).toContain(`nonce="${nonce}"`);
+	});
+
+	it("leaves static files with their security headers too (public/_headers)", async () => {
+		const res = await fetch(`${origin}/favicon.svg`);
+		expect(res.status).toBe(200);
+		expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+		expect(res.headers.get("referrer-policy")).toBe(
+			"strict-origin-when-cross-origin",
+		);
+		expect(res.headers.get("strict-transport-security")).toBe(
+			"max-age=31536000",
+		);
 	});
 
 	it("uses a new nonce for each response", async () => {
