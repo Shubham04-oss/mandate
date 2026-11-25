@@ -227,20 +227,23 @@ back, the job fails, naming the revision still running.
 
 ## 10. The web app
 
-In `web/wrangler.jsonc`, replace `example.com` in the `dev` environment with your domain, then from
-`web/`:
+The `dev` environment in `web/wrangler.jsonc` serves the app on `app.oryxa.in`. From the repository
+root:
 
 ```sh
-npm ci
-CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.<domain> npm run build
-npx wrangler deploy
+cd web && npm ci && CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.oryxa.in npm run build && npx wrangler deploy --env dev
 ```
 
-Wrangler creates the `app.<domain>` custom domain. Both values are fixed when the app is built:
-Cloudflare's Vite plugin picks the `dev` environment at build time (`--env` on `wrangler deploy` is
-ignored for this build), and the core's address is compiled into the browser code. A build without
-`VITE_MANDATE_API_URL` fails on purpose, so a deployed app never shows the made-up stand-in data
-used in `npm run dev`.
+Wrangler creates the `app.oryxa.in` custom domain; the Worker has no `workers.dev` address or
+preview URLs. Both values are fixed when the app is built:
+
+- `CLOUDFLARE_ENV=dev` picks the environment. Cloudflare's Vite plugin applies it at build time;
+  without it, `--env dev` on `wrangler deploy` is ignored and the top-level Worker (`mandate-web`,
+  no route) is deployed. With it, `--env dev` is a check: Wrangler refuses an `--env` that doesn't
+  match the build.
+- `VITE_MANDATE_API_URL` is compiled into the browser code and the page's Content-Security-Policy.
+  A build without it fails on purpose, so a deployed app never shows the made-up stand-in data
+  used in `npm run dev`.
 
 ## 11. Check
 

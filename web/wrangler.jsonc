@@ -7,17 +7,15 @@
   // Served only on its own domain: no *.workers.dev address and no preview URLs.
   "workers_dev": false,
   "preview_urls": false,
-  // AWS dev (docs/deploy.md, the web app). Replace example.com with the Cloudflare zone's domain,
-  // then from web/:
-  //   CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.<domain> npm run build
-  //   npx wrangler deploy
+  // AWS dev (docs/deploy.md, the web app), from web/:
+  //   CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.oryxa.in npm run build && npx wrangler deploy --env dev
   // Both are fixed at build time: Cloudflare's Vite plugin picks the environment when it builds
-  // (`--env` at deploy is ignored), and the core's address is compiled into the browser code, which
-  // never sees Worker vars. Nothing on the server side reads the core's address.
+  // (without CLOUDFLARE_ENV, `--env dev` at deploy is ignored and the top-level Worker goes out),
+  // and the core's address is compiled into the browser code and the CSP's connect-src.
   "env": {
     "dev": {
       "name": "mandate-web-dev",
-      "routes": [{ "pattern": "app.example.com", "custom_domain": true }]
+      "routes": [{ "pattern": "app.oryxa.in", "custom_domain": true }]
     }
   }
 }
