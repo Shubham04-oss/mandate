@@ -1213,9 +1213,12 @@ async fn ask_emits_approval_wait_with_the_approval() {
             .await
             .unwrap();
     assert_eq!((by.as_str(), approved), ("ann", None));
+    // The ask names its approval, so Activity can show how it ended.
     let asks: i64 = sqlx::query_scalar(
-        "select count(*) from audit where decision = 'ask' and tool = 'web.submit_form'",
+        "select count(*) from audit where decision = 'ask' and tool = 'web.submit_form' \
+         and approval_id = $1",
     )
+    .bind(approval)
     .fetch_one(&mut *tx)
     .await
     .unwrap();
