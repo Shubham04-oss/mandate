@@ -41,7 +41,7 @@ export function useSignIn() {
 
 	/** Leaves for the identity provider, but only for an https address. */
 	const goToProvider = (raw: string) => {
-		const url = providerUrl(raw, window.location.origin, import.meta.env.DEV);
+		const url = providerUrl(raw, import.meta.env.DEV);
 		if (!url) {
 			setError(
 				"Single sign-on gave an address oryxa won't open. Ask your admin to check it.",

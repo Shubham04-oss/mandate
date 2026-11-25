@@ -78,17 +78,15 @@ export function planOutcome(outcome: SignInOutcome, email?: string): Plan {
 }
 
 /**
- * The identity provider's address from single sign-on, only if it is https. In dev, http on
- * localhost passes too, for the stand-ins. Anything else (javascript:, http:, data:) is null.
+ * The identity provider's address from single sign-on, only if it is a full https address. In dev,
+ * http on localhost passes too, for the stand-ins. Anything else (javascript:, http:, data:, a
+ * relative path, something that isn't an address) is null.
  */
-export function providerUrl(
-	raw: string,
-	base: string,
-	dev: boolean,
-): string | null {
+export function providerUrl(raw: string, dev: boolean): string | null {
 	let url: URL;
 	try {
-		url = new URL(raw, base);
+		// No base: a relative or malformed value is refused, never resolved against the app.
+		url = new URL(raw);
 	} catch {
 		return null;
 	}

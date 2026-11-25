@@ -77,28 +77,32 @@ describe("planOutcome", () => {
 });
 
 describe("providerUrl", () => {
-	const app = "https://app.oryxa.in";
-
-	it("opens an https identity provider", () => {
-		expect(providerUrl("https://login.northstar.io/sso?x=1", app, false)).toBe(
+	it("opens a full https identity provider address", () => {
+		expect(providerUrl("https://login.northstar.io/sso?x=1", false)).toBe(
 			"https://login.northstar.io/sso?x=1",
 		);
 	});
 
 	it("refuses javascript:, http: and data: addresses", () => {
-		expect(providerUrl("javascript:alert(1)", app, false)).toBeNull();
-		expect(providerUrl("JavaScript:alert(1)", app, true)).toBeNull();
-		expect(providerUrl("http://login.northstar.io/sso", app, false)).toBeNull();
-		expect(providerUrl("http://login.northstar.io/sso", app, true)).toBeNull();
-		expect(providerUrl("data:text/html,hi", app, false)).toBeNull();
+		expect(providerUrl("javascript:alert(1)", false)).toBeNull();
+		expect(providerUrl("JavaScript:alert(1)", true)).toBeNull();
+		expect(providerUrl("http://login.northstar.io/sso", false)).toBeNull();
+		expect(providerUrl("http://login.northstar.io/sso", true)).toBeNull();
+		expect(providerUrl("data:text/html,hi", false)).toBeNull();
+	});
+
+	it("refuses what isn't a full address, instead of opening a page of the app", () => {
+		expect(providerUrl("not a url", false)).toBeNull();
+		expect(providerUrl("/relative", false)).toBeNull();
+		expect(providerUrl("/relative", true)).toBeNull();
+		expect(providerUrl("//evil.example/sso", false)).toBeNull();
+		expect(providerUrl("", false)).toBeNull();
 	});
 
 	it("lets the stand-ins use http on localhost, in dev only", () => {
-		const local = "http://localhost:3000";
-		expect(providerUrl("/sign-in?standin=sso", local, true)).toBe(
-			"http://localhost:3000/sign-in?standin=sso",
-		);
-		expect(providerUrl("/sign-in?standin=sso", local, false)).toBeNull();
+		const local = "http://localhost:3000/sign-in?standin=sso";
+		expect(providerUrl(local, true)).toBe(local);
+		expect(providerUrl(local, false)).toBeNull();
 	});
 });
 

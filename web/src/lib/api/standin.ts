@@ -293,6 +293,10 @@ const activity: Activity[] = [
 const sessionKey = "mandate.standin.session";
 const store = () =>
 	typeof window === "undefined" ? null : window.sessionStorage;
+
+// The core sends the identity provider's full address; here it is the app itself, in full.
+const here = (path: string) =>
+	new URL(path, globalThis.location?.origin ?? "http://localhost:3000").href;
 // The session remembers which organization it signed in to, as the core's session does.
 const sessionOrg = (): Org | null => {
 	const id = store()?.getItem(sessionKey);
@@ -343,7 +347,9 @@ const outcomeFor = (email: string): Response => {
 		case "verify":
 			return next("verify_email");
 		case "sso":
-			return next("sso_required", { redirect_url: "/sign-in?standin=sso" });
+			return next("sso_required", {
+				redirect_url: here("/sign-in?standin=sso"),
+			});
 		case "method":
 			return next("method_required", { methods: ["sso", "magic_auth"] });
 		case "member":
@@ -734,7 +740,7 @@ const routes: [Method, RegExp, Handler][] = [
 				);
 			}
 			setSession(northstar); // the identity provider would send them back signed in
-			return json(200, { redirect_url: "/" });
+			return json(200, { redirect_url: here("/") });
 		},
 	],
 	[
