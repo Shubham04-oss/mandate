@@ -754,7 +754,8 @@ async fn ask(
             args_hash: hash,
             decision: "ask".into(),
             reason: None,
-            approval_id: None,
+            // Names the approval it opened, so Activity can show how the ask ended.
+            approval_id: Some(approval),
             approved_by: None,
         },
     )
