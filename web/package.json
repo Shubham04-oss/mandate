@@ -13,7 +13,7 @@
     "format": "biome format",
     "lint": "biome lint",
     "check": "biome check",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.oryxa.in npm run build && wrangler deploy --env dev",
     "test": "vitest run",
     "test:dist": "vitest run --config vitest.dist.config.ts"
   },
