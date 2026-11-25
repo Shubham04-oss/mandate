@@ -492,6 +492,23 @@ impl Harness {
         }
         panic!("conversation never settled");
     }
+
+    /// Waits for the tenant's outbox to hold `n` events; returns their types in publish order.
+    /// Idle only means the turn settled: `conversation.finished.v1` follows when eve ends the session.
+    async fn outbox_kinds(&self, t: &TenantId, n: usize) -> Vec<String> {
+        for _ in 0..200 {
+            let kinds: Vec<String> = outbox(&self.store, t)
+                .await
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            if kinds.len() >= n {
+                return kinds;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the outbox never held {n} events");
+    }
 }
 
 async fn call(app: &Who, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -727,15 +744,11 @@ async fn events_stream_as_sse() {
     );
     h.settle(&t, &id).await;
     assert_eq!(h.state(&t, &id).await, "idle");
-    let kinds: Vec<String> = outbox(&h.store, &t)
-        .await
-        .into_iter()
-        .map(|(k, _)| k)
-        .collect();
     assert_eq!(
-        kinds,
+        h.outbox_kinds(&t, 2).await,
         vec!["conversation.started.v1", "conversation.finished.v1"]
     );
+    assert_eq!(h.state(&t, &id).await, "idle");
 }
 
 #[tokio::test]
