@@ -5,9 +5,16 @@ import { toast } from "sonner";
 import { ActivityPanel } from "#/components/agent/activity-panel.tsx";
 import { AgentText } from "#/components/agent/agent-text.tsx";
 import { Composer } from "#/components/agent/composer.tsx";
-import { StateMark, StatusMark } from "#/components/agent/marks.tsx";
+import { StateMark } from "#/components/agent/marks.tsx";
 import { useStartConversation } from "#/components/agent/use-start-conversation.ts";
 import { Icon } from "#/components/icons/icon.tsx";
+import { StatusMark } from "#/components/icons/status-mark.tsx";
+import {
+	Alert,
+	AlertDescription,
+	AlertTitle,
+	alertVariants,
+} from "#/components/ui/alert.tsx";
 import { Button, buttonVariants } from "#/components/ui/button.tsx";
 import {
 	DropdownMenu,
@@ -114,9 +121,13 @@ export function ConversationView({
 							</p>
 						) : null}
 						{lost ? (
-							<output className="m-0 block text-[13px] text-muted-foreground leading-normal">
-								Lost touch with your agent. It tries again when you send a
-								message or come back to this page.
+							<output className={alertVariants()}>
+								<StatusMark mark="lost" size={18} />
+								<AlertTitle>Lost touch with your agent</AlertTitle>
+								<AlertDescription>
+									It tries again when you send a message or come back to this
+									page.
+								</AlertDescription>
 							</output>
 						) : null}
 						<div ref={end} />
@@ -158,23 +169,24 @@ function LineView({ line, failed }: { line: Line; failed: boolean }) {
 		);
 	if (line.kind === "error")
 		return (
-			<p
-				role="alert"
-				className="m-0 rounded-[14px] bg-destructive/12 px-4 py-3 text-[13px] text-soft-foreground leading-normal"
-			>
-				<b className="font-semibold text-foreground">
+			<Alert variant="destructive">
+				<StatusMark mark="error" size={18} />
+				<AlertTitle>
 					{failed
 						? "Your agent couldn't start on this."
 						: "Your agent couldn't finish."}
-				</b>{" "}
-				{line.text}
-			</p>
+				</AlertTitle>
+				<AlertDescription>{line.text}</AlertDescription>
+			</Alert>
 		);
 	if (line.text === WITHHELD)
 		return (
-			<p className="m-0 rounded-[12px] bg-hover px-3 py-2.5 text-[13px] text-muted-foreground leading-normal">
-				A message was held back by the safety check.
-			</p>
+			<div className={alertVariants()}>
+				<StatusMark mark="info" size={18} className="text-muted-foreground" />
+				<AlertDescription>
+					A message was held back by the safety check.
+				</AlertDescription>
+			</div>
 		);
 	return <AgentText text={line.text} />;
 }

@@ -8,9 +8,9 @@ import {
 } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
-import { StatusMark } from "#/components/agent/marks.tsx";
 import { PersonAvatar } from "#/components/auth/parts.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
+import { StatusMark } from "#/components/icons/status-mark.tsx";
 import {
 	SettingsDialog,
 	type SettingsSection,

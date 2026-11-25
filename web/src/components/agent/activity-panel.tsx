@@ -1,6 +1,6 @@
 import { useRouter } from "@tanstack/react-router";
 import { useState } from "react";
-import { StatusMark } from "#/components/agent/marks.tsx";
+import { StatusMark } from "#/components/icons/status-mark.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import { ApiError, type Approval, api } from "#/lib/api/index.ts";
 import { type Step, stepLabel, toolTitle } from "#/lib/conversation.ts";

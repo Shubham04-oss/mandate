@@ -142,13 +142,13 @@ function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
 	);
 }
 
-/** A small raised tile for an icon or an avatar, at the top of the body. */
+/** An icon or an avatar at the top of the body, bare. */
 function DialogIcon({ className, ...props }: React.ComponentProps<"span">) {
 	return (
 		<span
 			data-slot="dialog-icon"
 			className={cn(
-				"grid size-10 shrink-0 place-items-center rounded-lg bg-raised shadow-icon [&_img]:size-6 [&_img]:rounded-full [&_svg:not([class*='size-'])]:size-[18px]",
+				"grid size-10 shrink-0 place-items-center [&_img]:size-6 [&_img]:rounded-full [&_svg:not([class*='size-'])]:size-[18px]",
 				className,
 			)}
 			{...props}

@@ -93,7 +93,7 @@ function AlertDialogMedia({
 		<div
 			data-slot="alert-dialog-media"
 			className={cn(
-				"grid size-10 place-items-center rounded-lg bg-raised shadow-icon *:[svg:not([class*='size-'])]:size-[18px]",
+				"grid size-10 place-items-center *:[svg:not([class*='size-'])]:size-[18px]",
 				className,
 			)}
 			{...props}
