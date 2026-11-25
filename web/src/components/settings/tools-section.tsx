@@ -496,7 +496,7 @@ function AllowDialog({
 								aria-labelledby="grant-days"
 								value={days}
 								onValueChange={(v) => setDays(String(v))}
-								className="grid grid-cols-4 gap-1 rounded-full bg-hover p-1"
+								className="rim grid grid-cols-4 gap-1 rounded-full bg-hover p-1"
 							>
 								{expiryChoices.map((d) => (
 									// biome-ignore lint/a11y/noLabelWithoutControl: the radio inside is the control

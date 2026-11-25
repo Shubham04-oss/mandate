@@ -11,7 +11,7 @@ export function ActivityPanel({ steps }: { steps: Step[] }) {
 	return (
 		<aside
 			aria-labelledby="work-h"
-			className="mt-11 flex min-w-0 flex-[1_1_300px] flex-col gap-5 self-start rounded-[14px] bg-raised p-[22px] shadow-[inset_0_0_0_1px_var(--border-quiet)] lg:sticky lg:top-12 lg:max-w-[380px]"
+			className="mt-11 flex min-w-0 flex-[1_1_300px] flex-col gap-5 self-start rim rounded-window bg-raised p-[22px] lg:sticky lg:top-12 lg:max-w-[380px]"
 		>
 			<h2 id="work-h" className="eyebrow">
 				What your agent did
