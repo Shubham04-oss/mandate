@@ -4,6 +4,9 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
   "main": "./src/server.ts",
+  // Served only on its own domain: no *.workers.dev address and no preview URLs.
+  "workers_dev": false,
+  "preview_urls": false,
   // AWS dev (docs/deploy.md, the web app). Replace example.com with the Cloudflare zone's domain,
   // then from web/:
   //   CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.<domain> npm run build
