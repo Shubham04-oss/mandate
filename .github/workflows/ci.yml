@@ -81,6 +81,8 @@ jobs:
       - run: npm run build
         env:
           VITE_MANDATE_API_URL: https://api.example.com
+      # Serves that build in the Worker runtime and checks a rendered page's headers and nonces.
+      - run: npm run test:dist
 
   infra:
     runs-on: ubuntu-latest

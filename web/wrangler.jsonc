@@ -3,7 +3,7 @@
   "name": "mandate-web",
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
-  "main": "@tanstack/react-start/server-entry",
+  "main": "./src/server.ts",
   // AWS dev (docs/deploy.md, the web app). Replace example.com with the Cloudflare zone's domain,
   // then from web/:
   //   CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.<domain> npm run build

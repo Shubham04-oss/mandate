@@ -14,6 +14,11 @@ const config = defineConfig(({ command, mode }) => {
 	});
 	return {
 		resolve: { tsconfigPaths: true },
+		// Fonts stay files: the CSP's font-src is 'self', which refuses data: URLs.
+		build: {
+			assetsInlineLimit: (file: string) =>
+				/\.(woff2?|ttf|otf)$/.test(file) ? false : undefined,
+		},
 		plugins: [
 			devtools(),
 			cloudflare({ viteEnvironment: { name: "ssr" } }),

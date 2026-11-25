@@ -14,7 +14,8 @@
     "lint": "biome lint",
     "check": "biome check",
     "deploy": "npm run build && wrangler deploy",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:dist": "vitest run --config vitest.dist.config.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
