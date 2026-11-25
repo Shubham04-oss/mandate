@@ -97,8 +97,9 @@ endpoints), so it could pull from ECR Public directly; it still pulls a mirror f
 repository, so the image that holds the master password comes from this account. Copy the
 official `postgres:17-alpine` linux/amd64 image, by the digest `ecs.tf` pins
 (`db_bootstrap_image_digest`), into the core repository once. A single-manifest
-`imagetools create` copies it unchanged, so the digest stays the same; if it ever differed, the task
-would fail to pull rather than run something else.
+`imagetools create` stores that manifest unchanged, but it may wrap it in a new index, so the tag's
+own digest can differ. The task pulls by the pinned manifest digest, so check that digest is in the
+repository; if it is missing, the task fails to pull rather than run something else.
 
 ```sh
 REGISTRY=$ACCOUNT.dkr.ecr.ap-south-1.amazonaws.com
@@ -106,11 +107,11 @@ DIGEST=sha256:e80acae3f1109e8e4533618b594918936f2858c63afc7204c4773148a673add8  
 aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
 docker buildx imagetools create --tag "$REGISTRY/mandate-dev/core:db-bootstrap-postgres-17.12" \
   "public.ecr.aws/docker/library/postgres@$DIGEST"
-docker buildx imagetools inspect "$REGISTRY/mandate-dev/core:db-bootstrap-postgres-17.12" | grep Digest   # = $DIGEST
+aws ecr describe-images --repository-name mandate-dev/core --image-ids imageDigest=$DIGEST   # must find it
 ```
 
-Tags are immutable, so `imagetools create` fails if the tag already exists: if `inspect` shows the
-pinned digest there, the mirror is already done; otherwise use a new tag. The repository's lifecycle
+Tags are immutable, so `imagetools create` fails if the tag already exists: if `describe-images`
+finds the pinned digest, the mirror is already done; otherwise use a new tag. The repository's lifecycle
 policy keeps the last two `db-bootstrap-*` images apart from the deploy images. The deploy role can
 push to this repository and so could evict the mirror (a denial of service only: the digest pin
 stops a substitute from running); mirror it again if a pull fails. To move to a newer postgres,
