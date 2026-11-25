@@ -8,14 +8,16 @@ data.
 
 - `src/lib/sample.ts`: Ada Brennan, Raya Patel and Northstar, for the pop-up preview only.
 - `src/routes/preview.popups.tsx`: the team Platform, Kenji Sato, `maria@northwind.de`, and the
-  "Q3 revenue figures" request. Outside `npm run dev` the page is not found.
+  "Q3 revenue figures" request. A production build swaps it for a stub that is not found
+  (`vite.config.ts`).
 - `src/lib/api/standin.ts`: the stand-in API responses (below): the same people and organizations
   (also Harbourline and Tidewater Labs), plus made-up agents, approvals, conversations, grants and
   activity, and the two-step sign-in QR code and key.
-- `public/avatars/` and `public/sample/`: the avatar drawings and the QR code image.
+- `src/dev/`: the avatar drawings and the QR code, imported only by the stand-ins and the preview.
 
-None of it reaches a real screen: a production build has no stand-ins, and every screen gets its
-data from the core.
+None of it reaches a production build: the stand-ins load only in dev, the preview is a stub, and
+nothing here is in `public/`. After `VITE_MANDATE_API_URL=https://api.oryxa.in npm run build`,
+`dist` has no stand-in, sample, avatar or preview files.
 
 ## Talking to the core
 

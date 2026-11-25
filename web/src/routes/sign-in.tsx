@@ -60,7 +60,7 @@ function SignIn() {
 			scene="bay"
 			sceneCard={
 				<SceneCard
-					avatar="/avatars/agent.svg"
+					avatar="/favicon.svg"
 					title="Your agent"
 					line="Asks you before it changes anything"
 				/>

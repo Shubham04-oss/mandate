@@ -15,6 +15,14 @@
  * Conversations: an ask reads a page and answers; one that mentions a form or filling something in
  * then waits for approval; one with "fail" in it fails as the core does when the agent can't start.
  */
+
+// Imported, not in public/, so they ship only with the stand-ins, which only dev loads.
+import adaAvatar from "#/dev/avatars/ada.svg?url";
+import memberAvatar from "#/dev/avatars/member.svg?url";
+import priyaAvatar from "#/dev/avatars/priya.svg?url";
+import rayaAvatar from "#/dev/avatars/raya.svg?url";
+import rohanAvatar from "#/dev/avatars/rohan.svg?url";
+import mfaQr from "#/dev/mfa-qr.svg?raw";
 import type {
 	Activity,
 	Agent,
@@ -63,35 +71,25 @@ const person = (
 	avatar_url: avatar,
 });
 
-const ada = person(
-	"mem_ada",
-	"Ada Brennan",
-	"ada@northstar.io",
-	"/avatars/ada.svg",
-);
+const ada = person("mem_ada", "Ada Brennan", "ada@northstar.io", adaAvatar);
 const priya = person(
 	"mem_priya",
 	"Priya Shah",
 	"priya@northstar.io",
-	"/avatars/priya.svg",
+	priyaAvatar,
 );
 const rohan = person(
 	"mem_rohan",
 	"Rohan Mehta",
 	"rohan@northstar.io",
-	"/avatars/rohan.svg",
+	rohanAvatar,
 );
-const raya = person(
-	"mem_raya",
-	"Raya Patel",
-	"raya@northstar.io",
-	"/avatars/raya.svg",
-);
+const raya = person("mem_raya", "Raya Patel", "raya@northstar.io", rayaAvatar);
 const kenji = person(
 	"mem_kenji",
 	"Kenji Sato",
 	"kenji@northstar.io",
-	"/avatars/member.svg",
+	memberAvatar,
 );
 const people = [ada, priya, rohan, raya, kenji];
 
@@ -691,12 +689,9 @@ const routes: [Method, RegExp, Handler][] = [
 	[
 		"POST",
 		/^\/v1\/auth\/mfa\/setup$/,
-		async () => {
-			const qr = await fetch("/sample/mfa-qr.svg")
-				.then((r) => r.text())
-				.catch(() => "");
+		() => {
 			return json(200, {
-				qr_svg: qr,
+				qr_svg: mfaQr,
 				secret: "JBSWY3DPEHPK3PXP",
 				challenge: "chl_standin",
 			});

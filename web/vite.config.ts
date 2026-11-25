@@ -1,10 +1,37 @@
+import { resolve } from "node:path";
 import { cloudflare } from "@cloudflare/vite-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import { devtools } from "@tanstack/devtools-vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 import { checkApiUrl } from "./src/lib/api/api-url.ts";
+
+// Design previews with made-up people; dev only.
+const previewRoutes = [resolve("src/routes/preview.popups.tsx")];
+
+/**
+ * A production build gets a stub for each preview route: the route tree stays as committed, the
+ * page is not found, and the preview, its sample people and their pictures never reach the bundle.
+ */
+function stubPreviewsInBuild(): Plugin {
+	return {
+		name: "oryxa:stub-previews",
+		apply: "build",
+		enforce: "pre",
+		load(id) {
+			if (!previewRoutes.includes(id)) return;
+			return [
+				'import { createFileRoute, notFound } from "@tanstack/react-router";',
+				'export const Route = createFileRoute("/preview/popups")({',
+				"\tbeforeLoad: () => {",
+				"\t\tthrow notFound();",
+				"\t},",
+				"});",
+			].join("\n");
+		},
+	};
+}
 
 const config = defineConfig(({ command, mode }) => {
 	// A production build must name the core, so a deployed app never answers from stand-ins.
@@ -20,6 +47,7 @@ const config = defineConfig(({ command, mode }) => {
 				/\.(woff2?|ttf|otf)$/.test(file) ? false : undefined,
 		},
 		plugins: [
+			stubPreviewsInBuild(),
 			devtools(),
 			cloudflare({ viteEnvironment: { name: "ssr" } }),
 			tailwindcss(),

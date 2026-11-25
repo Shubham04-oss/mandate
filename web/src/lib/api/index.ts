@@ -272,17 +272,17 @@ async function call<T>(
 	body?: unknown,
 ): Promise<T> {
 	if (!apiBaseUrl) {
-		// Never reached in a production build: the build fails without the URL, and DEV is false.
-		if (!import.meta.env.DEV) {
-			throw new ApiError(
-				"unreachable",
-				"oryxa isn't set up to reach its server.",
-				0,
-			);
+		// Loaded on demand inside the DEV branch, so a production bundle never carries the stand-ins.
+		if (import.meta.env.DEV) {
+			const { standIn } = await import("#/lib/api/standin.ts");
+			return readResponse<T>(await standIn(method, path, body));
 		}
-		// Loaded on demand, so a production bundle doesn't carry the stand-ins or their sample people.
-		const { standIn } = await import("#/lib/api/standin.ts");
-		return readResponse<T>(await standIn(method, path, body));
+		// Never reached in a production build: the build fails without the URL.
+		throw new ApiError(
+			"unreachable",
+			"oryxa isn't set up to reach its server.",
+			0,
+		);
 	}
 	let res: Response;
 	try {

@@ -198,6 +198,15 @@ export class ConversationStream {
 	}
 }
 
+/** A source that never opens, for a build with no core to reach. */
+const nowhere: EventSourceLike = {
+	readyState: 2,
+	onopen: null,
+	onerror: null,
+	addEventListener() {},
+	close() {},
+};
+
 /** The browser's EventSource with the session cookie; stand-ins in dev, where there's no core. */
 const connectToCore: Connect = async (id) => {
 	const url = conversationEventsUrl(id);
@@ -206,8 +215,12 @@ const connectToCore: Connect = async (id) => {
 		return new EventSource(url, {
 			withCredentials: true,
 		}) as unknown as EventSourceLike;
-	const { standInEvents } = await import("#/lib/api/standin.ts");
-	return standInEvents(id);
+	// Inside the DEV branch, so a production bundle never carries the stand-ins.
+	if (import.meta.env.DEV) {
+		const { standInEvents } = await import("#/lib/api/standin.ts");
+		return standInEvents(id);
+	}
+	return nowhere;
 };
 
 // At most one stream per conversation: the core allows five per person.

@@ -253,7 +253,7 @@ function InviteDialog() {
 							className="h-[26px] gap-1.5 rounded-full bg-muted pr-2 pl-[3px] text-[12px]"
 						>
 							<Avatar className="size-5">
-								<AvatarImage src="/avatars/member.svg" alt="" />
+								<AvatarImage src={sample.member.avatar} alt="" />
 							</Avatar>
 							Kenji Sato
 						</Badge>
