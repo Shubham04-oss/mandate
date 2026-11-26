@@ -28,8 +28,6 @@ import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
 import {
 	checkPassword,
-	maxName,
-	maxPassword,
 	minPassword,
 	type SignUpField,
 	signUpProblems,
@@ -99,7 +97,6 @@ function SignUp() {
 						autoComplete="name"
 						autoFocus
 						required
-						maxLength={maxName}
 						placeholder="First and last name"
 						aria-invalid={problems.name ? true : undefined}
 						aria-describedby={describedBy("name")}
@@ -131,7 +128,6 @@ function SignUp() {
 						name="org"
 						autoComplete="organization"
 						required
-						maxLength={maxName}
 						placeholder="Your company"
 						aria-invalid={problems.org ? true : undefined}
 						aria-describedby={describedBy("org", "org-hint")}
@@ -151,7 +147,6 @@ function SignUp() {
 						autoComplete="new-password"
 						required
 						minLength={minPassword}
-						maxLength={maxPassword}
 						aria-invalid={problems.password ? true : undefined}
 						aria-describedby={describedBy(
 							"password",

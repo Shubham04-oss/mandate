@@ -45,18 +45,13 @@ export function checkPassword(pw: string) {
 /**
  * Why sign-up would refuse this password, checked before sending: the core answers a refused password
  * like an existing account (a code that never arrives), so the person must hear it here.
- * ponytail: WorkOS also rejects breached and low-zxcvbn passwords; two of mixed case, numbers and symbols
- * (or 16+ characters) only approximates that, and the verify screen links back here for the rest.
+ * ponytail: only the core's length bounds are enforced; WorkOS also rejects breached and low-zxcvbn passwords,
+ * which the browser can't check, so the verify screen links back here for those.
  */
 export function passwordProblem(pw: string): string | null {
 	const length = [...pw].length;
 	if (length < minPassword) return `Use at least ${minPassword} characters.`;
 	if (length > maxPassword) return `Use at most ${maxPassword} characters.`;
-	const kinds = passwordRules.filter(
-		(r) => r.key !== "length" && r.test(pw),
-	).length;
-	if (kinds < 2 && length < 16)
-		return "Mix upper and lowercase letters, numbers and symbols, or make it 16 characters or more.";
 	return null;
 }
 

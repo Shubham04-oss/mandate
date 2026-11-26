@@ -60,11 +60,8 @@ describe("passwordProblem", () => {
 		);
 	});
 
-	it("refuses one kind of character unless it is long", () => {
-		expect(passwordProblem("abcdefghijkl")).toMatch(/^Mix/);
-		expect(passwordProblem("Abcdefghijkl")).toMatch(/^Mix/);
-		expect(passwordProblem("Abcdefghijk1")).toBeNull();
-		expect(passwordProblem("correct horse battery")).toBeNull();
+	it("adds no character-kind rule the core doesn't have", () => {
+		expect(passwordProblem("qmxzvbtrplwk")).toBeNull();
 	});
 
 	it("holds the core's 256-character cap", () => {
