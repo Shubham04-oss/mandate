@@ -1363,7 +1363,8 @@ async fn org_selection_returns_choose_org_with_orgs() {
 
 #[tokio::test]
 #[ignore]
-async fn org_picker_counts_people_and_agents() {
+/// The picker comes before sign-in finishes (MFA may follow), so it must not read tenant data.
+async fn org_picker_reveals_no_counts() {
     let h = Harness::new().await;
     let u = h.user("member");
     let first = u.memberships[0].org.clone();
@@ -1404,8 +1405,7 @@ async fn org_picker_counts_people_and_agents() {
     assert_eq!(v["next"], "choose_org", "{v}");
     let orgs = v["orgs"].as_array().unwrap();
     assert_eq!(orgs[0]["id"], tenant.as_str());
-    assert_eq!(orgs[0]["summary"], json!({ "people": 2, "agents": 1 }));
-    assert_eq!(orgs[1]["summary"], json!({ "people": 0, "agents": 0 }));
+    assert_eq!(orgs[0]["summary"], json!({ "people": 0, "agents": 0 }));
 }
 
 #[tokio::test]

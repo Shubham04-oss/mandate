@@ -1376,15 +1376,11 @@ async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, 
             json!({ "user": user }),
         ),
         Step::ChooseOrg { token, orgs } => {
-            let mut shown = Vec::with_capacity(orgs.len());
-            for o in &orgs {
-                shown.push(org_json(
-                    &slug(&o.id),
-                    &o.name,
-                    org_summary(s, &o.id).await?,
-                ));
-            }
-            body["orgs"] = Value::Array(shown);
+            // No counts: sign-in hasn't finished (MFA may follow), so no tenant data is read yet.
+            body["orgs"] = orgs
+                .iter()
+                .map(|o| org_json(&slug(&o.id), &o.name, (0, 0)))
+                .collect();
             let offered: Vec<Value> = orgs
                 .iter()
                 .map(|o| json!({ "id": o.id, "name": o.name }))
@@ -1427,27 +1423,6 @@ async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, 
     body["next"] = json!(next);
     body["pending"] = json!(pending);
     Ok(axum::Json(body).into_response())
-}
-
-/// People and agents in an org WorkOS offered, read in its own tenant; none before its tenant exists.
-async fn org_summary(s: &ApiState, org: &str) -> Result<(i64, i64), ApiError> {
-    let Some(tenant) = s.store.tenant_for_org(org).await? else {
-        return Ok((0, 0));
-    };
-    let mut tx = s.store.begin(&tenant).await?;
-    let counts = summary(&mut tx).await?;
-    tx.commit().await?;
-    Ok(counts)
-}
-
-/// People and enabled agents in the transaction's tenant.
-async fn summary(tx: &mut Tx) -> Result<(i64, i64), StoreError> {
-    Ok(sqlx::query_as(
-        "select (select count(*) from members where tenant_id = current_setting('mandate.tenant', true)), \
-                (select count(*) from agents where tenant_id = current_setting('mandate.tenant', true) and not disabled)",
-    )
-    .fetch_one(&mut **tx)
-    .await?)
 }
 
 /// WorkOS proved the person: map the org to its tenant, the user to a member, and sign in.
@@ -1577,7 +1552,12 @@ pub(crate) async fn me(
     is_admin: bool,
     profile: &Value,
 ) -> Result<Value, StoreError> {
-    let (people, agents) = summary(tx).await?;
+    let (people, agents): (i64, i64) = sqlx::query_as(
+        "select (select count(*) from members where tenant_id = current_setting('mandate.tenant', true)), \
+                (select count(*) from agents where tenant_id = current_setting('mandate.tenant', true) and not disabled)",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
     let teams: Vec<String> = sqlx::query_scalar(
         "select team_id from team_members where tenant_id = current_setting('mandate.tenant', true) \
          and member_id = $1 order by team_id",
