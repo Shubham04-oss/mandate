@@ -65,6 +65,8 @@ export type Approval = {
 	decided_by: Person | null;
 	decided_at: string | null;
 	can_decide: boolean;
+	/** The conversation that asked, or null (an ask from outside a conversation). */
+	conversation: string | null;
 };
 export type Activity = {
 	id: string;

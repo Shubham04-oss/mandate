@@ -53,12 +53,9 @@ export function Decide({
 			void router.invalidate();
 		} catch (e) {
 			setBusy(false);
+			// The core's 409 says why: already decided, expired, or the agent is disabled.
 			setError(
-				e instanceof ApiError && e.code === "conflict"
-					? "Someone already decided this."
-					: e instanceof ApiError
-						? e.message
-						: "Something went wrong. Try again.",
+				e instanceof ApiError ? e.message : "Something went wrong. Try again.",
 			);
 		}
 	};

@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { Decide } from "#/components/agent/decide.tsx";
 import { StatusMark } from "#/components/icons/status-mark.tsx";
@@ -6,7 +7,14 @@ import type { Approval } from "#/lib/api/index.ts";
 import { clock, formatTime, formatWhen, usePref } from "#/lib/preferences.ts";
 
 /** Everything waiting: what the person can decide, and their own requests waiting on someone else. */
-export function ApprovalList({ approvals }: { approvals: Approval[] }) {
+export function ApprovalList({
+	approvals,
+	me,
+}: {
+	approvals: Approval[];
+	/** The signed-in person's id: only the asker can open the conversation (the core 404s others). */
+	me: string;
+}) {
 	const heading = useRef<HTMLHeadingElement>(null);
 	const cards = useRef(new Map<string, HTMLLIElement>());
 	// Where the decided card was, until the reloaded list has dropped it.
@@ -47,6 +55,7 @@ export function ApprovalList({ approvals }: { approvals: Approval[] }) {
 							<ApprovalCard
 								key={a.id}
 								approval={a}
+								mine={a.requested_by.id === me}
 								cardRef={(el) => {
 									if (el) cards.current.set(a.id, el);
 									else cards.current.delete(a.id);
@@ -64,13 +73,14 @@ export function ApprovalList({ approvals }: { approvals: Approval[] }) {
 	);
 }
 
-// ponytail: no link to the conversation; the core's Approval view doesn't name it yet.
 function ApprovalCard({
 	approval,
+	mine,
 	cardRef,
 	onDecided,
 }: {
 	approval: Approval;
+	mine: boolean;
 	cardRef: (el: HTMLLIElement | null) => void;
 	onDecided: (outcome: string) => void;
 }) {
@@ -95,6 +105,15 @@ function ApprovalCard({
 						· {formatWhen(approval.requested_at, timeFormat)} · waits until{" "}
 						{formatTime(approval.expires_at, timeFormat)}
 					</span>
+					{mine && approval.conversation && (
+						<Link
+							to="/agent/$conversationId"
+							params={{ conversationId: approval.conversation }}
+							className="w-fit text-[12px] underline underline-offset-2"
+						>
+							Open the conversation
+						</Link>
+					)}
 				</div>
 			</div>
 			<Decide approval={approval} onDecided={onDecided} />

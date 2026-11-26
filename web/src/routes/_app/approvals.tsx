@@ -13,5 +13,6 @@ export const Route = createFileRoute("/_app/approvals")({
 // The app frame already loads what's waiting (and refreshes it), so the page and the count agree.
 // ponytail: the first page only (50, newest first); add "Show more" with `next` if inboxes grow.
 function Approvals() {
-	return <ApprovalList approvals={appRoute.useLoaderData().pending} />;
+	const { me, pending } = appRoute.useLoaderData();
+	return <ApprovalList approvals={pending} me={me.person.id} />;
 }

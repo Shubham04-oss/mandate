@@ -1,9 +1,22 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiError, type Approval } from "#/lib/api/index.ts";
 import { ApprovalList } from "./approval-list.tsx";
 import { PageError, PageLoading } from "./page-states.tsx";
+
+// Link needs a router; a plain anchor is enough to see where it points.
+vi.mock("@tanstack/react-router", async (real) => ({
+	...(await real<object>()),
+	Link: ({
+		children,
+		params,
+	}: {
+		children: string;
+		params: { conversationId: string };
+	}) =>
+		createElement("a", { href: `/agent/${params.conversationId}` }, children),
+}));
 
 const approval = (over: Partial<Approval> = {}): Approval => ({
 	id: "apv_1",
@@ -24,11 +37,14 @@ const approval = (over: Partial<Approval> = {}): Approval => ({
 	decided_by: null,
 	decided_at: null,
 	can_decide: true,
+	conversation: null,
 	...over,
 });
 
 const html = (approvals: Approval[]) =>
-	renderToStaticMarkup(createElement(ApprovalList, { approvals }));
+	renderToStaticMarkup(
+		createElement(ApprovalList, { approvals, me: "mem_me" }),
+	);
 
 describe("the approvals page", () => {
 	it("says so when nothing is waiting", () => {
@@ -48,6 +64,20 @@ describe("the approvals page", () => {
 		const out = html([approval({ can_decide: false })]);
 		expect(out).not.toContain("Approve");
 		expect(out).toContain("Someone who can decide has been asked.");
+	});
+
+	it("links the asker, and only the asker, to the conversation", () => {
+		const own = approval({
+			requested_by: { id: "mem_me", name: "Me", email: null },
+			conversation: "cnv_1",
+		});
+		expect(html([own])).toContain('href="/agent/cnv_1"');
+		expect(html([approval({ conversation: "cnv_1" })])).not.toContain(
+			"Open the conversation",
+		);
+		expect(html([{ ...own, conversation: null }])).not.toContain(
+			"Open the conversation",
+		);
 	});
 
 	it("shows a loading mark, and the core's message when loading fails", () => {
