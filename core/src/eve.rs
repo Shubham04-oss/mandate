@@ -18,6 +18,10 @@ pub enum EveError {
     Request(#[source] reqwest::Error),
     #[error("eve answered {0}")]
     Status(u16),
+    /// The session is over for good: 404 or 410, or 409 `session_not_active` / `session_stranded`
+    /// (eve docs/channels/eve.mdx). A busy turn's 409 is a plain `Status`.
+    #[error("the eve session has ended")]
+    Gone,
     #[error("eve sent a malformed answer")]
     Malformed,
 }
@@ -68,6 +72,26 @@ pub enum Record {
     Ended,
 }
 
+/// A failed answer: `Gone` when eve says the session is over, else its status.
+async fn failure(res: reqwest::Response) -> EveError {
+    let status = res.status().as_u16();
+    let gone = match status {
+        404 | 410 => true,
+        // A busy or waiting turn's 409 names another code, or none.
+        409 => {
+            let body = res.json::<Value>().await.ok();
+            let code = body.as_ref().and_then(|v| v["code"].as_str());
+            matches!(code, Some("session_not_active" | "session_stranded"))
+        }
+        _ => false,
+    };
+    if gone {
+        EveError::Gone
+    } else {
+        EveError::Status(status)
+    }
+}
+
 #[derive(Clone)]
 pub struct EveClient {
     http: reqwest::Client,
@@ -103,7 +127,7 @@ impl EveClient {
             .await
             .map_err(EveError::Request)?;
         if !res.status().is_success() {
-            return Err(EveError::Status(res.status().as_u16()));
+            return Err(failure(res).await);
         }
         res.json().await.map_err(|_| EveError::Malformed)
     }
@@ -176,7 +200,7 @@ impl EveClient {
             .await
             .map_err(EveError::Request)?;
         if !res.status().is_success() {
-            return Err(EveError::Status(res.status().as_u16()));
+            return Err(failure(res).await);
         }
         Ok(EveStream {
             res,

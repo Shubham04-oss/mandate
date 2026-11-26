@@ -54,5 +54,5 @@ grant usage on sequence events_quarantine_id_seq to :"role";
 -- Conversations (RLS forced). The core moves only a conversation's state, eve session and cursor;
 -- relayed events, approval links and calls are append-only.
 grant select, insert on conversations to :"role";
-grant update (state, eve_session, eve_cursor, updated_at) on conversations to :"role";
+grant update (state, eve_session, eve_cursor, updated_at, finished_at) on conversations to :"role";
 grant select, insert on conversation_events, conversation_approvals, conversation_calls to :"role";

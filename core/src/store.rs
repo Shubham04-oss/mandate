@@ -440,7 +440,8 @@ pub async fn live_grant(
 
 /// Single use, and only by the member who asked: the UPDATE spends the row atomically, so
 /// concurrent callers cannot both win. The approver must still be allowed to use the agent
-/// (the `may_use_agent` rule). Returns the spent approval and who gave it.
+/// (the `may_use_agent` rule), and for a team bot someone other than the requester. Returns the
+/// spent approval and who gave it.
 pub async fn consume_approval(
     tx: &mut Tx,
     agent: &AgentId,
@@ -455,9 +456,10 @@ pub async fn consume_approval(
            and a.requested_by = $5 and a.approved_by is not null and a.used_at is null and a.expires_at > $4 \
            and exists (select 1 from agents g where g.id = a.agent and not g.disabled \
              and g.tenant_id = current_setting('mandate.tenant', true) \
-             and (g.owner_member = a.approved_by or exists (select 1 from team_members tm \
+             and (g.owner_member = a.approved_by or (a.approved_by <> a.requested_by \
+               and exists (select 1 from team_members tm \
                where tm.tenant_id = current_setting('mandate.tenant', true) \
-               and tm.team_id = g.owner_team and tm.member_id = a.approved_by))) \
+               and tm.team_id = g.owner_team and tm.member_id = a.approved_by)))) \
            limit 1 for update of a skip locked) \
          returning id, approved_by",
     )

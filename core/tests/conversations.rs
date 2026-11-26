@@ -67,8 +67,10 @@ struct FakeEve {
     hang_send_once: AtomicBool,
     /// Statuses for the next answers to approval prompts, in order; then 202.
     answer_statuses: Mutex<std::collections::VecDeque<u16>>,
-    /// Messages answer this status instead of 202.
-    send_status: Mutex<Option<u16>>,
+    /// Messages answer this status and body instead of 202.
+    send_status: Mutex<Option<(u16, Value)>>,
+    /// Session starts answer this status (with no body) instead of 202.
+    start_status: Mutex<Option<u16>>,
 }
 
 impl FakeEve {
@@ -109,6 +111,10 @@ async fn fake_start(
     if f.hang_start.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
+    if let Some(code) = *f.start_status.lock().unwrap() {
+        let code = axum::http::StatusCode::from_u16(code).unwrap();
+        return (code, Json(json!({ "ok": false })));
+    }
     if f.fail_start.load(Ordering::SeqCst) {
         return (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -135,10 +141,9 @@ async fn fake_post(
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
     if body.get("message").is_some()
-        && let Some(code) = *f.send_status.lock().unwrap()
+        && let Some((code, body)) = f.send_status.lock().unwrap().clone()
     {
-        let code = axum::http::StatusCode::from_u16(code).unwrap();
-        return (code, Json(json!({ "ok": false })));
+        return (axum::http::StatusCode::from_u16(code).unwrap(), Json(body));
     }
     if body.get("answers").is_some()
         && let Some(code) = f.answer_statuses.lock().unwrap().pop_front()
@@ -2010,67 +2015,120 @@ async fn a_failed_conversation_answers_409_to_messages_and_cancel() {
     assert_eq!(h.state(&t, &id).await, "failed");
 }
 
+fn sends(h: &Harness) -> usize {
+    h.fake
+        .seen()
+        .iter()
+        .filter(|s| s.body.get("message").is_some())
+        .count()
+}
+
 #[tokio::test]
 #[ignore]
-async fn an_eve_4xx_on_send_is_409_and_ends_the_conversation() {
+async fn a_gone_session_ends_the_conversation_once() {
     let h = harness().await;
     let t = tenant();
     seed(&t).await;
     turn(&h.fake, 0, "hello", "Hi");
     let id = start(&h, &t, "hello").await;
     h.settle(&t, &id).await;
-    *h.fake.send_status.lock().unwrap() = Some(404);
-    let (status, v) = call(
-        &h.app(&t, "ann").await,
-        "POST",
-        &format!("/v1/conversations/{id}/messages"),
-        Some(json!({ "message": "again" })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{v}");
-    assert_eq!(h.state(&t, &id).await, "idle");
+    let app = h.app(&t, "ann").await;
+    // eve's answer for an unknown or terminal session.
+    *h.fake.send_status.lock().unwrap() =
+        Some((409, json!({ "ok": false, "code": "session_not_active" })));
+    let path = format!("/v1/conversations/{id}/messages");
+    for _ in 0..2 {
+        let (status, v) = call(&app, "POST", &path, Some(json!({ "message": "again" }))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+        assert_eq!(v["error"]["message"], "This conversation has ended.");
+        assert_eq!(h.state(&t, &id).await, "idle");
+    }
+    // The second send never reached eve: the conversation is known to be over.
+    assert_eq!(sends(&h), 2);
+    // A relay that then reads eve's own end does not finish it again.
+    h.fake.ended.store(true, Ordering::SeqCst);
+    h.conv.kick(&t, uuid::Uuid::parse_str(&id).unwrap());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let kinds: Vec<String> = outbox(&h.store, &t)
+        .await
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
     assert_eq!(
-        h.outbox_kinds(&t, 2).await,
+        kinds,
         vec!["conversation.started.v1", "conversation.finished.v1"]
     );
 }
 
 #[tokio::test]
 #[ignore]
-async fn a_failed_send_leaves_a_waiting_turn_waiting() {
+async fn other_eve_4xx_on_send_are_503_and_end_nothing() {
     let h = harness().await;
     let t = tenant();
-    let (id, _) = asked(&h, &t).await;
+    seed(&t).await;
+    turn(&h.fake, 0, "hello", "Hi");
+    let id = start(&h, &t, "hello").await;
+    h.settle(&t, &id).await;
     let app = h.app(&t, "ann").await;
-    for (code, want) in [
-        (500, StatusCode::SERVICE_UNAVAILABLE),
-        (409, StatusCode::CONFLICT),
-    ] {
-        *h.fake.send_status.lock().unwrap() = Some(code);
+    for code in [408, 409, 429] {
+        *h.fake.send_status.lock().unwrap() = Some((code, json!({ "ok": false, "code": "busy" })));
         let (status, v) = call(
             &app,
             "POST",
             &format!("/v1/conversations/{id}/messages"),
-            Some(json!({ "message": "are you there?" })),
+            Some(json!({ "message": "again" })),
         )
         .await;
-        assert_eq!(status, want, "{v}");
-        assert_eq!(
-            h.state(&t, &id).await,
-            "waiting",
-            "after eve answered {code}"
-        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{code}: {v}");
+        assert_eq!(h.state(&t, &id).await, "idle", "{code}");
     }
-    // The turn still waits on its approval: the conversation is not marked finished.
     let kinds: Vec<String> = outbox(&h.store, &t)
         .await
         .into_iter()
         .map(|(k, _)| k)
         .collect();
-    assert!(
-        !kinds.contains(&"conversation.finished.v1".to_owned()),
-        "{kinds:?}"
-    );
+    assert_eq!(kinds, vec!["conversation.started.v1"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_send_while_waiting_is_409_and_not_logged() {
+    let h = harness().await;
+    let t = tenant();
+    let (id, _) = asked(&h, &t).await;
+    let before = h.event_count(&t).await;
+    let sent = sends(&h);
+    let (status, v) = call(
+        &h.app(&t, "ann").await,
+        "POST",
+        &format!("/v1/conversations/{id}/messages"),
+        Some(json!({ "message": "are you there?" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["message"], "Waiting for an OK first.");
+    assert_eq!(h.state(&t, &id).await, "waiting");
+    // Not logged, so the wait's expiry still reads from its own ask; eve never saw it.
+    assert_eq!(h.event_count(&t).await, before);
+    assert_eq!(sends(&h), sent);
+}
+
+#[tokio::test]
+#[ignore]
+async fn an_eve_4xx_on_create_is_409_could_not_start() {
+    let h = harness().await;
+    let t = tenant();
+    seed(&t).await;
+    *h.fake.start_status.lock().unwrap() = Some(400);
+    let (status, v) = call(
+        &h.app(&t, "ann").await,
+        "POST",
+        "/v1/conversations",
+        Some(json!({ "message": "hello" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["message"], "This conversation could not start.");
 }
 
 #[tokio::test]
