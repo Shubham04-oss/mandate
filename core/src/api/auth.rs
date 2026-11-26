@@ -100,7 +100,8 @@ pub enum Step {
         user: Option<String>,
     },
     Sso {
-        token: Secret,
+        /// WorkOS's own sso_required carries none; then SSO starts afresh.
+        token: Option<Secret>,
         connection: String,
     },
     Methods {
@@ -1377,7 +1378,7 @@ async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, 
             json!({ "user": user }),
         ),
         Step::Sso { token, connection } => {
-            let (pending, url, cookie) = sso_redirect(s, &connection, Some(&token)).await?;
+            let (pending, url, cookie) = sso_redirect(s, &connection, token.as_ref()).await?;
             body["next"] = json!("sso_required");
             body["pending"] = json!(pending);
             body["redirect_url"] = json!(url);
@@ -1620,8 +1621,17 @@ fn kind(e: &workos::Error) -> String {
 
 /// The further step a WorkOS error body asks for; only the fields we need are read.
 fn step(code: &str, b: &Value) -> Option<Step> {
-    let token = Secret(b.get("pending_authentication_token")?.as_str()?.to_owned());
     let text = |v: &Value| v.as_str().map(str::to_owned);
+    let pending = b
+        .get("pending_authentication_token")
+        .and_then(Value::as_str);
+    if code == "sso_required" {
+        return Some(Step::Sso {
+            token: pending.map(|t| Secret(t.to_owned())),
+            connection: text(b.get("connection_ids")?.as_array()?.first()?)?,
+        });
+    }
+    let token = Secret(pending?.to_owned());
     Some(match code {
         "mfa_challenge" => {
             let factors = b.get("authentication_factors")?.as_array()?;
@@ -1653,10 +1663,6 @@ fn step(code: &str, b: &Value) -> Option<Step> {
             token,
             email: text(&b["email"])?,
             user: text(&b["user"]["id"]),
-        },
-        "sso_required" => Step::Sso {
-            token,
-            connection: text(b.get("connection_ids")?.as_array()?.first()?)?,
         },
         "organization_authentication_methods_required" => Step::Methods {
             token,
@@ -2189,6 +2195,14 @@ mod tests {
         );
         assert!(
             matches!(classify(sso), AuthError::Step(Step::Sso { connection, .. }) if connection == "conn_1")
+        );
+        // WorkOS's real sso_required body carries no pending token; it is still the SSO step.
+        let sso_bare = api_error(
+            400,
+            json!({ "error": "sso_required", "error_description": "use SSO", "connection_ids": ["conn_2"] }),
+        );
+        assert!(
+            matches!(classify(sso_bare), AuthError::Step(Step::Sso { token: None, connection }) if connection == "conn_2")
         );
         let methods = api_error(
             400,
