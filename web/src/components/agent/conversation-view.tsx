@@ -173,7 +173,11 @@ export function ConversationView({
 								label="Reply to your agent"
 								placeholder="Reply to your agent"
 								onSend={send}
-								working={state === "working" || state === "expired"}
+								working={
+									state === "working" ||
+									state === "waiting" ||
+									state === "expired"
+								}
 								onStop={stop}
 							/>
 						)}
