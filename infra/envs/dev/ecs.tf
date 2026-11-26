@@ -160,6 +160,14 @@ resource "aws_ecs_task_definition" "eve" {
   container_definitions = jsonencode([merge(local.container["eve"], {
     portMappings = [{ containerPort = 3000, protocol = "tcp" }]
     environment  = [for k, v in local.eve_environment : { name = k, value = v }]
+    # eve's public health route on loopback; the image has no curl, so node fetches it.
+    healthCheck = {
+      command     = ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/eve/v1/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval    = 10
+      timeout     = 5
+      retries     = 3
+      startPeriod = 30
+    }
   })])
 }
 

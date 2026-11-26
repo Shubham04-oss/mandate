@@ -108,3 +108,9 @@ variable "github_oidc_provider_arn" {
   default     = ""
   description = "ARN of an existing GitHub OIDC provider in the account; empty creates one"
 }
+
+# Email for the alarms topic (alarms.tf); null creates no subscription. AWS emails a confirm link.
+variable "alarm_email" {
+  type    = string
+  default = null
+}
