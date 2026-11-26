@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Composer } from "#/components/agent/composer.tsx";
 import { StateMark } from "#/components/agent/marks.tsx";
 import { useStartConversation } from "#/components/agent/use-start-conversation.ts";
+import { keepOnFailedRefresh } from "#/components/app/keep-on-refresh.ts";
 import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
 import { clock, formatWhen, usePref } from "#/lib/preferences.ts";
@@ -11,9 +12,9 @@ export const Route = createFileRoute("/_app/agent/")({
 	staticData: { title: "Your agent" },
 	// The session cookie belongs to the API host, so only the browser can load this.
 	ssr: false,
-	loader: async () => ({
+	loader: keepOnFailedRefresh(async () => ({
 		conversations: (await api.conversations.list()).items,
-	}),
+	})),
 	component: NewConversation,
 });
 

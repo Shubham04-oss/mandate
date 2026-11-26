@@ -28,7 +28,9 @@ export const Route = createFileRoute("/sso")({
 
 function Sso() {
 	const [email] = useState(() => readFlow().email ?? "");
-	const { busy, error, act, goToProvider } = useSignIn();
+	const { busy, error, act, goToProvider } = useSignIn({
+		not_found: "Your organization doesn't use single sign-on yet.",
+	});
 
 	return (
 		<AuthLayout scene="harbour">

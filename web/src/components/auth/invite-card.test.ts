@@ -27,4 +27,18 @@ describe("the invitation card", () => {
 		const html = render({ org, inviter: null, email: "ada@x.io" });
 		expect(html).toContain("You&#x27;re invited to Northstar.");
 	});
+
+	it("shows the counts, and hides them when missing or both zero", () => {
+		expect(render({ org, inviter: null, email: "ada@x.io" })).toContain(
+			"3 people · 1 agent",
+		);
+		const zero = { ...org, summary: { people: 0, agents: 0 } };
+		expect(render({ org: zero, inviter: null, email: "a@x.io" })).not.toContain(
+			"people",
+		);
+		const none = { id: "org_2", name: "Bare" } as Invitation["org"];
+		expect(render({ org: none, inviter: null, email: "a@x.io" })).not.toContain(
+			"people",
+		);
+	});
 });

@@ -102,8 +102,12 @@ function VerifyEmail() {
 						className="cursor-pointer border-0 bg-transparent p-0 font-semibold text-foreground hover:underline"
 					>
 						Send it again
-					</button>{" "}
-					· <TextLink to="/sign-up">Use another email</TextLink>
+					</button>
+				</Aside>
+				{/* Worded the same whatever happened: the core never says whether the email has an account. */}
+				<Aside>
+					Didn't get a code? Check your email address and password, then{" "}
+					<TextLink to="/sign-up">sign up again</TextLink>.
 				</Aside>
 			</AuthForm>
 		</AuthLayout>

@@ -18,7 +18,7 @@ import { Button } from "#/components/ui/button.tsx";
 import { Skeleton } from "#/components/ui/skeleton.tsx";
 import { api, type MfaSetup as Setup } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
-import { readFlow } from "#/lib/sign-in-flow.ts";
+import { readFlow, rememberSetup } from "#/lib/sign-in-flow.ts";
 
 // `next: mfa_setup`: the organization requires two-step and this person has none yet.
 export const Route = createFileRoute("/mfa_/setup")({
@@ -34,13 +34,26 @@ const qrSrc = (svg: string) =>
 	`data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 
 function MfaSetup() {
-	const [pending] = useState(() => readFlow().pending);
-	const [setup, setSetup] = useState<Setup | null>(null);
+	const [flow] = useState(readFlow);
+	const pending = flow.pending;
+	// The core spends the pending step on setup, so after a reload only the saved answer works.
+	const [setup, setSetup] = useState<Setup | null>(flow.setup ?? null);
 	const { busy, error, run, act } = useSignIn();
+
+	const fetchSetup = () => {
+		if (!pending) return;
+		act(
+			() => api.auth.mfaSetup(pending),
+			(answer) => {
+				rememberSetup(answer);
+				setSetup(answer);
+			},
+		);
+	};
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: fetch the factor once per pending sign-in
 	useEffect(() => {
-		if (pending) act(() => api.auth.mfaSetup(pending), setSetup);
+		if (!setup) fetchSetup();
 	}, [pending]);
 
 	if (!pending) return <StartAgain />;
@@ -93,6 +106,11 @@ function MfaSetup() {
 					</div>
 				</div>
 				<FormError message={error} />
+				{!setup && error && !busy ? (
+					<Button type="button" variant="secondary" onClick={fetchSetup}>
+						Try again
+					</Button>
+				) : null}
 				<CodeInput id="code" label="Code from your authenticator app" />
 				<Button type="submit" size="lg" disabled={busy || !setup}>
 					{busy ? "Checking…" : "Turn on two-step sign-in"}

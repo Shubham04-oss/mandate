@@ -7,8 +7,9 @@ import {
 	useState,
 } from "react";
 import { useStartConversation } from "#/components/agent/use-start-conversation.ts";
+import { keepOnFailedRefresh } from "#/components/app/keep-on-refresh.ts";
+import { type Row, RowItem } from "#/components/app/row-item.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
-import { StatusMark } from "#/components/icons/status-mark.tsx";
 import {
 	InputGroup,
 	InputGroupAddon,
@@ -17,7 +18,6 @@ import {
 } from "#/components/ui/input-group.tsx";
 import {
 	Item,
-	ItemActions,
 	ItemContent,
 	ItemDescription,
 	ItemMedia,
@@ -34,13 +34,13 @@ export const Route = createFileRoute("/_app/")({
 	head: () => ({ meta: [{ title: `Home · ${brand.name}` }] }),
 	staticData: { title: "Home" },
 	ssr: false,
-	loader: async () => {
+	loader: keepOnFailedRefresh(async () => {
 		const [activity, conversations] = await Promise.all([
 			api.activity(),
 			api.conversations.list(),
 		]);
 		return { activity: activity.items, conversations: conversations.items };
-	},
+	}),
 	component: Home,
 });
 
@@ -207,25 +207,6 @@ function QuickActions({ onPick }: { onPick: (text: string) => void }) {
 	);
 }
 
-type Row = {
-	id: string;
-	kind: string;
-	title: string;
-	detail: string;
-	when: string;
-	/** A conversation to open, when the row is one. */
-	conversationId?: string;
-};
-
-// Bare status marks, nothing behind them: how each row stands, in its own colour.
-const marks: Record<string, ReactNode> = {
-	working: <StatusMark mark="working" size={18} />,
-	waiting: <StatusMark mark="needs-you" size={18} />,
-	done: <StatusMark mark="done" size={18} />,
-	approved: <StatusMark mark="done" size={18} />,
-	refused: <StatusMark mark="failed" size={18} />,
-};
-
 /** A side panel: a card with a painted scene fading into it, named by an eyebrow. */
 function SidePanel({
 	area,
@@ -246,8 +227,6 @@ function SidePanel({
 	empty: string;
 }) {
 	const id = `${area}-panel`;
-	const rowClass =
-		"min-h-12 rounded-lg px-2.5 py-1.5 no-underline hover:bg-hover";
 	return (
 		<section
 			data-area={area}
@@ -278,36 +257,7 @@ function SidePanel({
 				</p>
 			) : null}
 			{rows.map((row) => (
-				<Item
-					key={row.id}
-					size="xs"
-					render={
-						row.conversationId ? (
-							<Link
-								to="/agent/$conversationId"
-								params={{ conversationId: row.conversationId }}
-							/>
-						) : (
-							<button type="button" />
-						)
-					}
-					// rows cut off long titles; the whole line is there on hover
-					title={`${row.title}\n${row.detail}`}
-					className={rowClass}
-				>
-					<ItemMedia>{marks[row.kind]}</ItemMedia>
-					<ItemContent className="min-w-0 gap-0">
-						<ItemTitle className="block w-full truncate font-semibold text-[12.5px]">
-							{row.title}
-						</ItemTitle>
-						<ItemDescription className="truncate text-[11.5px]">
-							{row.detail}
-						</ItemDescription>
-					</ItemContent>
-					<ItemActions className="text-[11.5px] text-muted-foreground tabular-nums">
-						{row.when}
-					</ItemActions>
-				</Item>
+				<RowItem key={row.id} row={row} />
 			))}
 		</section>
 	);

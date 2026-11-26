@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type Me, type SignInOutcome } from "./api/index.ts";
 import {
 	callbackMessage,
 	errorDestination,
+	errorMessage,
+	linkExpired,
 	planOutcome,
 	providerUrl,
+	readFlow,
+	rememberSetup,
+	saveFlow,
 } from "./sign-in-flow.ts";
 
 const me = {} as Me;
@@ -123,5 +128,55 @@ describe("callbackMessage", () => {
 		expect(callbackMessage(undefined)).toBeNull();
 		expect(callbackMessage("no_access")).toMatch(/organization/);
 		expect(callbackMessage("anything_else")).toMatch(/didn't finish/);
+	});
+});
+
+describe("the SSO callback's step errors", () => {
+	it("gives each step its own next move, without promising a picker", () => {
+		expect(callbackMessage("org_required")).toMatch(
+			/several organizations.*email and password.*admin/,
+		);
+		expect(callbackMessage("mfa_required")).toMatch(
+			/two-step.*email and password/,
+		);
+		expect(callbackMessage("email_unverified")).toMatch(/^Verify your email/);
+	});
+});
+
+describe("errorMessage", () => {
+	it("uses a screen's wording for codes it names and the core's otherwise", () => {
+		const gone = { not_found: "This invitation was used or withdrawn." };
+		expect(
+			errorMessage(new ApiError("not_found", "Not found.", 404), gone),
+		).toBe(gone.not_found);
+		expect(
+			errorMessage(new ApiError("conflict", "That already exists.", 409), gone),
+		).toBe("That already exists.");
+	});
+});
+
+describe("linkExpired", () => {
+	it("sends used, expired and unknown reset tokens to the expired-link page", () => {
+		for (const code of ["code_expired", "code_invalid", "not_found"] as const)
+			expect(linkExpired(new ApiError(code, "", 400))).toBe(true);
+		expect(linkExpired(new ApiError("invalid_input", "", 400))).toBe(false);
+	});
+});
+
+describe("rememberSetup", () => {
+	afterEach(() => vi.unstubAllGlobals());
+
+	it("keeps two-step setup in the flow so a reload can reuse it", () => {
+		const store = new Map<string, string>();
+		vi.stubGlobal("window", {
+			sessionStorage: {
+				getItem: (k: string) => store.get(k) ?? null,
+				setItem: (k: string, v: string) => store.set(k, v),
+			},
+		});
+		saveFlow({ pending: "pnd_1", email: "a@b.co" });
+		const setup = { qr_svg: "<svg/>", secret: "ABCD", challenge: "chl_1" };
+		rememberSetup(setup);
+		expect(readFlow()).toEqual({ pending: "pnd_1", email: "a@b.co", setup });
 	});
 });

@@ -33,7 +33,7 @@ function ChooseOrganization() {
 		<AuthLayout scene="harbour">
 			<AuthForm label="Choose an organization">
 				<Title>Choose an organization</Title>
-				<Lead>You belong to more than one. You can switch later.</Lead>
+				<Lead>You belong to more than one.</Lead>
 				<FormError message={error} />
 				<div className="flex flex-col gap-2">
 					{orgs.map((org) => (

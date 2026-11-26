@@ -26,6 +26,9 @@ mock_provider "aws" {
   mock_resource "aws_ecs_cluster" {
     defaults = { arn = "arn:aws:ecs:ap-south-1:000000000000:cluster/mandate-dev" }
   }
+  mock_resource "aws_sns_topic" {
+    defaults = { arn = "arn:aws:sns:ap-south-1:000000000000:mandate-dev-alarms" }
+  }
   mock_resource "aws_kms_key" {
     defaults = { arn = "arn:aws:kms:ap-south-1:000000000000:key/mock" }
   }
@@ -759,5 +762,29 @@ run "an_existing_github_oidc_provider_is_reused_not_owned" {
   assert {
     condition     = jsondecode(aws_iam_role.deploy.assume_role_policy).Statement[0].Principal.Federated == "arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com"
     error_message = "the deploy role must trust the given provider"
+  }
+}
+
+run "alarms_cover_every_dlq_and_service_with_no_default_subscriber" {
+  command = apply
+  assert {
+    condition     = keys(aws_cloudwatch_metric_alarm.dlq) == keys(aws_sqs_queue.dead_letter)
+    error_message = "every dead-letter queue has an alarm"
+  }
+  assert {
+    condition     = alltrue([for a in aws_cloudwatch_metric_alarm.service_down : a.treat_missing_data == "breaching"])
+    error_message = "a service that reports nothing is down"
+  }
+  assert {
+    condition     = length(aws_sns_topic_subscription.alarm_email) == 0
+    error_message = "no subscription is created unless alarm_email is set"
+  }
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.db_free_storage.threshold == 20 * 0.15 * 1024 * 1024 * 1024
+    error_message = "the storage alarm fires below 15% of the allocated 20 GB"
+  }
+  assert {
+    condition     = strcontains(jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].healthCheck.command[3], "http://127.0.0.1:3000/eve/v1/health")
+    error_message = "eve's health check probes its own health route"
   }
 }

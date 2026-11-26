@@ -1,5 +1,6 @@
 //! Web sessions and pending sign-in steps. The browser holds random 256-bit values; the
 //! database holds only their SHA-256, so a leaked table cannot be replayed as cookies.
+use super::auth::AuthError;
 use super::{ApiError, ApiState, csrf_ok};
 use crate::ids::{MemberId, TenantId};
 use crate::store::{StoreError, Tx};
@@ -16,6 +17,10 @@ pub const COOKIE: &str = "mandate_session";
 pub const IDLE: Duration = Duration::hours(12);
 pub const ABSOLUTE: Duration = Duration::days(7);
 pub const PENDING_TTL: Duration = Duration::minutes(10);
+/// How long a WorkOS membership check stands before a request re-checks it.
+pub const RECHECK: Duration = Duration::minutes(5);
+/// How long past the last good check a session is still served while WorkOS cannot answer.
+pub const GRACE: Duration = Duration::hours(1);
 const MAX_TOKEN_LEN: usize = 160;
 
 /// Who is calling, from a valid session cookie. Extracting it also enforces CSRF on unsafe
@@ -43,14 +48,103 @@ where
     }
 }
 
-/// The session the request's cookie names, touched to now; no CSRF check (see `Session`).
+/// The session the request's cookie names, touched to now, its membership re-checked with
+/// WorkOS when the last check is over 5 minutes old; no CSRF check (see `Session`).
 pub async fn current(s: &ApiState, headers: &HeaderMap) -> Result<Session, ApiError> {
     let token = cookie(headers).ok_or_else(ApiError::signed_out)?;
     let tenant = token_tenant(token).ok_or_else(ApiError::signed_out)?;
+    let now = OffsetDateTime::now_utc();
     let mut tx = s.store.begin(&tenant).await?;
-    let found = lookup(&mut tx, token, OffsetDateTime::now_utc()).await?;
+    let found = find(&mut tx, token, now).await?;
     tx.commit().await?;
-    found.ok_or_else(ApiError::signed_out)
+    let (session, verified_at) = found.ok_or_else(ApiError::signed_out)?;
+    if now - verified_at <= RECHECK {
+        return Ok(session);
+    }
+    recheck(s, token, session, verified_at, now).await
+}
+
+/// Asks WorkOS whether the member still belongs to the org (only the one request that claims
+/// this window does), follows the role, and ends the session if the membership is gone.
+async fn recheck(
+    s: &ApiState,
+    token: &str,
+    mut session: Session,
+    verified_at: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<Session, ApiError> {
+    let mut tx = s.store.begin(&session.tenant).await?;
+    let claimed: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "update sessions s set checked_at = $2 \
+         where s.tenant_id = current_setting('mandate.tenant', true) and s.token_hash = $1 and s.checked_at <= $3 \
+         returning (select m.workos_user_id from members m where m.tenant_id = s.tenant_id and m.id = s.member), \
+                   (select t.workos_org_id from tenants t where t.id = s.tenant_id)",
+    )
+    .bind(hash(token).as_slice())
+    .bind(now)
+    .bind(now - RECHECK)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    // Another request is checking, or checked and failed, in this window.
+    let Some(ids) = claimed else {
+        return within_grace(session, verified_at, now);
+    };
+    // `Some(is_admin)` while the membership is active; a member or org WorkOS cannot be asked about is not kept.
+    let active = match ids {
+        (Some(user), Some(org)) => match s.auth.memberships(&user).await {
+            Ok(ms) => ms
+                .into_iter()
+                .find(|m| m.active && m.org == org)
+                .map(|m| m.role == "admin"),
+            Err(AuthError::NotFound) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "membership re-check failed");
+                return within_grace(session, verified_at, now);
+            }
+        },
+        _ => None,
+    };
+    let mut tx = s.store.begin(&session.tenant).await?;
+    sqlx::query(
+        "update members set is_admin = $2 where tenant_id = current_setting('mandate.tenant', true) and id = $1",
+    )
+    .bind(session.member.as_str())
+    .bind(active == Some(true))
+    .execute(&mut *tx)
+    .await?;
+    match active {
+        Some(is_admin) => {
+            sqlx::query(
+                "update sessions set verified_at = $2 \
+                 where tenant_id = current_setting('mandate.tenant', true) and token_hash = $1",
+            )
+            .bind(hash(token).as_slice())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            session.is_admin = is_admin;
+        }
+        None => delete(&mut tx, token).await?,
+    }
+    tx.commit().await?;
+    match active {
+        Some(_) => Ok(session),
+        None => Err(ApiError::signed_out()),
+    }
+}
+
+/// The stored state while WorkOS cannot answer, up to an hour past the last good check; then no.
+fn within_grace(
+    session: Session,
+    verified_at: OffsetDateTime,
+    now: OffsetDateTime,
+) -> Result<Session, ApiError> {
+    if now - verified_at <= GRACE {
+        Ok(session)
+    } else {
+        Err(AuthError::Upstream("membership unverified past grace".into()).into())
+    }
 }
 
 /// A fresh random 256-bit value, base64url without padding (43 characters).
@@ -149,8 +243,8 @@ pub async fn create(
     .execute(&mut **tx)
     .await?;
     sqlx::query(
-        "insert into sessions (tenant_id, token_hash, member, created_at, last_seen_at, expires_at, profile) \
-         values (current_setting('mandate.tenant'), $1, $2, $3, $3, $4, $5)",
+        "insert into sessions (tenant_id, token_hash, member, created_at, last_seen_at, expires_at, profile, verified_at, checked_at) \
+         values (current_setting('mandate.tenant'), $1, $2, $3, $3, $4, $5, $3, $3)",
     )
     .bind(hash(&token).as_slice())
     .bind(member.as_str())
@@ -169,29 +263,39 @@ pub async fn lookup(
     token: &str,
     now: OffsetDateTime,
 ) -> Result<Option<Session>, StoreError> {
+    Ok(find(tx, token, now).await?.map(|(s, _)| s))
+}
+
+/// `lookup`, with when the session's WorkOS membership was last confirmed.
+async fn find(
+    tx: &mut Tx,
+    token: &str,
+    now: OffsetDateTime,
+) -> Result<Option<(Session, OffsetDateTime)>, StoreError> {
     let Some(tenant) = token_tenant(token) else {
         return Ok(None);
     };
-    let row: Option<(String, bool)> = sqlx::query_as(
+    let row: Option<(String, bool, OffsetDateTime)> = sqlx::query_as(
         "update sessions s set last_seen_at = $2 from members m \
          where s.tenant_id = current_setting('mandate.tenant', true) and s.token_hash = $1 \
          and s.expires_at > $2 and s.last_seen_at > $3 \
          and m.tenant_id = current_setting('mandate.tenant', true) and m.id = s.member \
-         returning s.member, m.is_admin",
+         returning s.member, m.is_admin, s.verified_at",
     )
     .bind(hash(token).as_slice())
     .bind(now)
     .bind(now - IDLE)
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((member, is_admin)) = row else {
+    let Some((member, is_admin, verified_at)) = row else {
         return Ok(None);
     };
-    Ok(Some(Session {
+    let session = Session {
         tenant,
         member: MemberId::parse(&member)?,
         is_admin,
-    }))
+    };
+    Ok(Some((session, verified_at)))
 }
 
 /// The profile snapshot stored at sign-in, for a live session.

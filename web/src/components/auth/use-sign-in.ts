@@ -1,9 +1,14 @@
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
-import { ApiError, type SignInOutcome } from "#/lib/api/index.ts";
+import {
+	ApiError,
+	type ErrorCode,
+	type SignInOutcome,
+} from "#/lib/api/index.ts";
 import {
 	clearFlow,
 	errorDestination,
+	errorMessage,
 	planOutcome,
 	providerUrl,
 	readFlow,
@@ -16,7 +21,7 @@ const unexpected = "Something went wrong. Try again.";
  * Runs sign-in calls for a screen: shows a busy state, follows the outcome to the next step or into
  * the app, and puts errors where the person is looking (or on the screen they belong to).
  */
-export function useSignIn() {
+export function useSignIn(messages?: Partial<Record<ErrorCode, string>>) {
 	const navigate = useNavigate();
 	const router = useRouter();
 	const [busy, setBusy] = useState(false);
@@ -35,7 +40,7 @@ export function useSignIn() {
 			clearFlow();
 			navigate({ to, search: { error: e.code } });
 		} else {
-			setError(e.message);
+			setError(errorMessage(e, messages));
 		}
 	};
 

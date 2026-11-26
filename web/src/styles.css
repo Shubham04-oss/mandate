@@ -36,7 +36,6 @@
 
 	/* shadows and scrims */
 	--shade-66: #00000066;
-	--shade-88: #00000088;
 	--shade-99: #00000099;
 
 	/* the canvas edge: dark separates by tone alone, light needs a hairline */
@@ -58,7 +57,6 @@
 	/* brand: the orange marks, it is never text */
 	--gold-deep: #d98e62;
 	--gold: #f2b79f;
-	--gold-soft: #3a2b21;
 
 	/* the agent: sky and sea */
 	--sky-soft: #1f2835;
@@ -95,7 +93,6 @@
 	--text-muted: #6f6a66;
 
 	--shade-66: #1a140f14;
-	--shade-88: #1a140f24;
 	--shade-99: #1a140f2e;
 
 	--canvas-edge: var(--border-quiet);
@@ -110,7 +107,6 @@
 	--danger-text: #b4342f;
 	--warn: #93761b;
 
-	--gold-soft: #fbe6da;
 	--sky-soft: #e8eef9;
 	--sea: #2f4c6e;
 	--sea-soft: #dfe6ef;
@@ -185,7 +181,6 @@
 	--color-warn: var(--warn);
 	--color-gold-deep: var(--gold-deep);
 	--color-gold: var(--gold);
-	--color-gold-soft: var(--gold-soft);
 	--color-sky-soft: var(--sky-soft);
 	--color-sea: var(--sea);
 	--color-sea-soft: var(--sea-soft);
@@ -210,13 +205,9 @@
 	--shadow-card: 0 0 0 1px var(--border-quiet), 0 1px 2px var(--shade-card-1), 0 10px 30px var(--shade-card-2);
 	--shadow-card-hover: 0 0 0 1px var(--border-strong), 0 1px 2px var(--shade-card-2), 0 18px 40px var(--shade-card-3);
 	--shadow-tile: 0 0 0 1px var(--border-quiet), 0 4px 14px var(--shade-66);
-	--shadow-icon: 0 0 0 1px var(--border-quiet), 0 4px 12px var(--shade-66);
 	--shadow-field: inset 0 0 0 1px var(--border-quiet);
 	--shadow-field-focus: inset 0 0 0 1.5px var(--text), 0 0 0 4px var(--hover);
 	--shadow-field-invalid: inset 0 0 0 1.5px var(--danger);
-	--shadow-dialog: 0 0 0 1px var(--border-quiet), 0 24px 64px var(--shade-66);
-	--shadow-float: 0 0 0 1px var(--border-quiet), 0 12px 32px var(--shade-66);
-	--shadow-menu: 0 0 0 1px var(--border-quiet), 0 12px 34px var(--shade-88);
 
 	/* below this width the auth scene becomes a band */
 	--breakpoint-split: 800px;
@@ -335,7 +326,6 @@
 		border-radius: 1px;
 		background: var(--gold-deep);
 	}
-
 }
 
 /*

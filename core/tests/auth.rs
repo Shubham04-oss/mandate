@@ -637,6 +637,8 @@ struct Fake {
     create_race: Mutex<Option<Arc<CreateRace>>>,
     /// One-shot: `create_user` makes the user, then answers with this error anyway.
     create_user_error: Mutex<Option<AuthError>>,
+    /// While set, `memberships` fails as WorkOS being down would.
+    memberships_down: Mutex<bool>,
 }
 
 impl Fake {
@@ -1011,6 +1013,10 @@ impl AuthProvider for Fake {
     }
 
     async fn memberships(&self, user: &str) -> Result<Vec<Membership>, AuthError> {
+        self.call(format!("memberships {user}"));
+        if *self.memberships_down.lock().unwrap() {
+            return Err(AuthError::Upstream("status 503".into()));
+        }
         self.by_id(user)
             .map(|u| u.memberships)
             .ok_or(AuthError::NotFound)
@@ -1350,8 +1356,56 @@ async fn org_selection_returns_choose_org_with_orgs() {
     assert_eq!(orgs.len(), 2);
     assert_eq!(orgs[1]["id"], tenant_of(&second.id).as_str());
     assert_eq!(orgs[1]["name"], "Beta");
+    // Beta has no tenant yet: nothing to count.
     assert_eq!(orgs[1]["summary"]["people"], 0);
     assert_no_workos_token(&v);
+}
+
+#[tokio::test]
+#[ignore]
+/// The picker comes before sign-in finishes (MFA may follow), so it must not read tenant data.
+async fn org_picker_reveals_no_counts() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let first = u.memberships[0].org.clone();
+    let tenant = tenant_of(&first);
+    h.store
+        .ensure_tenant(&first, &tenant)
+        .await
+        .unwrap()
+        .unwrap();
+    for m in ["bo", "cy"] {
+        add_member(&h.store, &tenant, &member(m), false).await;
+    }
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    mandate::store::ensure_personal_agent(&mut tx, &member("bo"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let second = OrgRef {
+        id: format!("org_{}", Uuid::new_v4().simple()),
+        name: "Beta".into(),
+    };
+    h.fake.orgs.lock().unwrap().push(second.clone());
+    h.fake.update(&u.id, |u| {
+        u.memberships.push(Membership {
+            org: second.id.clone(),
+            org_name: "Beta".into(),
+            role: "member".into(),
+            active: true,
+        })
+    });
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": u.email, "password": u.password }),
+        )
+        .await;
+    let v = body_json(r).await;
+    assert_eq!(v["next"], "choose_org", "{v}");
+    let orgs = v["orgs"].as_array().unwrap();
+    assert_eq!(orgs[0]["id"], tenant.as_str());
+    assert_eq!(orgs[0]["summary"], json!({ "people": 0, "agents": 0 }));
 }
 
 #[tokio::test]
@@ -3228,4 +3282,113 @@ async fn ambiguous_create_user_failure_keeps_the_row() {
         .await;
     assert!(session_cookie(&r).is_none());
     assert_eq!(body_json(r).await["error"]["code"], "invalid_credentials");
+}
+
+/// Moves a session's last good WorkOS check (and last attempt) into the past.
+async fn age_check(cookie: &str, verified: Duration, checked: Duration) {
+    let now = OffsetDateTime::now_utc();
+    sqlx::query("update sessions set verified_at = $2, checked_at = $3 where token_hash = $1")
+        .bind(Sha256::digest(cookie.as_bytes()).to_vec())
+        .bind(now - verified)
+        .bind(now - checked)
+        .execute(&common::admin_pool().await)
+        .await
+        .unwrap();
+}
+
+fn membership_calls(h: &Harness, u: &FakeUser) -> usize {
+    let want = format!("memberships {}", u.id);
+    h.fake
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| **c == want)
+        .count()
+}
+
+#[tokio::test]
+#[ignore]
+async fn demoted_admin_loses_admin_at_the_next_check() {
+    let h = Harness::new().await;
+    let u = h.user("admin");
+    let cookie = signed_in(&h, &u).await;
+    h.fake
+        .update(&u.id, |u| u.memberships[0].role = "member".into());
+    // Within five minutes of the last check the stored role stands, and WorkOS is not asked.
+    let before = membership_calls(&h, &u);
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(body_json(r).await["is_admin"], true);
+    assert_eq!(membership_calls(&h, &u), before);
+
+    age_check(&cookie, Duration::minutes(6), Duration::minutes(6)).await;
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(body_json(r).await["is_admin"], false);
+    assert_eq!(membership_calls(&h, &u), before + 1);
+    // What org::is_admin reads changed too.
+    let tenant = tenant_of(&u.memberships[0].org);
+    let admin: bool = sqlx::query_scalar("select is_admin from members where tenant_id = $1")
+        .bind(tenant.as_str())
+        .fetch_one(&common::admin_pool().await)
+        .await
+        .unwrap();
+    assert!(!admin);
+    // One check per window: the next request does not ask again.
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(membership_calls(&h, &u), before + 1);
+}
+
+#[tokio::test]
+#[ignore]
+async fn removed_or_inactive_member_is_signed_out() {
+    let h = Harness::new().await;
+    for gone in [
+        (|u: &mut FakeUser| u.memberships.clear()) as fn(&mut FakeUser),
+        |u| u.memberships[0].active = false,
+    ] {
+        let u = h.user("admin");
+        let cookie = signed_in(&h, &u).await;
+        h.fake.update(&u.id, gone);
+        age_check(&cookie, Duration::minutes(6), Duration::minutes(6)).await;
+        let r = h.get("/v1/me", Some(&cookie)).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        // The session is gone, not just refused once.
+        let r = h.get("/v1/me", Some(&cookie)).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn workos_outage_keeps_access_for_an_hour_then_denies() {
+    let h = Harness::new().await;
+    let u = h.user("admin");
+    let cookie = signed_in(&h, &u).await;
+    *h.fake.memberships_down.lock().unwrap() = true;
+    // Within the hour since the last good check: served from the stored state.
+    age_check(&cookie, Duration::minutes(30), Duration::minutes(6)).await;
+    let before = membership_calls(&h, &u);
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(body_json(r).await["is_admin"], true);
+    assert_eq!(membership_calls(&h, &u), before + 1);
+    // A failed check still counts as this window's one call.
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(membership_calls(&h, &u), before + 1);
+
+    // Past the hour: denied, whether this request checks or another one just did.
+    age_check(&cookie, Duration::minutes(61), Duration::minutes(6)).await;
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // WorkOS back: the session was kept and works again after its next check.
+    *h.fake.memberships_down.lock().unwrap() = false;
+    age_check(&cookie, Duration::minutes(61), Duration::minutes(6)).await;
+    let r = h.get("/v1/me", Some(&cookie)).await;
+    assert_eq!(r.status(), StatusCode::OK);
 }
