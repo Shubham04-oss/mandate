@@ -184,6 +184,7 @@ const approvals: Approval[] = [
 		decided_by: null,
 		decided_at: null,
 		can_decide: true,
+		conversation: null,
 	},
 	{
 		id: "apv_reply",
@@ -201,6 +202,7 @@ const approvals: Approval[] = [
 		decided_by: null,
 		decided_at: null,
 		can_decide: true,
+		conversation: null,
 	},
 	{
 		id: "apv_read",
@@ -215,6 +217,7 @@ const approvals: Approval[] = [
 		decided_by: null,
 		decided_at: null,
 		can_decide: true,
+		conversation: null,
 	},
 ];
 
@@ -474,6 +477,7 @@ function turn(id: string, message: string) {
 				requested_at: new Date().toISOString(),
 				expires_at: inMinutes(30),
 				state: "pending",
+				conversation: id,
 				decided_by: null,
 				decided_at: null,
 				can_decide: true,
@@ -828,7 +832,7 @@ const routes: [Method, RegExp, Handler][] = [
 			if (!approval)
 				return fail(404, "not_found", "This request no longer exists.");
 			if (approval.state !== "pending")
-				return fail(409, "conflict", "Someone already decided this.");
+				return fail(409, "conflict", "This request was already decided.");
 			approval.state = m[2] === "approve" ? "approved" : "denied";
 			approval.decided_by = ada;
 			approval.decided_at = new Date().toISOString();

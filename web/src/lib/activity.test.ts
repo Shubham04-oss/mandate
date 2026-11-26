@@ -151,6 +151,7 @@ describe("describeApproval", () => {
 			decided_by: null,
 			decided_at: null,
 			can_decide: false,
+			conversation: null,
 		};
 		expect(describeApproval(gone)).toBeTypeOf("string");
 		expect(
