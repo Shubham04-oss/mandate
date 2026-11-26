@@ -38,6 +38,18 @@ describe("a loader re-run that fails", () => {
 		);
 	});
 
+	it("still fails when access is refused or the core rejects it", async () => {
+		const refused = new ApiError("forbidden", "Not allowed", 403);
+		const loader = setup(
+			"first",
+			refused,
+			new ApiError("internal", "busy", 503),
+		);
+		await loader(enter);
+		await expect(loader(stay)).rejects.toBe(refused);
+		expect(await loader(stay)).toBe("first");
+	});
+
 	it("never shows another page's data", async () => {
 		const loader = setup("a", new ApiError("unreachable", "down", 0));
 		await loader({ cause: "enter", params: { id: "a" } });
