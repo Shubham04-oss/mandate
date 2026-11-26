@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
+import { useLiveRefresh } from "#/components/app/live-refresh.ts";
 import { PersonAvatar } from "#/components/auth/parts.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import { StatusMark } from "#/components/icons/status-mark.tsx";
@@ -60,20 +61,27 @@ const appRoute = getRouteApi("/_app");
 type RailItem = {
 	label: string;
 	icon: IconName;
-	to?: "/" | "/agent";
+	to?: "/" | "/approvals" | "/agent" | "/activity";
 	count?: number;
 	onClick?: () => void;
 	/** Shown in the tooltip, so the shortcut can be found. */
 	shortcut?: string;
 };
 
-// ponytail: only Home exists; the rest become links as their pages are built.
-const places = (waiting: number): RailItem[] => [
+/** A page in the menu; every one is a link. */
+type Place = RailItem & { to: NonNullable<RailItem["to"]> };
+
+// ponytail: no Teams page yet; it joins the list when there is one.
+const places = (waiting: number): Place[] => [
 	{ label: "Home", icon: "home", to: "/" },
-	{ label: "Approvals", icon: "shield-check", count: waiting },
+	{
+		label: "Approvals",
+		icon: "shield-check",
+		to: "/approvals",
+		count: waiting,
+	},
 	{ label: "Your agent", icon: "bot", to: "/agent" },
-	{ label: "Teams", icon: "user" },
-	{ label: "Activity", icon: "activity" },
+	{ label: "Activity", icon: "activity", to: "/activity" },
 ];
 
 /** Requests the person can decide now. Their own requests are listed too but aren't theirs to decide. */
@@ -151,11 +159,10 @@ function NeedsTab({ waiting }: { waiting: Approval[] }) {
 		).values(),
 	].slice(0, 3);
 	return (
-		// ponytail: opens the approvals page once it exists
-		<button
-			type="button"
+		<Link
+			to="/approvals"
 			title={waiting.map(describeApproval).join("\n")}
-			className="tab-cut group absolute top-0 right-7 z-10 inline-flex h-10 cursor-pointer items-center gap-2 border-0 pr-3.5 pl-2.5 font-semibold text-[12px] text-foreground"
+			className="tab-cut group absolute top-0 right-7 z-10 inline-flex h-10 items-center gap-2 border-0 pr-3.5 pl-2.5 font-semibold text-[12px] text-foreground no-underline data-[status=active]:[&>svg:last-child]:hidden"
 		>
 			<AvatarGroup className="-space-x-1.5 *:data-[slot=avatar]:ring-background">
 				{askers.map((person) => (
@@ -169,7 +176,7 @@ function NeedsTab({ waiting }: { waiting: Approval[] }) {
 				size={14}
 				className="text-muted-foreground transition-[transform,color] duration-150 group-hover:translate-x-0.5 group-hover:text-foreground"
 			/>
-		</button>
+		</Link>
 	);
 }
 
@@ -253,7 +260,7 @@ function HeaderMenu({
 	onSettings,
 }: {
 	me: Me;
-	items: RailItem[];
+	items: Place[];
 	onSettings: () => void;
 }) {
 	return (
@@ -283,35 +290,27 @@ function HeaderMenu({
 			<DropdownMenuContent align="start" sideOffset={6} className="w-60">
 				<DropdownMenuGroup>
 					<DropdownMenuLabel>{me.org.name}</DropdownMenuLabel>
-					{items.map((item) =>
-						item.to ? (
-							<DropdownMenuItem
-								key={item.label}
-								render={
-									<Link
-										to={item.to}
-										// Home is only itself; Your agent stays lit inside a conversation.
-										activeOptions={{ exact: item.to === "/" }}
-									/>
-								}
-								className="data-[status=active]:bg-active data-[status=active]:font-semibold"
-							>
-								<Icon name={item.icon} strokeWidth={1.8} />
-								{item.label}
-							</DropdownMenuItem>
-						) : (
-							// ponytail: becomes a link as each page is built
-							<DropdownMenuItem key={item.label}>
-								<Icon name={item.icon} strokeWidth={1.8} />
-								{item.label}
-								{item.count ? (
-									<span className="ml-auto grid h-[18px] min-w-[18px] place-items-center rounded-full bg-foreground px-1.5 font-semibold text-[11px] text-canvas">
-										{item.count}
-									</span>
-								) : null}
-							</DropdownMenuItem>
-						),
-					)}
+					{items.map((item) => (
+						<DropdownMenuItem
+							key={item.label}
+							render={
+								<Link
+									to={item.to}
+									// Home is only itself; Your agent stays lit inside a conversation.
+									activeOptions={{ exact: item.to === "/" }}
+								/>
+							}
+							className="data-[status=active]:bg-active data-[status=active]:font-semibold"
+						>
+							<Icon name={item.icon} strokeWidth={1.8} />
+							{item.label}
+							{item.count ? (
+								<span className="ml-auto grid h-[18px] min-w-[18px] place-items-center rounded-full bg-foreground px-1.5 font-semibold text-[11px] text-canvas">
+									{item.count}
+								</span>
+							) : null}
+						</DropdownMenuItem>
+					))}
 				</DropdownMenuGroup>
 				<DropdownMenuSeparator />
 				<AccountItems person={me.person} onSettings={onSettings} />
@@ -354,6 +353,7 @@ function RailAccount({ me, onSettings }: { me: Me; onSettings: () => void }) {
 // The header is as tall as the rail is wide, so the frame reads evenly on both sides.
 export function AppShell({ children }: { children: ReactNode }) {
 	const { me, pending } = appRoute.useLoaderData();
+	useLiveRefresh();
 	const waiting = decidable(pending);
 	const items = places(waiting.length);
 	const title = useMatches({

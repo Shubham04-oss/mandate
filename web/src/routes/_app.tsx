@@ -5,6 +5,7 @@ import {
 	useRouter,
 } from "@tanstack/react-router";
 import { AppShell } from "#/components/app/app-shell.tsx";
+import { keepOnFailedRefresh } from "#/components/app/keep-on-refresh.ts";
 import {
 	isSettingsSection,
 	type SettingsSection,
@@ -21,13 +22,13 @@ export const Route = createFileRoute("/_app")({
 	validateSearch: (search: Record<string, unknown>): AppSearch =>
 		isSettingsSection(search.settings) ? { settings: search.settings } : {},
 	// A lost session goes to /sign-in from the API module itself (src/lib/api/index.ts).
-	loader: async () => {
+	loader: keepOnFailedRefresh(async () => {
 		const [me, pending] = await Promise.all([
 			api.me(),
 			api.approvals.list("pending"),
 		]);
 		return { me, pending: pending.items };
-	},
+	}),
 	errorComponent: AppUnavailable,
 	pendingComponent: AppLoading,
 	component: () => (
