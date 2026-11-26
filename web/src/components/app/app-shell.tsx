@@ -10,6 +10,7 @@ import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { PersonAvatar } from "#/components/auth/parts.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
+import { StatusMark } from "#/components/icons/status-mark.tsx";
 import {
 	SettingsDialog,
 	type SettingsSection,
@@ -161,7 +162,7 @@ function NeedsTab({ waiting }: { waiting: Approval[] }) {
 					<PersonAvatar key={person.id} person={person} className="size-5" />
 				))}
 			</AvatarGroup>
-			<i aria-hidden="true" className="status-dot bg-gold-deep" />
+			<StatusMark mark="needs-you" size={14} />
 			{waiting.length} need you
 			<Icon
 				name="chevron-right"

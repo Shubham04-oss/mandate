@@ -2,14 +2,17 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "cn";
 import type * as React from "react";
 
+/**
+ * A notice: the same rimmed container as a card. A bare icon or status mark carries the colour,
+ * then a title, one line, and at most one action. Status marks keep their own colour.
+ */
 const alertVariants = cva(
-	"group/alert relative grid w-full gap-0.5 rounded-lg px-3.5 py-3 text-left text-[12.5px] leading-normal has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-18 has-[>svg]:grid-cols-[auto_1fr] has-[>svg]:gap-x-2 *:[svg]:row-span-2 *:[svg]:translate-y-0.5 *:[svg]:text-current *:[svg:not([class*='size-'])]:size-4",
+	"group/alert rim relative grid w-full items-center gap-0.5 rounded-[22px] bg-raised px-4 py-3 text-left text-[13px] text-soft-foreground leading-normal has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-32 has-[>svg]:grid-cols-[auto_1fr] has-[>svg]:gap-x-3 *:[svg]:row-span-2 *:[svg:not([class*='size-']):not([data-mark])]:size-[18px]",
 	{
 		variants: {
 			variant: {
-				default: "bg-muted text-soft-foreground *:[svg]:text-muted-foreground",
-				destructive:
-					"bg-card text-destructive *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current",
+				default: "*:[svg:not([data-mark])]:text-muted-foreground",
+				destructive: "*:[svg:not([data-mark])]:text-danger-foreground",
 			},
 		},
 		defaultVariants: {
@@ -38,7 +41,7 @@ function AlertTitle({ className, ...props }: React.ComponentProps<"div">) {
 		<div
 			data-slot="alert-title"
 			className={cn(
-				"font-medium group-has-[>svg]/alert:col-start-2 [&_a]:underline [&_a]:underline-offset-3 [&_a]:hover:text-foreground",
+				"font-semibold text-foreground group-has-[>svg]/alert:col-start-2 [&_a]:underline [&_a]:underline-offset-3 [&_a]:hover:text-foreground",
 				className,
 			)}
 			{...props}
@@ -66,10 +69,10 @@ function AlertAction({ className, ...props }: React.ComponentProps<"div">) {
 	return (
 		<div
 			data-slot="alert-action"
-			className={cn("absolute top-2 right-2", className)}
+			className={cn("-translate-y-1/2 absolute top-1/2 right-3", className)}
 			{...props}
 		/>
 	);
 }
 
-export { Alert, AlertTitle, AlertDescription, AlertAction };
+export { Alert, AlertTitle, AlertDescription, AlertAction, alertVariants };

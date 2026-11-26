@@ -27,14 +27,13 @@ const Toaster = ({ ...props }: ToasterProps) => {
 					"--normal-bg": "var(--raised)",
 					"--normal-text": "var(--text)",
 					"--normal-border": "var(--border-quiet)",
-					"--border-radius": "16px",
+					"--border-radius": "20px",
 					"--width": "380px",
 				} as React.CSSProperties
 			}
 			toastOptions={{
 				classNames: {
-					toast:
-						"cn-toast !min-h-16 !rounded-section !border-0 !shadow-float !font-sans",
+					toast: "cn-toast !min-h-16 !rounded-[20px] rim-glass! !font-sans",
 					title: "!text-[12.5px] !font-bold",
 					description: "!text-[12px] !text-muted-foreground",
 				},
@@ -66,7 +65,7 @@ function SceneToast({
 	return (
 		<div
 			className={cn(
-				"relative flex min-h-16 w-[380px] items-center gap-3 overflow-hidden rounded-section bg-raised py-2.5 pr-3 font-sans text-foreground shadow-float",
+				"relative flex min-h-16 w-[380px] items-center gap-3 overflow-hidden rounded-[20px] bg-raised py-2.5 pr-3 font-sans text-foreground rim-glass",
 				scene ? "pl-[74px]" : "pl-3.5",
 				className,
 			)}

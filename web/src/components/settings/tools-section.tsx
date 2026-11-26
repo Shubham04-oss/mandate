@@ -1,6 +1,7 @@
 import { getRouteApi } from "@tanstack/react-router";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { Icon } from "#/components/icons/icon.tsx";
+import { StatusMark } from "#/components/icons/status-mark.tsx";
 import { SettingsHeader } from "#/components/settings/parts.tsx";
 import {
 	AlertDialog,
@@ -112,7 +113,8 @@ export function ToolsSection() {
 			{access === "not_admin" ? (
 				<NotAdmin org={me.org.name} />
 			) : error ? (
-				<div className="flex flex-wrap items-center gap-3 rounded-card bg-raised px-5 py-4 shadow-card">
+				<div className="rim flex flex-wrap items-center gap-3 rounded-window bg-raised px-5 py-4">
+					<StatusMark mark="error" size={18} />
 					<p
 						role="alert"
 						className="m-0 flex-1 text-[13px] text-soft-foreground"
@@ -125,8 +127,8 @@ export function ToolsSection() {
 				</div>
 			) : !data ? (
 				<div className="flex flex-col gap-4" aria-busy="true">
-					<Skeleton className="h-36 rounded-card" />
-					<Skeleton className="h-36 rounded-card" />
+					<Skeleton className="h-36 rounded-window" />
+					<Skeleton className="h-36 rounded-window" />
 				</div>
 			) : (
 				<>
@@ -151,9 +153,9 @@ export function ToolsSection() {
 
 function NotAdmin({ org }: { org: string }) {
 	return (
-		<section className="flex items-start gap-3.5 rounded-card bg-raised p-[22px] shadow-card">
-			<span className="grid size-9 flex-none place-items-center rounded-[11px] bg-hover text-soft-foreground">
-				<Icon name="lock" size={17} strokeWidth={1.9} />
+		<section className="rim flex items-start gap-3.5 rounded-window bg-raised p-[22px]">
+			<span className="grid size-6 flex-none place-items-center text-muted-foreground">
+				<Icon name="lock" size={20} strokeWidth={1.8} />
 			</span>
 			<div className="flex flex-col gap-1">
 				<b className="font-semibold text-[14px]">
@@ -200,14 +202,14 @@ function ToolCard({
 	return (
 		<section
 			aria-labelledby={headingId}
-			className="overflow-hidden rounded-card bg-raised shadow-card"
+			className="rim overflow-hidden rounded-window bg-raised"
 		>
 			<div className="flex flex-wrap items-center gap-3 p-4">
-				<span className="grid size-9 flex-none place-items-center rounded-[11px] bg-sky-soft text-sea">
+				<span className="grid size-6 flex-none place-items-center text-sea">
 					<Icon
 						name={tool.id === "web.read_page" ? "link" : "laptop"}
-						size={17}
-						strokeWidth={1.9}
+						size={20}
+						strokeWidth={1.8}
 					/>
 				</span>
 				<div className="flex min-w-[200px] flex-1 flex-col gap-0.5">
@@ -494,7 +496,7 @@ function AllowDialog({
 								aria-labelledby="grant-days"
 								value={days}
 								onValueChange={(v) => setDays(String(v))}
-								className="grid grid-cols-4 gap-1 rounded-full bg-hover p-1"
+								className="rim grid grid-cols-4 gap-1 rounded-full bg-hover p-1"
 							>
 								{expiryChoices.map((d) => (
 									// biome-ignore lint/a11y/noLabelWithoutControl: the radio inside is the control

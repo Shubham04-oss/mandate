@@ -2,6 +2,12 @@ import { Link, type LinkProps } from "@tanstack/react-router";
 import { cn } from "cn";
 import type { FormEvent, ReactNode } from "react";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
+import { StatusMark } from "#/components/icons/status-mark.tsx";
+import {
+	Alert,
+	AlertDescription,
+	alertVariants,
+} from "#/components/ui/alert.tsx";
 import { brand } from "#/lib/brand.ts";
 
 export type Scene =
@@ -115,12 +121,10 @@ export function AuthForm({
 export function FormError({ message }: { message?: string | null }) {
 	if (!message) return null;
 	return (
-		<p
-			role="alert"
-			className="m-0 rounded-lg bg-destructive/12 px-3.5 py-2.5 text-[12.5px] text-danger-foreground leading-normal"
-		>
-			{message}
-		</p>
+		<Alert variant="destructive">
+			<StatusMark mark="error" size={18} />
+			<AlertDescription className="text-foreground">{message}</AlertDescription>
+		</Alert>
 	);
 }
 
@@ -128,12 +132,10 @@ export function FormError({ message }: { message?: string | null }) {
 export function FormNote({ children }: { children?: ReactNode }) {
 	if (!children) return null;
 	return (
-		<p
-			aria-live="polite"
-			className="m-0 rounded-lg bg-muted px-3.5 py-2.5 text-[12.5px] text-soft-foreground leading-normal"
-		>
-			{children}
-		</p>
+		<div aria-live="polite" className={alertVariants()}>
+			<StatusMark mark="info" size={18} />
+			<AlertDescription>{children}</AlertDescription>
+		</div>
 	);
 }
 

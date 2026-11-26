@@ -1,7 +1,6 @@
 import { useRouter } from "@tanstack/react-router";
 import { useState } from "react";
-import { Spinner } from "#/components/agent/marks.tsx";
-import { Icon } from "#/components/icons/icon.tsx";
+import { StatusMark } from "#/components/icons/status-mark.tsx";
 import { Button } from "#/components/ui/button.tsx";
 import { ApiError, type Approval, api } from "#/lib/api/index.ts";
 import {
@@ -17,7 +16,7 @@ export function ActivityPanel({ steps }: { steps: Step[] }) {
 	return (
 		<aside
 			aria-labelledby="work-h"
-			className="mt-11 flex min-w-0 flex-[1_1_300px] flex-col gap-5 self-start rounded-[14px] bg-raised p-[22px] shadow-[inset_0_0_0_1px_var(--border-quiet)] lg:sticky lg:top-12 lg:max-w-[380px]"
+			className="mt-11 flex min-w-0 flex-[1_1_300px] flex-col gap-5 self-start rim rounded-window bg-raised p-[22px] lg:sticky lg:top-12 lg:max-w-[380px]"
 		>
 			<h2 id="work-h" className="eyebrow">
 				What your agent did
@@ -76,34 +75,16 @@ function StepItem({ step }: { step: Step }) {
 
 function StepIcon({ step, waiting }: { step: Step; waiting: boolean }) {
 	if (waiting)
-		return (
-			<i
-				role="img"
-				aria-label="Needs your OK"
-				className="size-2 rounded-full bg-gold-deep"
-			/>
-		);
+		return <StatusMark mark="needs-you" label="Needs your OK" size={15} />;
 	if (step.status === "requested" || step.status === "running")
-		return (
-			<span role="img" aria-label="Under way" className="text-sea">
-				<Spinner className="size-3.5" />
-			</span>
-		);
+		return <StatusMark mark="working" label="Under way" size={15} />;
 	if (step.status === "completed")
-		return (
-			<Icon
-				name="check"
-				size={14}
-				strokeWidth={2.4}
-				label="Done"
-				className="text-ok-foreground"
-			/>
-		);
+		return <StatusMark mark="done" label="Done" size={15} />;
 	return (
-		<Icon
-			name="cross-circle"
-			size={14}
+		<StatusMark
+			mark="failed"
 			label={step.status === "denied" ? "Not done" : "Failed"}
+			size={15}
 			className="text-muted-foreground"
 		/>
 	);

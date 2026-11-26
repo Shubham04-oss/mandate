@@ -65,6 +65,14 @@
 	--sea: #a9c1ea;
 	--sea-soft: #1b2431;
 	--sea-deep: #1c3350;
+
+	/* the rim round cards and notices, and the glass round pop-ups (see .rim, .rim-glass) */
+	--rim: rgb(255 255 255 / 0.045);
+	--rim-ring: rgb(255 255 255 / 0.07);
+	--rim-top: rgb(255 255 255 / 0.12);
+	--glass: rgb(255 255 255 / 0.08);
+	--glass-ring: rgb(255 255 255 / 0.14);
+	--glass-top: rgb(255 255 255 / 0.24);
 }
 
 /* The website's own palette: page, card, ink, line, subtle, and warm shadows. */
@@ -106,6 +114,13 @@
 	--sky-soft: #e8eef9;
 	--sea: #2f4c6e;
 	--sea-soft: #dfe6ef;
+
+	--rim: rgb(26 20 15 / 0.035);
+	--rim-ring: rgb(26 20 15 / 0.06);
+	--rim-top: rgb(26 20 15 / 0.06);
+	--glass: rgb(255 255 255 / 0.42);
+	--glass-ring: rgb(26 20 15 / 0.08);
+	--glass-top: rgb(255 255 255 / 0.9);
 }
 
 /* shadcn's names, pointed at the oryxa roles */
@@ -207,6 +222,44 @@
 	--breakpoint-split: 800px;
 }
 
+/*
+ * The container. A surface sits inside a thin rim that follows its curve: 4px of border clipped
+ * outside the background, a hairline inside it and another outside. Give the element a radius 4px
+ * larger than the surface should have. On the page the rim is a faint frame; on things that float
+ * over the page (menus, dialogs, toasts) it is glass, blurring what's behind.
+ */
+@utility rim {
+	background-clip: padding-box;
+	border: 4px solid var(--rim);
+	box-shadow:
+		inset 0 0 0 1px var(--border-quiet),
+		0 -1px 0 0 var(--rim-top),
+		0 0 0 1px var(--rim-ring);
+}
+
+@utility rim-lift {
+	background-clip: padding-box;
+	border: 4px solid var(--rim);
+	box-shadow:
+		inset 0 0 0 1px var(--border-quiet),
+		0 -1px 0 0 var(--rim-top),
+		0 0 0 1px var(--rim-ring),
+		0 1px 2px var(--shade-card-1),
+		0 16px 40px var(--shade-card-3);
+}
+
+@utility rim-glass {
+	background-clip: padding-box;
+	border: 4px solid var(--glass);
+	-webkit-backdrop-filter: blur(22px) saturate(160%);
+	backdrop-filter: blur(22px) saturate(160%);
+	box-shadow:
+		inset 0 0 0 1px var(--border-quiet),
+		0 -1px 0 0 var(--glass-top),
+		0 0 0 1px var(--glass-ring),
+		0 24px 64px var(--shade-66);
+}
+
 @layer base {
 	* {
 		@apply border-border outline-ring/50;
@@ -283,13 +336,6 @@
 		background: var(--gold-deep);
 	}
 
-	/* A status dot: answered, waiting, or (orange) needs the person. */
-	.status-dot {
-		flex: none;
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-	}
 }
 
 /*

@@ -1,5 +1,4 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { cn } from "cn";
 import {
 	type FormEvent,
 	type ReactNode,
@@ -7,10 +6,9 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { Spinner } from "#/components/agent/marks.tsx";
 import { useStartConversation } from "#/components/agent/use-start-conversation.ts";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
-import { Badge } from "#/components/ui/badge.tsx";
+import { StatusMark } from "#/components/icons/status-mark.tsx";
 import {
 	InputGroup,
 	InputGroupAddon,
@@ -109,9 +107,9 @@ function AskBox({
 				<InputGroupAddon align="inline-start" className="pl-0">
 					<span
 						aria-hidden="true"
-						className="grid size-7 place-items-center rounded-full bg-sky-soft text-sea"
+						className="grid size-7 place-items-center text-sea"
 					>
-						<Icon name="bot" size={15} strokeWidth={1.9} />
+						<Icon name="bot" size={20} strokeWidth={1.8} />
 					</span>
 				</InputGroupAddon>
 				<InputGroupInput
@@ -190,8 +188,8 @@ function QuickActions({ onPick }: { onPick: (text: string) => void }) {
 							onClick={() => onPick(action.prompt)}
 							className="min-h-24 flex-col flex-nowrap items-start gap-2.5 rounded-[13px] bg-white/10 p-3 text-white shadow-[inset_0_0_0_1px_rgb(255_255_255/0.16)] backdrop-blur-[10px] hover:bg-white/18"
 						>
-							<ItemMedia className="grid size-[26px] place-items-center rounded-[7px] bg-white text-[#111111]">
-								<Icon name={action.icon} size={15} strokeWidth={1.9} />
+							<ItemMedia className="grid size-[22px] place-items-center text-white">
+								<Icon name={action.icon} size={19} strokeWidth={1.8} />
 							</ItemMedia>
 							<ItemContent className="gap-0.5">
 								<ItemTitle className="line-clamp-2 text-[12.5px] text-white leading-[1.35]">
@@ -219,36 +217,13 @@ type Row = {
 	conversationId?: string;
 };
 
-// Icon tiles, tinted by who acted and how it ended: sky and sea for the agent at work, the orange
-// for what needs you, green for done. Corners are 0.3 of the tile, as on the website.
-const tile = "grid size-[26px] place-items-center rounded-[8px]";
-
+// Bare status marks, nothing behind them: how each row stands, in its own colour.
 const marks: Record<string, ReactNode> = {
-	working: (
-		<span className={cn(tile, "bg-sky-soft text-sea")}>
-			<Spinner />
-		</span>
-	),
-	waiting: (
-		<span className={cn(tile, "bg-gold-soft")}>
-			<i className="status-dot bg-gold-deep" />
-		</span>
-	),
-	done: (
-		<span className={cn(tile, "bg-ok text-ok-foreground")}>
-			<Icon name="check" size={14} strokeWidth={2.4} />
-		</span>
-	),
-	approved: (
-		<span className={cn(tile, "bg-ok text-ok-foreground")}>
-			<Icon name="shield-check" size={14} strokeWidth={1.9} />
-		</span>
-	),
-	refused: (
-		<span className={cn(tile, "bg-destructive/12 text-danger-foreground")}>
-			<Icon name="cross-circle" size={14} strokeWidth={1.9} />
-		</span>
-	),
+	working: <StatusMark mark="working" size={18} />,
+	waiting: <StatusMark mark="needs-you" size={18} />,
+	done: <StatusMark mark="done" size={18} />,
+	approved: <StatusMark mark="done" size={18} />,
+	refused: <StatusMark mark="failed" size={18} />,
 };
 
 /** A side panel: a card with a painted scene fading into it, named by an eyebrow. */
@@ -277,7 +252,7 @@ function SidePanel({
 		<section
 			data-area={area}
 			aria-labelledby={id}
-			className="flex flex-col gap-0.5 overflow-hidden rounded-card bg-raised px-1.5 pb-1.5 shadow-card"
+			className="rim flex flex-col gap-0.5 overflow-hidden rounded-window bg-raised px-1.5 pb-1.5"
 		>
 			<div
 				aria-hidden="true"
@@ -289,9 +264,9 @@ function SidePanel({
 					{title}
 				</h2>
 				{count ? (
-					<Badge className="h-[18px] rounded-full bg-active px-1.5 text-[11px] text-foreground">
+					<span className="font-semibold text-[12px] text-muted-foreground tabular-nums">
 						{count}
-					</Badge>
+					</span>
 				) : null}
 				<span className="ml-auto text-[12px] text-muted-foreground">
 					{more}

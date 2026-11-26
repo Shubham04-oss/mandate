@@ -56,7 +56,7 @@ function DialogContent({
 				data-slot="dialog-content"
 				data-scene={scene || undefined}
 				className={cn(
-					"fixed top-1/2 left-1/2 z-50 flex w-[420px] max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl bg-popover text-[13px] text-popover-foreground shadow-dialog duration-150 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+					"fixed top-1/2 left-1/2 z-50 flex w-[420px] max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[22px] bg-popover text-[13px] text-popover-foreground rim-glass duration-150 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
 					className,
 				)}
 				{...props}
@@ -142,13 +142,13 @@ function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
 	);
 }
 
-/** A small raised tile for an icon or an avatar, at the top of the body. */
+/** An icon or an avatar at the top of the body, bare. */
 function DialogIcon({ className, ...props }: React.ComponentProps<"span">) {
 	return (
 		<span
 			data-slot="dialog-icon"
 			className={cn(
-				"grid size-10 shrink-0 place-items-center rounded-lg bg-raised shadow-icon [&_img]:size-6 [&_img]:rounded-full [&_svg:not([class*='size-'])]:size-[18px]",
+				"grid size-10 shrink-0 place-items-center [&_img]:size-6 [&_img]:rounded-full [&_svg:not([class*='size-'])]:size-[18px]",
 				className,
 			)}
 			{...props}

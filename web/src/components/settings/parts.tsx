@@ -45,7 +45,7 @@ export function SettingsGroup({
 
 export function SettingsCard({ children }: { children: ReactNode }) {
 	return (
-		<ul className="m-0 flex list-none flex-col rounded-card bg-raised p-0 shadow-card">
+		<ul className="rim m-0 flex list-none flex-col rounded-window bg-raised p-0">
 			{children}
 		</ul>
 	);
