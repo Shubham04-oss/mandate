@@ -2070,7 +2070,7 @@ async fn other_eve_4xx_on_send_are_503_and_end_nothing() {
     let id = start(&h, &t, "hello").await;
     h.settle(&t, &id).await;
     let app = h.app(&t, "ann").await;
-    for code in [408, 409, 429] {
+    for code in [404, 408, 409, 429] {
         *h.fake.send_status.lock().unwrap() = Some((code, json!({ "ok": false, "code": "busy" })));
         let (status, v) = call(
             &app,

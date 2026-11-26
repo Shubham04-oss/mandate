@@ -76,7 +76,8 @@ pub enum Record {
 async fn failure(res: reqwest::Response) -> EveError {
     let status = res.status().as_u16();
     let gone = match status {
-        404 | 410 => true,
+        // Not 404: eve's client retries it (a proxy or deploy blip), so it must not end anything.
+        410 => true,
         // A busy or waiting turn's 409 names another code, or none.
         409 => {
             let body = res.json::<Value>().await.ok();
