@@ -61,9 +61,28 @@ const TOO_MANY_STREAMS: ApiError = ApiError::new(
     "Too many open conversations. Close one and try again.",
 );
 
+const ENDED: ApiError = ApiError::conflict("This conversation has ended.");
+const NOT_STARTED: ApiError = ApiError::conflict("This conversation could not start.");
+
+/// eve's 4xx is final (the session or turn cannot take this): 409. A transport error or an eve
+/// fault may pass: 503.
 fn eve_down(e: EveError) -> ApiError {
     tracing::warn!(error = %e, "eve call failed");
-    EVE_DOWN
+    match e {
+        EveError::Status(code) if (400..500).contains(&code) => ENDED,
+        _ => EVE_DOWN,
+    }
+}
+
+/// How `give_up` leaves a conversation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GiveUp {
+    /// eve never started it: `failed` and finished.
+    NeverStarted,
+    /// eve could not be reached or failed: idle.
+    Unavailable,
+    /// eve refused it for good: idle and finished.
+    Ended,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -209,12 +228,10 @@ impl Conversations {
         approval: Uuid,
         decision: Decided,
     ) -> Result<(), HandlerError> {
-        let want = match decision {
-            Decided::Approved => approvals::State::Approved,
-            Decided::Denied => approvals::State::Denied,
-        };
+        // The recorded decision, not the derived state: one handled after expiry or after its use
+        // still resumes. The consumer's inbox, in this transaction, keeps a redelivery from resuming twice.
         match approvals::load(tx, approval, OffsetDateTime::now_utc()).await? {
-            Some(a) if a.state == want => {}
+            Some(a) if a.decision == Some(decision) => {}
             _ => {
                 tracing::warn!(%approval, "approval is not in the decided state; nothing resumed");
                 return Ok(());
@@ -284,7 +301,11 @@ impl Conversations {
                 Ok(())
             }
             Err(e) => {
-                self.give_up(tenant, id, false).await?;
+                let how = match e {
+                    EveError::Status(code) if (400..500).contains(&code) => GiveUp::Ended,
+                    _ => GiveUp::Unavailable,
+                };
+                self.give_up(tenant, id, how).await?;
                 if matches!(e, EveError::Request(_)) {
                     self.kick(tenant, id);
                 }
@@ -327,7 +348,7 @@ impl Conversations {
                     failures += 1;
                     tracing::warn!(error = %e, conversation = %id, failures, "relay failed");
                     if failures >= MAX_RELAY_FAILURES {
-                        let _ = self.give_up(tenant, id, false).await;
+                        let _ = self.give_up(tenant, id, GiveUp::Unavailable).await;
                         true
                     } else {
                         false
@@ -362,27 +383,44 @@ impl Conversations {
         .await?)
     }
 
-    /// Tells the browser the agent is unavailable. A conversation eve never started is `failed`
-    /// and finished; any other goes idle.
-    async fn give_up(
-        &self,
-        tenant: &TenantId,
-        id: Uuid,
-        never_started: bool,
-    ) -> Result<(), StoreError> {
+    /// Tells the browser why the agent stopped and records it (see `GiveUp`). A turn `waiting`
+    /// on an approval is left waiting: a decision still resumes it.
+    async fn give_up(&self, tenant: &TenantId, id: Uuid, how: GiveUp) -> Result<(), StoreError> {
         let mut tx = self.app.store.begin(tenant).await?;
         lock(&mut tx, id).await?;
-        let ev = json!({ "code": "internal", "message": "The agent is unavailable." });
-        push(&mut tx, id, "error", ev).await?;
-        if never_started {
-            set_state(&mut tx, id, "failed").await?;
-            events::publish(
-                &mut tx,
-                events::Event::ConversationFinished { conversation: id },
-            )
-            .await?;
-        } else {
-            set_state(&mut tx, id, "idle").await?;
+        let message = match how {
+            GiveUp::Ended => "This conversation has ended.",
+            _ => "The agent is unavailable.",
+        };
+        push(
+            &mut tx,
+            id,
+            "error",
+            json!({ "code": "internal", "message": message }),
+        )
+        .await?;
+        let waiting = sqlx::query_scalar::<_, String>(
+            "select state from conversations where tenant_id = current_setting('mandate.tenant', true) and id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .as_deref()
+            == Some("waiting");
+        let state = match how {
+            GiveUp::NeverStarted => Some("failed"),
+            _ if waiting => None,
+            _ => Some("idle"),
+        };
+        if let Some(state) = state {
+            set_state(&mut tx, id, state).await?;
+            if how != GiveUp::Unavailable {
+                events::publish(
+                    &mut tx,
+                    events::Event::ConversationFinished { conversation: id },
+                )
+                .await?;
+            }
         }
         tx.commit().await?;
         Ok(())
@@ -867,6 +905,27 @@ async fn load(
     }))
 }
 
+/// The caller's own conversation with an eve session; one eve never started is 409, not 404.
+async fn mine(store: &store::Store, session: &Session, id: Uuid) -> Result<Conv, ApiError> {
+    if let Some(c) = load(store, &session.tenant, id, Some(&session.member)).await? {
+        return Ok(c);
+    }
+    let mut tx = store.begin(&session.tenant).await?;
+    let state: Option<String> = sqlx::query_scalar(
+        "select state from conversations where tenant_id = current_setting('mandate.tenant', true) \
+         and id = $1 and member = $2",
+    )
+    .bind(id)
+    .bind(session.member.as_str())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(StoreError::from)?;
+    Err(match state.as_deref() {
+        Some("failed") => NOT_STARTED,
+        _ => ApiError::not_found(),
+    })
+}
+
 async fn conversation_json(tx: &mut Tx, id: Uuid) -> Result<Value, sqlx::Error> {
     // A wait whose latest ask since the member last wrote expired undecided waits for no one:
     // it reads `expired`. An older turn's ask never counts.
@@ -994,26 +1053,43 @@ async fn start(
         &s.app.assertion_signing_key,
     );
     // A session first, with no turn: a create that is lost or repeated leaves at most an idle session.
+    let failed = |err: StoreError| {
+        tracing::error!(error = %err, conversation = %id, "failed start not recorded; row left working");
+    };
     let eve = match s.eve.create(&token, &id.to_string()).await {
         Ok(eve) => eve,
         Err(e) => {
-            if let Err(err) = s.give_up(&session.tenant, id, true).await {
-                tracing::error!(error = %err, conversation = %id, "failed start not recorded; row left working");
-            }
+            s.give_up(&session.tenant, id, GiveUp::NeverStarted)
+                .await
+                .unwrap_or_else(failed);
             return Err(eve_down(e));
         }
     };
-    let mut tx = api.store.begin(&session.tenant).await?;
-    sqlx::query(
-        "update conversations set eve_session = $2 \
-         where tenant_id = current_setting('mandate.tenant', true) and id = $1",
-    )
-    .bind(id)
-    .bind(eve.as_str())
-    .execute(&mut *tx)
-    .await?;
-    let json = conversation_json(&mut tx, id).await?;
-    tx.commit().await?;
+    // A session eve made but the row never names is never used: the conversation failed to start.
+    let recorded = async {
+        let mut tx = api.store.begin(&session.tenant).await?;
+        sqlx::query(
+            "update conversations set eve_session = $2 \
+             where tenant_id = current_setting('mandate.tenant', true) and id = $1",
+        )
+        .bind(id)
+        .bind(eve.as_str())
+        .execute(&mut *tx)
+        .await?;
+        let json = conversation_json(&mut tx, id).await?;
+        tx.commit().await?;
+        Ok::<_, StoreError>(json)
+    }
+    .await;
+    let json = match recorded {
+        Ok(json) => json,
+        Err(e) => {
+            s.give_up(&session.tenant, id, GiveUp::NeverStarted)
+                .await
+                .unwrap_or_else(failed);
+            return Err(e.into());
+        }
+    };
     s.deliver(&session.tenant, id, &eve, &token, text, seq)
         .await?;
     Ok((StatusCode::CREATED, Json(json)).into_response())
@@ -1088,9 +1164,7 @@ async fn send(
 ) -> Result<StatusCode, ApiError> {
     let text = message(&body)?;
     let id = conversation_id(&raw)?;
-    let c = load(&api.store, &session.tenant, id, Some(&session.member))
-        .await?
-        .ok_or(ApiError::not_found())?;
+    let c = mine(&api.store, &session, id).await?;
     let key = format!("conversation-send:{}:{}", session.tenant, session.member);
     if let Some(secs) = ratelimit::hit(
         &api.store,
@@ -1112,7 +1186,14 @@ async fn send(
         json!({ "role": "user", "text": text }),
     )
     .await?;
-    set_state(&mut tx, id, "working").await?;
+    // A turn waiting on an approval stays waiting until eve shows it running.
+    sqlx::query(
+        "update conversations set state = 'working', updated_at = now() \
+         where tenant_id = current_setting('mandate.tenant', true) and id = $1 and state <> 'waiting'",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     let token = s.token(&session.tenant, &c);
     s.deliver(&session.tenant, id, &c.eve, &token, text, seq)
@@ -1127,9 +1208,7 @@ async fn cancel(
     Path(raw): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = conversation_id(&raw)?;
-    let c = load(&api.store, &session.tenant, id, Some(&session.member))
-        .await?
-        .ok_or(ApiError::not_found())?;
+    let c = mine(&api.store, &session, id).await?;
     // Nothing is running: cancelling must not restart the relay or mark the conversation working.
     if !matches!(
         s.state(&session.tenant, id).await?.as_deref(),

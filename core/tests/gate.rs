@@ -407,7 +407,8 @@ async fn approval_covers_only_its_exact_args() {
     else {
         panic!("expected ask")
     };
-    approve_as(&s, &t, approval, "ann").await;
+    // A teammate approves: the requester may not approve their own team request.
+    approve_as(&s, &t, approval, "bob").await;
 
     assert!(matches!(
         authorize(&s, &p, &w, &tl, Effect::External, &b, now).await,

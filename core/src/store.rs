@@ -240,14 +240,23 @@ pub async fn dead_letter(
     Ok(())
 }
 
-/// The member's personal operator (`op-` + a hash of the member id), created if they have none;
-/// a disabled one stays disabled. The app role cannot insert agents: a narrow database function
-/// does it.
+/// The member's personal operator (`op-` + a hash of the member id), created if they have none.
+/// One disabled by the member's removal is enabled again; any other disabled one stays disabled.
+/// The app role cannot insert agents: a narrow database function does it.
 pub async fn ensure_personal_agent(tx: &mut Tx, member: &MemberId) -> Result<(), StoreError> {
     sqlx::query("select ensure_personal_agent($1)")
         .bind(member.as_str())
         .execute(&mut **tx)
         .await?;
+    sqlx::query(
+        "update agents g set disabled = false, disabled_reason = null \
+         where g.tenant_id = current_setting('mandate.tenant', true) and g.kind = 'personal' \
+         and g.owner_member = $1 and g.disabled and g.disabled_reason = 'owner_removed' \
+         and exists (select 1 from members m where m.tenant_id = g.tenant_id and m.id = $1)",
+    )
+    .bind(member.as_str())
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -269,7 +278,10 @@ pub async fn remove_member(tx: &mut Tx, member: &MemberId) -> Result<(), StoreEr
         format!("delete from sessions where tenant_id = {t} and member = $1"),
         format!("delete from members where tenant_id = {t} and id = $1"),
         format!(
-            "update agents set disabled = true where tenant_id = {t} and kind = 'personal' and owner_member = $1"
+            // An admin's earlier disable keeps its reason, so a return does not undo it.
+            "update agents set disabled = true, \
+             disabled_reason = case when disabled then disabled_reason else 'owner_removed' end \
+             where tenant_id = {t} and kind = 'personal' and owner_member = $1"
         ),
     ] {
         sqlx::query(sqlx::AssertSqlSafe(q))
