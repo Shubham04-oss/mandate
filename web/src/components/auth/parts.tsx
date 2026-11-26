@@ -230,9 +230,11 @@ export function InviteCard({ invitation }: { invitation: Invitation }) {
 				<OrgMark initial={org.name[0] ?? "?"} brand="var(--sea-deep)" />
 				<div>
 					<b className="block text-[15px]">{org.name}</b>
-					<small className="text-[12px] text-muted-foreground">
-						{orgSummary(org)}
-					</small>
+					{orgSummary(org) ? (
+						<small className="text-[12px] text-muted-foreground">
+							{orgSummary(org)}
+						</small>
+					) : null}
 				</div>
 			</div>
 			<div className="flex items-center gap-2.5 border-t pt-3 text-[12.5px] text-soft-foreground leading-[1.45]">
@@ -252,10 +254,12 @@ export function InviteCard({ invitation }: { invitation: Invitation }) {
 	);
 }
 
-export const orgSummary = (org: Org) =>
-	`${org.summary.people} ${org.summary.people === 1 ? "person" : "people"} · ${org.summary.agents} ${
-		org.summary.agents === 1 ? "agent" : "agents"
-	}`;
+/** "3 people · 1 agent", or null when the core sent no counts (or only zeros, which can't be true). */
+export const orgSummary = (org: Org) => {
+	const { people = 0, agents = 0 } = org.summary ?? {};
+	if (!people && !agents) return null;
+	return `${people} ${people === 1 ? "person" : "people"} · ${agents} ${agents === 1 ? "agent" : "agents"}`;
+};
 
 /** A person's picture, or their initial when they have none. */
 export function PersonAvatar({
@@ -299,7 +303,9 @@ export function OrgChoice({
 			</ItemMedia>
 			<ItemContent className="gap-0.5">
 				<ItemTitle>{org.name}</ItemTitle>
-				<ItemDescription>{orgSummary(org)}</ItemDescription>
+				{orgSummary(org) ? (
+					<ItemDescription>{orgSummary(org)}</ItemDescription>
+				) : null}
 			</ItemContent>
 			<ItemActions>
 				<Icon name="chevron-right" className="text-muted-foreground" />
