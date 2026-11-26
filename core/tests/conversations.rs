@@ -10,6 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use ed25519_dalek::SigningKey;
+use futures::StreamExt;
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mandate::api::approvals::{Decision, decide_approval};
@@ -29,7 +30,7 @@ use mandate::tools::browser::{BrowserBackend, Page, ReadPage, SubmitForm};
 use mandate::tools::{Catalog, ToolError};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -57,6 +58,8 @@ struct FakeEve {
     fail_start: AtomicBool,
     /// A read ends with eve's `stream.ended` (the session is over) instead of a lease end.
     ended: AtomicBool,
+    /// Milliseconds a read waits after its lines before ending, as eve does until the session ends.
+    end_delay_ms: AtomicU64,
     /// Session starts, or messages to a session, answer only after 30 s.
     hang_start: AtomicBool,
     hang_send: AtomicBool,
@@ -155,7 +158,7 @@ async fn fake_stream(
     Path((id, _)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
-) -> String {
+) -> Body {
     f.record(
         format!("/eve/v1/session/{id}/stream"),
         &headers,
@@ -174,12 +177,18 @@ async fn fake_stream(
         out.push_str(l);
         out.push('\n');
     }
-    if f.ended.load(Ordering::SeqCst) {
-        out.push_str("{\"$eve\":\"stream.ended\"}\n");
+    let end = if f.ended.load(Ordering::SeqCst) {
+        "{\"$eve\":\"stream.ended\"}\n"
     } else {
-        out.push_str("{\"$eve\":\"stream.lease-ended\"}\n");
-    }
-    out
+        "{\"$eve\":\"stream.lease-ended\"}\n"
+    };
+    let delay = Duration::from_millis(f.end_delay_ms.load(Ordering::SeqCst));
+    let lines = futures::stream::once(async move { Ok::<_, std::io::Error>(out) });
+    let end = futures::stream::once(async move {
+        tokio::time::sleep(delay).await;
+        Ok(end.to_owned())
+    });
+    Body::from_stream(lines.chain(end))
 }
 
 /// Serves the fake on a random local port; returns its base URL.
@@ -483,6 +492,23 @@ impl Harness {
         }
         panic!("conversation never settled");
     }
+
+    /// Waits for the tenant's outbox to hold `n` events; returns their types in publish order.
+    /// Idle only means the turn settled: `conversation.finished.v1` follows when eve ends the session.
+    async fn outbox_kinds(&self, t: &TenantId, n: usize) -> Vec<String> {
+        for _ in 0..200 {
+            let kinds: Vec<String> = outbox(&self.store, t)
+                .await
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            if kinds.len() >= n {
+                return kinds;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the outbox never held {n} events");
+    }
 }
 
 async fn call(app: &Who, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -691,8 +717,9 @@ async fn events_stream_as_sse() {
         json!([{ "type": "session.started", "data": {} }]),
     ));
     turn(&h.fake, 0, "hello", "Hi Ann");
-    // eve ends the session after this turn.
+    // eve ends the session after this turn, a while after the turn settles.
     h.fake.ended.store(true, Ordering::SeqCst);
+    h.fake.end_delay_ms.store(500, Ordering::SeqCst);
     let id = start(&h, &t, "hello").await;
     let got = read_sse(&h.app(&t, "ann").await, &id, None, 3).await;
     assert_eq!(
@@ -717,15 +744,11 @@ async fn events_stream_as_sse() {
     );
     h.settle(&t, &id).await;
     assert_eq!(h.state(&t, &id).await, "idle");
-    let kinds: Vec<String> = outbox(&h.store, &t)
-        .await
-        .into_iter()
-        .map(|(k, _)| k)
-        .collect();
     assert_eq!(
-        kinds,
+        h.outbox_kinds(&t, 2).await,
         vec!["conversation.started.v1", "conversation.finished.v1"]
     );
+    assert_eq!(h.state(&t, &id).await, "idle");
 }
 
 #[tokio::test]
