@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { keepOnFailedRefresh } from "#/components/app/keep-on-refresh.ts";
 import { PageError, PageLoading } from "#/components/app/page-states.tsx";
 import { RowItem } from "#/components/app/row-item.tsx";
 import { activityRow } from "#/lib/activity.ts";
@@ -12,7 +13,9 @@ export const Route = createFileRoute("/_app/activity")({
 	// The session cookie belongs to the API host, so only the browser can load this.
 	ssr: false,
 	// ponytail: the newest page only; add "Show more" with `next` when people need further back.
-	loader: async () => ({ activity: (await api.activity()).items }),
+	loader: keepOnFailedRefresh(async () => ({
+		activity: (await api.activity()).items,
+	})),
 	pendingComponent: PageLoading,
 	errorComponent: PageError,
 	component: Activity,

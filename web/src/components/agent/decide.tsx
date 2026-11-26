@@ -1,5 +1,5 @@
 import { useRouter } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "#/components/ui/button.tsx";
 import { ApiError, type Approval, api } from "#/lib/api/index.ts";
 
@@ -21,12 +21,24 @@ function details(args: Record<string, unknown>): [string, string][] {
 }
 
 /** What a waiting approval would do, and Approve / Deny for someone who can decide it. */
-export function Decide({ approval }: { approval: Approval }) {
+export function Decide({
+	approval,
+	onDecided,
+}: {
+	approval: Approval;
+	/** Told what was said once the decision holds, e.g. to move focus when this card goes. */
+	onDecided?: (outcome: string) => void;
+}) {
 	const router = useRouter();
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	// Said at once, so the buttons can't be pressed again before the stream or the reload catches up.
 	const [outcome, setOutcome] = useState<string | null>(null);
+	const said = useRef<HTMLOutputElement>(null);
+	// The buttons are gone, so focus goes to what replaced them rather than to the top of the page.
+	useEffect(() => {
+		if (outcome) said.current?.focus();
+	}, [outcome]);
 
 	const decide = async (approve: boolean) => {
 		setBusy(true);
@@ -34,7 +46,9 @@ export function Decide({ approval }: { approval: Approval }) {
 		try {
 			await (approve ? api.approvals.approve : api.approvals.deny)(approval.id);
 			setBusy(false);
-			setOutcome(approve ? "You approved it." : "You denied it.");
+			const text = approve ? "You approved it." : "You denied it.";
+			setOutcome(text);
+			onDecided?.(text);
 			// The rail's count, the approvals page and Home all need the inbox again.
 			void router.invalidate();
 		} catch (e) {
@@ -60,7 +74,11 @@ export function Decide({ approval }: { approval: Approval }) {
 				))}
 			</dl>
 			{outcome ? (
-				<output className="m-0 block text-[12px] text-muted-foreground">
+				<output
+					ref={said}
+					tabIndex={-1}
+					className="m-0 block text-[12px] text-muted-foreground"
+				>
 					{outcome}
 				</output>
 			) : approval.can_decide ? (

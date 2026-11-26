@@ -7,6 +7,7 @@ import {
 	useState,
 } from "react";
 import { useStartConversation } from "#/components/agent/use-start-conversation.ts";
+import { keepOnFailedRefresh } from "#/components/app/keep-on-refresh.ts";
 import { type Row, RowItem } from "#/components/app/row-item.tsx";
 import { Icon, type IconName } from "#/components/icons/icon.tsx";
 import {
@@ -33,13 +34,13 @@ export const Route = createFileRoute("/_app/")({
 	head: () => ({ meta: [{ title: `Home · ${brand.name}` }] }),
 	staticData: { title: "Home" },
 	ssr: false,
-	loader: async () => {
+	loader: keepOnFailedRefresh(async () => {
 		const [activity, conversations] = await Promise.all([
 			api.activity(),
 			api.conversations.list(),
 		]);
 		return { activity: activity.items, conversations: conversations.items };
-	},
+	}),
 	component: Home,
 });
 

@@ -1,5 +1,9 @@
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { ConversationView } from "#/components/agent/conversation-view.tsx";
+import {
+	keepOnFailedRefresh,
+	type RefreshCtx,
+} from "#/components/app/keep-on-refresh.ts";
 import { ApiError, api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
 
@@ -8,19 +12,21 @@ export const Route = createFileRoute("/_app/agent/$conversationId")({
 	staticData: { title: "Your agent" },
 	// The session cookie belongs to the API host, so only the browser can load this.
 	ssr: false,
-	loader: async ({ params }) => {
-		try {
-			// The conversation itself, and the list for the switcher.
-			const [conversation, list] = await Promise.all([
-				api.conversations.get(params.conversationId),
-				api.conversations.list(),
-			]);
-			return { conversation, conversations: list.items };
-		} catch (e) {
-			if (e instanceof ApiError && e.code === "not_found") throw notFound();
-			throw e;
-		}
-	},
+	loader: keepOnFailedRefresh(
+		async ({ params }: RefreshCtx<{ conversationId: string }>) => {
+			try {
+				// The conversation itself, and the list for the switcher.
+				const [conversation, list] = await Promise.all([
+					api.conversations.get(params.conversationId),
+					api.conversations.list(),
+				]);
+				return { conversation, conversations: list.items };
+			} catch (e) {
+				if (e instanceof ApiError && e.code === "not_found") throw notFound();
+				throw e;
+			}
+		},
+	),
 	notFoundComponent: NoSuchConversation,
 	component: Agent,
 });
