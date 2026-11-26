@@ -5,10 +5,17 @@ WORKDIR /src
 # Lets a shared build machine cap parallelism (--build-arg CARGO_BUILD_JOBS=2).
 ARG CARGO_BUILD_JOBS
 COPY Cargo.toml Cargo.lock ./
-COPY core core
+COPY core/Cargo.toml core/
+# Dependencies first, from stub sources, in their own layer: a source-only change reuses it from the
+# build cache (deploy.yml keeps it in the GitHub Actions cache). `target` stays in the layer on purpose.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p mandate && cp target/release/mandate /mandate
+    mkdir core/src && echo 'fn main() {}' > core/src/main.rs && touch core/src/lib.rs \
+ && cargo build --release --locked -p mandate && rm -r core/src
+COPY core core
+# Newer mtimes than the stubs, so cargo rebuilds the crate itself.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    touch core/src/main.rs core/src/lib.rs \
+ && cargo build --release --locked -p mandate && cp target/release/mandate /mandate
 
 FROM debian:trixie-slim AS serve
 RUN apt-get update \

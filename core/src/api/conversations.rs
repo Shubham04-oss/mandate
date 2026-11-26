@@ -754,7 +754,8 @@ async fn ask(
             args_hash: hash,
             decision: "ask".into(),
             reason: None,
-            approval_id: None,
+            // Names the approval it opened, so Activity can show how the ask ended.
+            approval_id: Some(approval),
             approved_by: None,
         },
     )
@@ -867,11 +868,23 @@ async fn load(
 }
 
 async fn conversation_json(tx: &mut Tx, id: Uuid) -> Result<Value, sqlx::Error> {
+    // A wait whose latest ask since the member last wrote expired undecided waits for no one:
+    // it reads `expired`. An older turn's ask never counts.
+    // ponytail: eve's turn stays paused until the member stops it; a sweep could cancel it.
+    let pending = approvals::PENDING;
     let q = format!(
-        "select json_build_object('id', id, 'title', title, 'state', state, \
-           'created_at', to_char(created_at at time zone 'utc', {TS}), \
-           'updated_at', to_char(updated_at at time zone 'utc', {TS})) \
-         from conversations where tenant_id = current_setting('mandate.tenant', true) and id = $1"
+        "select json_build_object('id', c.id, 'title', c.title, 'state', \
+           case when c.state = 'waiting' and coalesce(( \
+             select {pending} and a.expires_at <= now() from conversation_events e \
+             join approvals a on a.tenant_id = e.tenant_id and a.id::text = e.data->'approval'->>'id' \
+             where e.tenant_id = c.tenant_id and e.conversation = c.id and e.kind = 'approval_wait' \
+             and e.seq > coalesce((select max(u.seq) from conversation_events u \
+               where u.tenant_id = c.tenant_id and u.conversation = c.id \
+               and u.kind = 'message' and u.data->>'role' = 'user'), 0) \
+             order by e.seq desc limit 1), false) then 'expired' else c.state end, \
+           'created_at', to_char(c.created_at at time zone 'utc', {TS}), \
+           'updated_at', to_char(c.updated_at at time zone 'utc', {TS})) \
+         from conversations c where c.tenant_id = current_setting('mandate.tenant', true) and c.id = $1"
     );
     sqlx::query_scalar(sqlx::AssertSqlSafe(q))
         .bind(id)

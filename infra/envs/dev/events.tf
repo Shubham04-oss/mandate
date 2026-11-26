@@ -67,19 +67,21 @@ resource "awscc_eventsv2_subscriber" "consumer" {
   name          = each.key
   event_bus_arn = awscc_eventsv2_event_bus.main.event_bus_arn
   type          = "FIFO"
+  # For PutEvents the DATA scope is EventBridge's envelope with our payload under `detail`, so a
+  # top-level `type` never matched. aws:DetailType comes from the entry and publishers can't forge it.
   filter_configuration = {
     filters = [{
-      scope   = "DATA"
-      pattern = jsonencode({ type = each.value })
+      scope   = "SYSTEM_METADATA"
+      pattern = jsonencode({ "aws:DetailType" = each.value })
     }]
   }
   invoke_configuration = {
     target_arn = aws_sqs_queue.consumer[each.key].arn
     role_arn   = aws_iam_role.subscriber.arn
-    # The envelope's tenant orders delivery per organization; its id deduplicates (spec 6a).
+    # The core publishes with EventGroupId = tenant and DeduplicationId = event id (spec 6a).
     sqs_parameters = {
-      message_group_id         = "{% $events.data.tenant %}"
-      message_deduplication_id = "{% $events.data.id %}"
+      message_group_id         = "{% $events.SystemMetadata.EventGroupId %}"
+      message_deduplication_id = "{% $events.SystemMetadata.DeduplicationId %}"
     }
   }
   transformer = {

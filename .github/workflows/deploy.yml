@@ -41,22 +41,47 @@ jobs:
       - id: ecr
         uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2.2.0
 
-      - name: Build and push the core and migrate images
-        env:
-          REPO: ${{ steps.ecr.outputs.registry }}/mandate-dev/core
+      # A docker-container builder, so the core's dependency layer persists in the GitHub Actions cache.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Check which core images are already pushed
+        id: pushed
         run: |
           set -euo pipefail
           # Tags are immutable, so a rerun of the same commit reuses what an earlier run pushed.
-          build() {
-            if aws ecr describe-images --repository-name mandate-dev/core --image-ids imageTag="$1" >/dev/null 2>&1; then
-              echo "$1 already pushed"
-              return
-            fi
-            docker build -f core/Dockerfile "${@:2}" -t "$REPO:$1" .
-            docker push "$REPO:$1"
+          has() {
+            aws ecr describe-images --repository-name mandate-dev/core --image-ids imageTag="$1" >/dev/null 2>&1 \
+              && echo true || echo false
           }
-          build "$TAG"
-          build "migrate-$TAG" --target migrate
+          echo "core=$(has "$TAG")" >> "$GITHUB_OUTPUT"
+          echo "migrate=$(has "migrate-$TAG")" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the core image
+        if: steps.pushed.outputs.core != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: core/Dockerfile
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/mandate-dev/core:${{ env.TAG }}
+          # A plain image manifest, as `docker build` pushed before.
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,scope=core,mode=max
+
+      - name: Build and push the migrate image
+        if: steps.pushed.outputs.migrate != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: core/Dockerfile
+          target: migrate
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/mandate-dev/core:migrate-${{ env.TAG }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=core
 
       # eve (agents/) lands in its own lane; until then the eve service is left as it is.
       - name: Build and push the eve image
@@ -118,3 +143,31 @@ jobs:
           if [ "$WITH_EVE" = true ]; then
             roll eve "$REGISTRY/mandate-dev/eve:$TAG"
           fi
+
+  # The web app ships after the core, so it never calls an API the live core doesn't have yet.
+  web:
+    needs: deploy
+    if: vars.MANDATE_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # A Workers-only token; Wrangler reads it and the account id from the environment.
+      - name: Build and deploy to app.oryxa.in
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy

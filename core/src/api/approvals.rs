@@ -76,7 +76,8 @@ pub enum DecideError {
 const MAY_DECIDE: &str = "exists (select 1 from agents g where g.tenant_id = a.tenant_id and g.id = a.agent \
      and not g.disabled and (g.owner_member = $2 or exists (select 1 from team_members tm \
      where tm.tenant_id = a.tenant_id and tm.team_id = g.owner_team and tm.member_id = $2)))";
-const PENDING: &str = "a.approved_by is null and a.denied_by is null and a.used_at is null";
+pub(crate) const PENDING: &str =
+    "a.approved_by is null and a.denied_by is null and a.used_at is null";
 
 /// Records `by`'s decision if the approval is still pending and `by` may decide it, and
 /// publishes `approval.decided.v1` in the same transaction. The UPDATE is the only arbiter: a

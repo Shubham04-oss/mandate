@@ -244,7 +244,7 @@ const activity: Activity[] = [
 		tool: "web.submit_form",
 		decision: "ask",
 		approval_id: "apv_old",
-		approved_by: raya,
+		outcome: "denied",
 	},
 	{
 		id: "act_4",

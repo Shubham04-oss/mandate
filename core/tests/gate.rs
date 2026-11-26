@@ -168,6 +168,11 @@ async fn external_asks_then_runs_once_after_approval() {
     let decisions: Vec<String> = audit_rows(&s, &t).await.into_iter().map(|r| r.0).collect();
     // The approval itself is audited between the ask and the run it allowed.
     assert_eq!(decisions, ["ask", "approved", "run", "ask"]);
+    // The ask records the approval it opened, so the feed can show how it ended.
+    assert_eq!(
+        audit_approvals(&s, &t).await[0],
+        ("ask".to_owned(), Some(approval), None)
+    );
     // The run that spent the approval records which one and who gave it.
     assert_eq!(
         audit_approvals(&s, &t).await[2],

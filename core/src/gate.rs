@@ -112,13 +112,15 @@ async fn run_in_tx(
             d = policy.decide(&input);
         }
     }
+    // The approval this row is about: the one a run spent and who gave it, or the one an ask opened.
+    let mut approval = spent.map(|(id, by)| (id, Some(by)));
     let (outcome, decision) = match d {
         Decision::Run => (Outcome::Run, "run"),
         Decision::Ask => {
-            let approval =
-                store::request_approval(tx, &who.agent, &who.member, tool, args, &hash, now)
-                    .await?;
-            (Outcome::Ask { approval }, "ask")
+            let id = store::request_approval(tx, &who.agent, &who.member, tool, args, &hash, now)
+                .await?;
+            approval = Some((id, None));
+            (Outcome::Ask { approval: id }, "ask")
         }
         Decision::Refuse => (
             Outcome::Refuse {
@@ -131,7 +133,7 @@ async fn run_in_tx(
         Outcome::Refuse { reason } => Some(reason.to_owned()),
         _ => None,
     };
-    audit(tx, who, tool, hash, decision, reason, spent).await?;
+    audit(tx, who, tool, hash, decision, reason, approval).await?;
     Ok(outcome)
 }
 
@@ -142,9 +144,10 @@ async fn audit(
     args_hash: [u8; 32],
     decision: &str,
     reason: Option<String>,
-    spent: Option<(Uuid, MemberId)>,
+    approval: Option<(Uuid, Option<MemberId>)>,
 ) -> Result<(), StoreError> {
-    let (approval_id, approved_by) = spent.unzip();
+    let (approval_id, approved_by) = approval.unzip();
+    let approved_by = approved_by.flatten();
     let e = AuditEntry {
         agent: who.agent.clone(),
         member: who.member.clone(),

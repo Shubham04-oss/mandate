@@ -45,10 +45,12 @@ fn item(r: &PgRow) -> Result<Value, sqlx::Error> {
             Some(a) => person(&a, r.try_get("ab_name")?, r.try_get("ab_email")?),
             None => Value::Null,
         },
+        "outcome": r.try_get::<Option<String>, _>("outcome")?,
     }))
 }
 
-/// `GET /v1/activity`: newest first; the cursor is the last audit id shown.
+/// `GET /v1/activity`: newest first; the cursor is the last audit id shown. An ask carries how its
+/// approval ended (`outcome`); an approval approved but never used still reads as approved.
 async fn list(
     State(s): State<Arc<ApiState>>,
     session: Session,
@@ -64,11 +66,15 @@ async fn list(
     // Decisions and grant changes are audited too; the feed shows only what agents did.
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "select u.id, u.at, u.agent, u.member, u.tool, u.decision, u.reason, u.approval_id, u.approved_by, \
-         m.name as m_name, m.email as m_email, ab.name as ab_name, ab.email as ab_email, {AGENT_COLS} \
+         m.name as m_name, m.email as m_email, ab.name as ab_name, ab.email as ab_email, {AGENT_COLS}, \
+         case when u.decision = 'ask' and a.id is not null then case \
+           when a.denied_by is not null then 'denied' when a.approved_by is not null then 'approved' \
+           when a.expires_at <= now() then 'expired' else 'pending' end end as outcome \
          from audit u \
          left join agents g on g.tenant_id = u.tenant_id and g.id = u.agent {AGENT_JOINS} \
          left join members m on m.tenant_id = u.tenant_id and m.id = u.member \
          left join members ab on ab.tenant_id = u.tenant_id and ab.id = u.approved_by \
+         left join approvals a on a.tenant_id = u.tenant_id and a.id = u.approval_id \
          where u.tenant_id = current_setting('mandate.tenant', true) \
          and u.decision in ('run', 'ask', 'refuse') \
          and ($3 or g.owner_member = $1 or exists (select 1 from team_members tm \

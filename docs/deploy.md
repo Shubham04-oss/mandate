@@ -235,7 +235,10 @@ root:
 cd web && npm ci && CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.oryxa.in npm run build && npx wrangler deploy --env dev
 ```
 
-`npm run deploy` in `web/` runs the same build and deploy. Wrangler creates the `app.oryxa.in`
+`npm run deploy` in `web/` runs the same build and deploy. After the first deploy, the `web` job in
+`.github/workflows/deploy.yml` runs it on every merge to main, after the core rolls out. It needs the `dev`
+environment's secret `CLOUDFLARE_API_TOKEN` (a token with only Account → Workers Scripts edit and Zone `oryxa.in` → Workers Routes edit) and variable
+`CLOUDFLARE_ACCOUNT_ID`. Wrangler creates the `app.oryxa.in`
 custom domain; the Worker has no `workers.dev` address or preview URLs. Both values are fixed when the app is built:
 
 - `CLOUDFLARE_ENV=dev` picks the environment. Cloudflare's Vite plugin applies it at build time;
