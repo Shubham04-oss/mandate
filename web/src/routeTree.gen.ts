@@ -23,6 +23,8 @@ import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as SsoRouteImport } from './routes/sso'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
+import { Route as AppActivityRouteImport } from './routes/_app/activity'
+import { Route as AppApprovalsRouteImport } from './routes/_app/approvals'
 import { Route as MfaSetupRouteImport } from './routes/mfa_.setup'
 import { Route as PreviewPopupsRouteImport } from './routes/preview.popups'
 import { Route as SignInCodeRouteImport } from './routes/sign-in_.code'
@@ -99,6 +101,16 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppActivityRoute = AppActivityRouteImport.update({
+  id: '/activity',
+  path: '/activity',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppApprovalsRoute = AppApprovalsRouteImport.update({
+  id: '/approvals',
+  path: '/approvals',
+  getParentRoute: () => AppRoute,
+} as any)
 const MfaSetupRoute = MfaSetupRouteImport.update({
   id: '/mfa_/setup',
   path: '/mfa/setup',
@@ -144,6 +156,8 @@ export interface FileRoutesByFullPath {
   '/sign-up': typeof SignUpRoute
   '/sso': typeof SsoRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/activity': typeof AppActivityRoute
+  '/approvals': typeof AppApprovalsRoute
   '/mfa/setup': typeof MfaSetupRoute
   '/preview/popups': typeof PreviewPopupsRoute
   '/sign-in/code': typeof SignInCodeRoute
@@ -164,6 +178,8 @@ export interface FileRoutesByTo {
   '/sign-up': typeof SignUpRoute
   '/sso': typeof SsoRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/activity': typeof AppActivityRoute
+  '/approvals': typeof AppApprovalsRoute
   '/mfa/setup': typeof MfaSetupRoute
   '/preview/popups': typeof PreviewPopupsRoute
   '/sign-in/code': typeof SignInCodeRoute
@@ -187,6 +203,8 @@ export interface FileRoutesById {
   '/sign-up': typeof SignUpRoute
   '/sso': typeof SsoRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/_app/activity': typeof AppActivityRoute
+  '/_app/approvals': typeof AppApprovalsRoute
   '/mfa_/setup': typeof MfaSetupRoute
   '/preview/popups': typeof PreviewPopupsRoute
   '/sign-in_/code': typeof SignInCodeRoute
@@ -211,6 +229,8 @@ export interface FileRouteTypes {
     | '/sign-up'
     | '/sso'
     | '/verify-email'
+    | '/activity'
+    | '/approvals'
     | '/mfa/setup'
     | '/preview/popups'
     | '/sign-in/code'
@@ -231,6 +251,8 @@ export interface FileRouteTypes {
     | '/sign-up'
     | '/sso'
     | '/verify-email'
+    | '/activity'
+    | '/approvals'
     | '/mfa/setup'
     | '/preview/popups'
     | '/sign-in/code'
@@ -253,6 +275,8 @@ export interface FileRouteTypes {
     | '/sign-up'
     | '/sso'
     | '/verify-email'
+    | '/_app/activity'
+    | '/_app/approvals'
     | '/mfa_/setup'
     | '/preview/popups'
     | '/sign-in_/code'
@@ -382,6 +406,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/activity': {
+      id: '/_app/activity'
+      path: '/activity'
+      fullPath: '/activity'
+      preLoaderRoute: typeof AppActivityRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/approvals': {
+      id: '/_app/approvals'
+      path: '/approvals'
+      fullPath: '/approvals'
+      preLoaderRoute: typeof AppApprovalsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/mfa_/setup': {
       id: '/mfa_/setup'
       path: '/mfa/setup'
@@ -428,12 +466,16 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppActivityRoute: typeof AppActivityRoute
+  AppApprovalsRoute: typeof AppApprovalsRoute
   AppIndexRoute: typeof AppIndexRoute
   AppAgentConversationIdRoute: typeof AppAgentConversationIdRoute
   AppAgentIndexRoute: typeof AppAgentIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppActivityRoute: AppActivityRoute,
+  AppApprovalsRoute: AppApprovalsRoute,
   AppIndexRoute: AppIndexRoute,
   AppAgentConversationIdRoute: AppAgentConversationIdRoute,
   AppAgentIndexRoute: AppAgentIndexRoute,

@@ -429,7 +429,7 @@ function TeamHoverCard() {
 
 function DialogIconStatic() {
 	return (
-		<span className="grid size-9 place-items-center rounded-lg bg-raised shadow-icon">
+		<span className="grid size-9 place-items-center">
 			<Icon name="user" size={16} />
 		</span>
 	);

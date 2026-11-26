@@ -11,7 +11,7 @@ export type Mark =
 	| "lost";
 
 const RADIUS = 9;
-export const DASHES = 5;
+const DASHES = 5;
 
 /** Dash and gap along the ring, in viewBox units. Round caps eat into each gap, so the gap adds the stroke. */
 export function ringDashes(stroke: number): { dash: number; gap: number } {

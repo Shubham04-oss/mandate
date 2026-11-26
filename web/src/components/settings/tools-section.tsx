@@ -186,16 +186,20 @@ function ToolCard({
 	} | null>(null);
 	const [removing, setRemoving] = useState<Grant | null>(null);
 	const [removeError, setRemoveError] = useState<string | null>(null);
+	const [removeBusy, setRemoveBusy] = useState(false);
 	const headingId = `${tool.id}-h`;
 
 	const remove = async () => {
-		if (!removing) return;
+		if (!removing || removeBusy) return;
+		setRemoveBusy(true);
 		try {
 			await api.grants.revoke(removing.id);
 			setRemoving(null);
 			await onChanged();
 		} catch (e) {
 			setRemoveError(message(e));
+		} finally {
+			setRemoveBusy(false);
 		}
 	};
 
@@ -286,7 +290,11 @@ function ToolCard({
 					) : null}
 					<AlertDialogFooter>
 						<AlertDialogCancel variant="outline">Keep</AlertDialogCancel>
-						<AlertDialogAction variant="destructive" onClick={remove}>
+						<AlertDialogAction
+							variant="destructive"
+							disabled={removeBusy}
+							onClick={remove}
+						>
 							Remove
 						</AlertDialogAction>
 					</AlertDialogFooter>
