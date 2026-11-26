@@ -45,6 +45,14 @@
   a password reset clears it. A sign-up for an email that already has an account blocks its
   password sign-in for one WorkOS round trip; the 5-per-minute limit caps how often.
 
+## Session membership
+
+- A session re-checks the member's WorkOS membership and role at most every 5 minutes; a membership
+  that is gone or inactive ends the session. Admin rights can lag a WorkOS change by that window.
+- If WorkOS can't be reached, the stored membership is used for up to 1 hour after the last good
+  check, then requests answer 503 until WorkOS answers again. So stale admin rights last at most 1 hour.
+- The org picker comes before sign-in finishes, so it shows no tenant data (no people or agent counts).
+
 ## Browser egress
 
 - **Document navigations** (top level, redirect hops, frames) are limited per call to the allowed
