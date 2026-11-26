@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Build from the repo root: docker build -f core/Dockerfile [--target migrate] .
-FROM rust:1.99-trixie AS build
+FROM rust:1.99-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS build
 WORKDIR /src
 # Lets a shared build machine cap parallelism (--build-arg CARGO_BUILD_JOBS=2).
 ARG CARGO_BUILD_JOBS
@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     touch core/src/main.rs core/src/lib.rs \
  && cargo build --release --locked -p mandate && cp target/release/mandate /mandate
 
-FROM debian:trixie-slim AS serve
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS serve
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \

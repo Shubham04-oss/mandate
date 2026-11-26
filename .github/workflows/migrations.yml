@@ -1,0 +1,37 @@
+name: migrations
+
+# Its own workflow, not a ci.yml job: it reruns when the override label is added or removed, which
+# in ci.yml would cancel and repeat the whole run.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migrations-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Expand/contract (docs/deploy.md): a destructive statement needs the label, and a later deploy.
+  destructive:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'migration-destructive-ok') }}
+    runs-on: ubuntu-latest
+    steps:
+      # Depth 2: HEAD is the PR merged into its base, so HEAD^1 is the base it lands on.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: No DROP, RENAME or ALTER ... TYPE in new or changed migrations
+        run: |
+          set -euo pipefail
+          # Edited counts too: changing an applied migration is no safer than adding one.
+          mapfile -t files < <(git diff --no-renames --diff-filter=AM --name-only HEAD^1 HEAD -- 'core/migrations/*.sql')
+          if [ "${#files[@]}" -eq 0 ]; then echo "no migrations added or changed"; exit 0; fi
+          printf 'checking %s\n' "${files[@]}"
+          scripts/lint-migrations.sh "${files[@]}" || {
+            echo "::error::Split it expand/contract (docs/deploy.md), or add the label migration-destructive-ok."
+            exit 1
+          }

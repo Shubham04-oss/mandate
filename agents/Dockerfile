@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 # Build from agents/: docker build -f agents/Dockerfile agents
 # eve needs Node 24 (agents/package.json engines).
-FROM node:24-trixie-slim AS build
+FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4 AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 RUN npm run build && npm prune --omit=dev
 
-FROM node:24-trixie-slim
+FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4
 ENV NODE_ENV=production PORT=3000
 WORKDIR /app
 COPY --from=build --chown=root:root /app /app
