@@ -1,4 +1,10 @@
-import type { ApiError, Org, SignInOutcome } from "#/lib/api/index.ts";
+import type {
+	ApiError,
+	ErrorCode,
+	MfaSetup,
+	Org,
+	SignInOutcome,
+} from "#/lib/api/index.ts";
 
 /**
  * What a multi-step sign-in carries from one screen to the next. Kept in sessionStorage so the
@@ -9,6 +15,8 @@ export type Flow = {
 	email?: string;
 	orgs?: Org[];
 	methods?: string[];
+	/** Two-step setup's answer: the core spends the step to make it, so a reload must reuse it. */
+	setup?: MfaSetup;
 };
 
 const key = "mandate.sign-in";
@@ -27,6 +35,11 @@ export function saveFlow(flow: Flow) {
 	} catch {
 		// storage off: the next step will find no pending id and send the person back to sign in
 	}
+}
+
+/** Keeps two-step setup's answer beside the rest of the flow (same storage, same lifetime). */
+export function rememberSetup(setup: MfaSetup) {
+	saveFlow({ ...readFlow(), setup });
 }
 
 export function clearFlow() {
@@ -105,16 +118,36 @@ export function errorDestination(
 	return null;
 }
 
+/**
+ * A reset link the core won't take again: used, expired, or not a token it knows.
+ * ponytail: the contract doesn't name the error for a used token; these three are taken to mean it.
+ */
+export const linkExpired = (error: ApiError) =>
+	["code_expired", "code_invalid", "not_found"].includes(error.code);
+
 /** Messages for the `?error=` the core's SSO callback sends back to /sign-in. */
 const callbackMessages: Record<string, string> = {
 	no_access: "This account isn't part of an organization on oryxa yet.",
 	invalid_credentials:
 		"Your identity provider didn't confirm who you are. Try again.",
 	pending_expired: "That took too long. Sign in again.",
-	org_required: "Choose an organization to sign in to.",
+	org_required:
+		"Your account belongs to several organizations. Sign in with your email and password to choose one, or ask your admin.",
+	mfa_required:
+		"Your organization requires two-step sign-in. Sign in with your email and password to complete it.",
+	email_unverified:
+		"Verify your email first: sign in with your email and password, or with an emailed code, and follow the steps.",
 };
 
 export function callbackMessage(code: string | undefined): string | null {
 	if (!code) return null;
 	return callbackMessages[code] ?? "Signing in didn't finish. Try again.";
+}
+
+/** Swaps the core's message for a screen's own wording of some error codes. */
+export function errorMessage(
+	error: ApiError,
+	overrides: Partial<Record<ErrorCode, string>> = {},
+): string {
+	return overrides[error.code] ?? error.message;
 }

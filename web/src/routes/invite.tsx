@@ -21,6 +21,9 @@ import { Field, FieldLabel } from "#/components/ui/field.tsx";
 import { Input } from "#/components/ui/input.tsx";
 import { ApiError, api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
+import { errorMessage } from "#/lib/sign-in-flow.ts";
+
+const gone = { not_found: "This invitation was used or withdrawn." };
 
 // Reached from the invitation email: /invite?token=…
 export const Route = createFileRoute("/invite")({
@@ -39,7 +42,7 @@ export const Route = createFileRoute("/invite")({
 				invitation: null,
 				problem:
 					e instanceof ApiError
-						? e.message
+						? errorMessage(e, gone)
 						: "This invitation can't be opened.",
 			};
 		}
@@ -55,7 +58,7 @@ function Invite() {
 	const { token } = Route.useSearch();
 	const { invitation, problem } = Route.useLoaderData();
 	const [step, setStep] = useState<"start" | "code" | "password">("start");
-	const { busy, error, run, act } = useSignIn();
+	const { busy, error, run, act } = useSignIn(gone);
 
 	if (!token) return <StartAgain />;
 	if (!invitation) {

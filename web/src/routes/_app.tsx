@@ -10,6 +10,7 @@ import {
 	type SettingsSection,
 } from "#/components/settings/settings-dialog.tsx";
 import { Button } from "#/components/ui/button.tsx";
+import { Skeleton } from "#/components/ui/skeleton.tsx";
 import { ApiError, api } from "#/lib/api/index.ts";
 
 type AppSearch = { settings?: SettingsSection };
@@ -28,12 +29,35 @@ export const Route = createFileRoute("/_app")({
 		return { me, pending: pending.items };
 	},
 	errorComponent: AppUnavailable,
+	pendingComponent: AppLoading,
 	component: () => (
 		<AppShell>
 			<Outlet />
 		</AppShell>
 	),
 });
+
+/** The shell's outline while the loader runs, so the page isn't blank. */
+function AppLoading() {
+	return (
+		<output
+			aria-label="Loading"
+			className="flex min-h-dvh bg-background text-foreground"
+		>
+			<div className="hidden w-60 shrink-0 flex-col gap-3 border-r p-4 md:flex">
+				<Skeleton className="h-7 w-32" />
+				<Skeleton className="h-5 w-full" />
+				<Skeleton className="h-5 w-4/5" />
+				<Skeleton className="h-5 w-3/5" />
+			</div>
+			<div className="flex flex-1 flex-col gap-4 p-6">
+				<Skeleton className="h-7 w-48" />
+				<Skeleton className="h-24 w-full max-w-2xl" />
+				<Skeleton className="h-24 w-full max-w-2xl" />
+			</div>
+		</output>
+	);
+}
 
 function AppUnavailable({ error }: ErrorComponentProps) {
 	const router = useRouter();

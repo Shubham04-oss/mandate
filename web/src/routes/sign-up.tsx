@@ -19,13 +19,19 @@ import { Button } from "#/components/ui/button.tsx";
 import {
 	Field,
 	FieldDescription,
+	FieldError,
 	FieldLabel,
 	FieldSeparator,
 } from "#/components/ui/field.tsx";
 import { Input } from "#/components/ui/input.tsx";
 import { api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
-import { checkPassword } from "#/lib/password.ts";
+import {
+	checkPassword,
+	minPassword,
+	type SignUpField,
+	signUpProblems,
+} from "#/lib/password.ts";
 
 export const Route = createFileRoute("/sign-up")({
 	head: () => ({ meta: [{ title: `Create an account · ${brand.name}` }] }),
@@ -35,7 +41,14 @@ export const Route = createFileRoute("/sign-up")({
 function SignUp() {
 	const [password, setPassword] = useState("");
 	const { busy, error, run } = useSignIn();
+	const [problems, setProblems] = useState<
+		Partial<Record<SignUpField, string>>
+	>({});
 	const hint = checkPassword(password).hint;
+	// The error (if any) and the hint, for aria-describedby.
+	const describedBy = (f: SignUpField, extra?: string) =>
+		[problems[f] ? `${f}-error` : null, extra].filter(Boolean).join(" ") ||
+		undefined;
 
 	return (
 		<AuthLayout scene="crows-nest">
@@ -43,6 +56,20 @@ function SignUp() {
 				label="Create an account"
 				onSubmit={(data) => {
 					const email = field(data, "email");
+					const found = signUpProblems({
+						name: field(data, "name"),
+						email,
+						org: field(data, "org"),
+						password,
+					});
+					setProblems(found);
+					const first = (["name", "email", "org", "password"] as const).find(
+						(f) => found[f],
+					);
+					if (first) {
+						document.getElementById(first)?.focus();
+						return;
+					}
 					run(
 						() =>
 							api.auth.signUp({
@@ -69,8 +96,14 @@ function SignUp() {
 						name="name"
 						autoComplete="name"
 						autoFocus
+						required
 						placeholder="First and last name"
+						aria-invalid={problems.name ? true : undefined}
+						aria-describedby={describedBy("name")}
 					/>
+					<FieldError id="name-error" className="text-[11.5px]">
+						{problems.name}
+					</FieldError>
 				</Field>
 				<Field className="gap-1.5">
 					<FieldLabel htmlFor="email">Work email</FieldLabel>
@@ -79,8 +112,14 @@ function SignUp() {
 						name="email"
 						type="email"
 						autoComplete="email"
+						required
 						placeholder="you@company.com"
+						aria-invalid={problems.email ? true : undefined}
+						aria-describedby={describedBy("email")}
 					/>
+					<FieldError id="email-error" className="text-[11.5px]">
+						{problems.email}
+					</FieldError>
 				</Field>
 				<Field className="gap-1.5">
 					<FieldLabel htmlFor="org">Organization</FieldLabel>
@@ -88,9 +127,14 @@ function SignUp() {
 						id="org"
 						name="org"
 						autoComplete="organization"
+						required
 						placeholder="Your company"
-						aria-describedby="org-hint"
+						aria-invalid={problems.org ? true : undefined}
+						aria-describedby={describedBy("org", "org-hint")}
 					/>
+					<FieldError id="org-error" className="text-[11.5px]">
+						{problems.org}
+					</FieldError>
 					<FieldDescription id="org-hint" className="text-[11.5px]">
 						You'll be its admin, and can invite your team once you're in.
 					</FieldDescription>
@@ -101,11 +145,20 @@ function SignUp() {
 						id="password"
 						name="password"
 						autoComplete="new-password"
-						aria-describedby="password-hint"
+						required
+						minLength={minPassword}
+						aria-invalid={problems.password ? true : undefined}
+						aria-describedby={describedBy(
+							"password",
+							hint ? "password-hint" : undefined,
+						)}
 						value={password}
 						onChange={(e) => setPassword(e.target.value)}
 					/>
 					<StrengthMeter password={password} />
+					<FieldError id="password-error" className="text-[11.5px]">
+						{problems.password}
+					</FieldError>
 					{hint ? (
 						<FieldDescription id="password-hint" className="text-[11.5px]">
 							{hint}

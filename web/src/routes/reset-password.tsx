@@ -18,6 +18,7 @@ import { Button } from "#/components/ui/button.tsx";
 import { Field, FieldLabel } from "#/components/ui/field.tsx";
 import { ApiError, api } from "#/lib/api/index.ts";
 import { brand } from "#/lib/brand.ts";
+import { linkExpired } from "#/lib/sign-in-flow.ts";
 
 // Reached from the link in the reset email: /reset-password?token=…
 export const Route = createFileRoute("/reset-password")({
@@ -44,12 +45,7 @@ function ResetPassword() {
 			await api.auth.resetPassword(token, password);
 			await navigate({ to: "/sign-in", search: { reset: true } });
 		} catch (e) {
-			// ponytail: the contract doesn't name the error for a used or expired token; code_expired and
-			// not_found are taken to mean it (noted for the lead).
-			if (
-				e instanceof ApiError &&
-				(e.code === "code_expired" || e.code === "not_found")
-			) {
+			if (e instanceof ApiError && linkExpired(e)) {
 				await navigate({ to: "/link-expired" });
 			} else {
 				setError(
