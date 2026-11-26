@@ -128,6 +128,12 @@ pub enum AuthError {
     NotFound,
     #[error("already exists")]
     Conflict,
+    /// WorkOS is limiting us; seconds to wait, if it said.
+    #[error("workos rate limited")]
+    RateLimited(Option<u64>),
+    /// A 4xx we have no mapping for, by kind only.
+    #[error("workos rejected the request: {0}")]
+    Rejected(String),
     /// By kind only (status and WorkOS error code), never WorkOS's message.
     #[error("workos request failed: {0}")]
     Upstream(String),
@@ -231,6 +237,20 @@ impl From<AuthError> for ApiError {
             }
             // A step where none is expected (for example after SSO) is not something we can finish.
             AuthError::Step(_) => no_access(),
+            AuthError::RateLimited(secs) => {
+                tracing::warn!(?secs, "workos rate limited");
+                // The core's own limiter waits a minute; WorkOS's hint is used when it is sane.
+                let secs = secs.filter(|s| (1..=3600).contains(s)).unwrap_or(60);
+                ApiError::rate_limited(secs as i64)
+            }
+            AuthError::Rejected(kind) => {
+                tracing::warn!(%kind, "workos rejected the request");
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "rejected",
+                    "That could not be done. Please start again.",
+                )
+            }
             AuthError::Upstream(kind) => {
                 tracing::warn!(%kind, "workos request failed");
                 // 503, not 502: Cloudflare replaces an origin 502 with its own page, which drops the CORS headers.
@@ -264,7 +284,9 @@ fn pending_expired() -> ApiError {
 fn quietly(what: &str, r: Result<(), AuthError>) {
     match r {
         Ok(()) | Err(AuthError::NotFound | AuthError::Invalid) => {}
-        Err(AuthError::Upstream(kind)) => tracing::warn!(%kind, what, "workos request failed"),
+        Err(AuthError::Upstream(kind) | AuthError::Rejected(kind)) => {
+            tracing::warn!(%kind, what, "workos request failed")
+        }
         Err(e) => tracing::info!(error = %e, what, "workos refused"),
     }
 }
@@ -1354,6 +1376,7 @@ async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, 
             json!({ "user": user }),
         ),
         Step::ChooseOrg { token, orgs } => {
+            // No counts: sign-in hasn't finished (MFA may follow), so no tenant data is read yet.
             body["orgs"] = orgs
                 .iter()
                 .map(|o| org_json(&slug(&o.id), &o.name, (0, 0)))
@@ -1719,6 +1742,9 @@ fn classify(e: workos::Error) -> AuthError {
         | "invite_accepted"
         | "invite_not_pending" => AuthError::NotFound,
         _ if a.status == 404 => AuthError::NotFound,
+        _ if a.status == 429 => AuthError::RateLimited(a.retry_after.map(|d| d.as_secs())),
+        // 401 is WorkOS refusing our API key: our outage, not the caller's mistake.
+        _ if (400..500).contains(&a.status) && a.status != 401 => AuthError::Rejected(kind(&e)),
         _ => AuthError::Upstream(kind(&e)),
     }
 }
@@ -2215,13 +2241,13 @@ mod tests {
         assert_eq!(methods, ["google_oauth", "magic_auth"]);
         // A step without its token, or a TOTP challenge without a TOTP factor, is not a step.
         let tokenless = api_error(403, json!({ "code": "mfa_enrollment", "user": user }));
-        assert!(matches!(classify(tokenless), AuthError::Upstream(_)));
+        assert!(matches!(classify(tokenless), AuthError::Rejected(_)));
         let sms_only = api_error(
             403,
             json!({ "code": "mfa_challenge", "pending_authentication_token": "pat",
                     "authentication_factors": [{ "id": "f_sms", "type": "sms" }] }),
         );
-        assert!(matches!(classify(sms_only), AuthError::Upstream(_)));
+        assert!(matches!(classify(sms_only), AuthError::Rejected(_)));
     }
 
     #[test]
@@ -2250,13 +2276,11 @@ mod tests {
             json!({ "code": "Weird Code ann@x.com", "message": "ann@x.com" }),
         ));
         assert_eq!(e.to_string(), "workos request failed: status 500");
-        let e = classify(api_error(
-            429,
-            json!({ "code": "rate_limit_exceeded", "message": "ann@x.com" }),
-        ));
+        // Our own API key refused is our fault, not the caller's: still unavailable.
+        let e = classify(api_error(401, json!({ "code": "unauthorized" })));
         assert_eq!(
             e.to_string(),
-            "workos request failed: status 429 rate_limit_exceeded"
+            "workos request failed: status 401 unauthorized"
         );
         // WorkOS wraps the real reason of a failed create in `errors[].code`.
         for (reason, want) in [
@@ -2281,7 +2305,7 @@ mod tests {
         ));
         assert_eq!(
             e.to_string(),
-            "workos request failed: status 400 user_creation_error (something_new)"
+            "workos rejected the request: status 400 user_creation_error (something_new)"
         );
         let leak = "error sending request for url (https://api.workos.com/x?email=ann%40x.com)";
         let net = workos::Error::Network(workos::transport::TransportError::new(
@@ -2292,6 +2316,42 @@ mod tests {
             classify(net).to_string(),
             "workos request failed: network (Connect)"
         );
+    }
+
+    #[test]
+    fn workos_rate_limits_and_rejections_are_not_outages() {
+        let mut limited = api_error(
+            429,
+            json!({ "code": "rate_limit_exceeded", "message": "ann@x.com" }),
+        );
+        if let workos::Error::Api(a) = &mut limited {
+            a.retry_after = Some(std::time::Duration::from_secs(30));
+        }
+        let e = classify(limited);
+        assert!(matches!(e, AuthError::RateLimited(Some(30))), "{e:?}");
+        let r = ApiError::from(e).into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "30");
+        // Without WorkOS's hint, the core's own one-minute wait.
+        let e = classify(api_error(429, json!({ "code": "rate_limit_exceeded" })));
+        let r = ApiError::from(e).into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "60");
+
+        let e = classify(api_error(
+            422,
+            json!({ "code": "something_new", "message": "ann@x.com" }),
+        ));
+        assert!(matches!(e, AuthError::Rejected(_)), "{e:?}");
+        let r = ApiError::from(e).into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+        for status in [500, 502, 503] {
+            let e = classify(api_error(status, json!({ "code": "server_error" })));
+            assert!(matches!(e, AuthError::Upstream(_)), "{status}");
+            let r = ApiError::from(e).into_response();
+            assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
 
     #[test]
