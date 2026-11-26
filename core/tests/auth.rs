@@ -1378,8 +1378,9 @@ async fn email_unverified_returns_verify_email() {
 async fn sso_required_returns_redirect() {
     let h = Harness::new().await;
     let u = h.user("member");
+    // WorkOS's sso_required body has no pending token.
     h.fake.force(AuthError::Step(Step::Sso {
-        token: Secret("pat_x".into()),
+        token: None,
         connection: "conn_1".into(),
     }));
     let r = h
