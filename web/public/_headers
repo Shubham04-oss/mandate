@@ -1,0 +1,6 @@
+# Static files (scripts, styles, fonts, pictures) skip the Worker, so they get their headers here.
+# Rendered pages get these and the Content-Security-Policy from src/server.ts.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000

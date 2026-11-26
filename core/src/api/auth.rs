@@ -100,7 +100,8 @@ pub enum Step {
         user: Option<String>,
     },
     Sso {
-        token: Secret,
+        /// WorkOS's own sso_required carries none; then SSO starts afresh.
+        token: Option<Secret>,
         connection: String,
     },
     Methods {
@@ -232,8 +233,9 @@ impl From<AuthError> for ApiError {
             AuthError::Step(_) => no_access(),
             AuthError::Upstream(kind) => {
                 tracing::warn!(%kind, "workos request failed");
+                // 503, not 502: Cloudflare replaces an origin 502 with its own page, which drops the CORS headers.
                 ApiError::new(
-                    StatusCode::BAD_GATEWAY,
+                    StatusCode::SERVICE_UNAVAILABLE,
                     "internal",
                     "Sign-in is unavailable right now. Please try again.",
                 )
@@ -1376,7 +1378,7 @@ async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, 
             json!({ "user": user }),
         ),
         Step::Sso { token, connection } => {
-            let (pending, url, cookie) = sso_redirect(s, &connection, Some(&token)).await?;
+            let (pending, url, cookie) = sso_redirect(s, &connection, token.as_ref()).await?;
             body["next"] = json!("sso_required");
             body["pending"] = json!(pending);
             body["redirect_url"] = json!(url);
@@ -1589,13 +1591,27 @@ impl WorkosAuth {
 fn kind(e: &workos::Error) -> String {
     match e {
         workos::Error::Api(a) => {
-            let code = a.code.as_deref().filter(|c| {
-                c.len() <= 64 && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
-            });
-            match code {
+            let safe =
+                |c: &&str| c.len() <= 64 && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+            let mut out = match a.code.as_deref().filter(safe) {
                 Some(c) => format!("status {} {c}", a.status),
                 None => format!("status {}", a.status),
+            };
+            // WorkOS names the reason in `errors[].code`; only codes are kept, never messages (they can hold emails).
+            let body: Value = serde_json::from_slice(&a.raw_body).unwrap_or(Value::Null);
+            let reasons: Vec<&str> = body
+                .get("errors")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.get("code")?.as_str())
+                .filter(safe)
+                .take(5)
+                .collect();
+            if !reasons.is_empty() {
+                out.push_str(&format!(" ({})", reasons.join(", ")));
             }
+            out
         }
         workos::Error::Network(t) => format!("network ({:?})", t.kind),
         workos::Error::Decode(_) => "decode".into(),
@@ -1605,8 +1621,17 @@ fn kind(e: &workos::Error) -> String {
 
 /// The further step a WorkOS error body asks for; only the fields we need are read.
 fn step(code: &str, b: &Value) -> Option<Step> {
-    let token = Secret(b.get("pending_authentication_token")?.as_str()?.to_owned());
     let text = |v: &Value| v.as_str().map(str::to_owned);
+    let pending = b
+        .get("pending_authentication_token")
+        .and_then(Value::as_str);
+    if code == "sso_required" {
+        return Some(Step::Sso {
+            token: pending.map(|t| Secret(t.to_owned())),
+            connection: text(b.get("connection_ids")?.as_array()?.first()?)?,
+        });
+    }
+    let token = Secret(pending?.to_owned());
     Some(match code {
         "mfa_challenge" => {
             let factors = b.get("authentication_factors")?.as_array()?;
@@ -1639,10 +1664,6 @@ fn step(code: &str, b: &Value) -> Option<Step> {
             email: text(&b["email"])?,
             user: text(&b["user"]["id"]),
         },
-        "sso_required" => Step::Sso {
-            token,
-            connection: text(b.get("connection_ids")?.as_array()?.first()?)?,
-        },
         "organization_authentication_methods_required" => Step::Methods {
             token,
             methods: b
@@ -1668,7 +1689,11 @@ fn classify(e: workos::Error) -> AuthError {
     if let Some(step) = step(code, &body) {
         return AuthError::Step(step);
     }
-    match code {
+    // A failed create names its real reason in `errors[].code`; classify by that reason.
+    let reason = (code == "user_creation_error")
+        .then(|| body.pointer("/errors/0/code").and_then(Value::as_str))
+        .flatten();
+    match reason.unwrap_or(code) {
         "invalid_credentials" | "invalid_grant" => AuthError::InvalidCredentials,
         "invalid_one_time_code"
         | "one_time_code_previously_used"
@@ -1682,9 +1707,10 @@ fn classify(e: workos::Error) -> AuthError {
         | "email_not_available"
         | "email_already_in_use"
         | "user_already_organization_member" => AuthError::Conflict,
-        "password_strength_error" | "invalid_email" | "invalid_request_parameters" => {
-            AuthError::Invalid
-        }
+        "password_strength_error"
+        | "password_not_allowed"
+        | "invalid_email"
+        | "invalid_request_parameters" => AuthError::Invalid,
         "entity_not_found"
         | "organization_not_found"
         | "invalid_invite"
@@ -2170,6 +2196,14 @@ mod tests {
         assert!(
             matches!(classify(sso), AuthError::Step(Step::Sso { connection, .. }) if connection == "conn_1")
         );
+        // WorkOS's real sso_required body carries no pending token; it is still the SSO step.
+        let sso_bare = api_error(
+            400,
+            json!({ "error": "sso_required", "error_description": "use SSO", "connection_ids": ["conn_2"] }),
+        );
+        assert!(
+            matches!(classify(sso_bare), AuthError::Step(Step::Sso { token: None, connection }) if connection == "conn_2")
+        );
         let methods = api_error(
             400,
             json!({ "error": "organization_authentication_methods_required", "pending_authentication_token": "pat",
@@ -2223,6 +2257,31 @@ mod tests {
         assert_eq!(
             e.to_string(),
             "workos request failed: status 429 rate_limit_exceeded"
+        );
+        // WorkOS wraps the real reason of a failed create in `errors[].code`.
+        for (reason, want) in [
+            ("email_not_available", "already exists"),
+            ("email_already_in_use", "already exists"),
+            ("user_already_exists", "already exists"),
+            ("password_strength_error", "rejected input"),
+            ("password_not_allowed", "rejected input"),
+            ("invalid_email", "rejected input"),
+        ] {
+            let e = classify(api_error(
+                400,
+                json!({ "code": "user_creation_error", "message": "ann@x.com",
+                        "errors": [{ "code": reason, "message": "ann@x.com" }] }),
+            ));
+            assert_eq!(e.to_string(), want, "{reason}");
+        }
+        let e = classify(api_error(
+            400,
+            json!({ "code": "user_creation_error", "message": "ann@x.com",
+                    "errors": [{ "code": "something_new", "message": "ann@x.com" }, { "code": "Bad ann@x.com" }] }),
+        ));
+        assert_eq!(
+            e.to_string(),
+            "workos request failed: status 400 user_creation_error (something_new)"
         );
         let leak = "error sending request for url (https://api.workos.com/x?email=ann%40x.com)";
         let net = workos::Error::Network(workos::transport::TransportError::new(

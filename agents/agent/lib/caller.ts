@@ -25,3 +25,8 @@ export function assertionOf(auth: AuthLike | null | undefined): Assertion | null
 export function tokenOf(auth: AuthLike | null | undefined): string | null {
   return auth ? attr(auth, "assertion") : null;
 }
+
+/** The mandate connection's instance: the verified tenant and agent ids (stable, not secret). */
+export function instanceKeyOf(a: Assertion): string {
+  return `${a.tenant}/${a.agent}`;
+}

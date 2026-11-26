@@ -253,8 +253,8 @@ async fn every_member_gets_a_personal_operator() {
     assert_eq!(
         ops,
         [
-            format!("directory_user_ann:{ann}:-:false"),
-            format!("directory_user_cy:{cy}:-:false"),
+            format!("directory_user_ann:{ann}:Personal agent:false"),
+            format!("directory_user_cy:{cy}:Personal agent:false"),
         ]
     );
     // Each member may use their own operator and no one else's.

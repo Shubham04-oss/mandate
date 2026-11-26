@@ -7,6 +7,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch or PR cancels the older run; main keeps every run.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -35,8 +40,14 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+      # Restores ~/.cargo and target/ keyed on Cargo.lock and the toolchain; saved only from main.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A checksummed release binary instead of compiling it on every run.
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: cargo-deny
       - name: Install cvc5
         run: |
           curl -fsSLo /tmp/cvc5.zip \
@@ -60,8 +71,33 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: agents/package-lock.json
       - run: npm ci
       - run: npm run check
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      # A production build must name the core; a placeholder proves it builds. The refusal without
+      # one is covered by src/lib/api/api-url.test.ts.
+      - run: npm run build
+        env:
+          VITE_MANDATE_API_URL: https://api.example.com
+      # Serves that build in the Worker runtime and checks a rendered page's headers and nonces.
+      - run: npm run test:dist
 
   infra:
     runs-on: ubuntu-latest

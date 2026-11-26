@@ -3,14 +3,19 @@
   "name": "mandate-web",
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
-  "main": "@tanstack/react-start/server-entry",
-  // AWS dev (docs/deploy.md): `npx wrangler deploy --env dev`. Replace example.com with the
-  // Cloudflare zone's domain; the API is the core at api.<domain>.
+  "main": "./src/server.ts",
+  // Served only on its own domain: no *.workers.dev address and no preview URLs.
+  "workers_dev": false,
+  "preview_urls": false,
+  // AWS dev (docs/deploy.md, the web app), from web/:
+  //   CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.oryxa.in npm run build && npx wrangler deploy --env dev
+  // Both are fixed at build time: Cloudflare's Vite plugin picks the environment when it builds
+  // (without CLOUDFLARE_ENV, `--env dev` at deploy is ignored and the top-level Worker goes out),
+  // and the core's address is compiled into the browser code and the CSP's connect-src.
   "env": {
     "dev": {
       "name": "mandate-web-dev",
-      "routes": [{ "pattern": "app.example.com", "custom_domain": true }],
-      "vars": { "MANDATE_API_URL": "https://api.example.com" }
+      "routes": [{ "pattern": "app.oryxa.in", "custom_domain": true }]
     }
   }
 }

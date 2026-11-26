@@ -602,12 +602,17 @@ run "each_consumer_has_a_fifo_queue_with_a_dead_letter_queue" {
     error_message = "every consumer queue redrives to its own dead-letter queue"
   }
   assert {
-    condition     = alltrue([for s in awscc_eventsv2_subscriber.consumer : s.type == "FIFO" && strcontains(s.invoke_configuration.sqs_parameters.message_group_id, "tenant")])
-    error_message = "FIFO delivery grouped by tenant, so each organization's events stay in order"
+    # The core publishes with EventGroupId = tenant and DeduplicationId = event id (publisher.rs).
+    condition = alltrue([for s in awscc_eventsv2_subscriber.consumer : s.type == "FIFO" &&
+      s.invoke_configuration.sqs_parameters.message_group_id == "{% $events.SystemMetadata.EventGroupId %}" &&
+    s.invoke_configuration.sqs_parameters.message_deduplication_id == "{% $events.SystemMetadata.DeduplicationId %}"])
+    error_message = "FIFO delivery grouped by the publisher's EventGroupId (the tenant) and deduplicated by its id"
   }
   assert {
-    condition     = jsondecode(awscc_eventsv2_subscriber.consumer["agent-resume"].filter_configuration.filters[0].pattern).type == ["approval.decided.v1"]
-    error_message = "agent-resume receives approval.decided.v1 only"
+    # For PutEvents the DATA scope is EventBridge's envelope (detail is nested), so match the
+    # trusted aws:DetailType system field instead.
+    condition     = awscc_eventsv2_subscriber.consumer["agent-resume"].filter_configuration.filters[0].scope == "SYSTEM_METADATA" && jsondecode(awscc_eventsv2_subscriber.consumer["agent-resume"].filter_configuration.filters[0].pattern) == { "aws:DetailType" = ["approval.decided.v1"] }
+    error_message = "agent-resume receives approval.decided.v1 only, matched on the trusted detail type"
   }
 }
 
