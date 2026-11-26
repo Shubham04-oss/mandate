@@ -11,15 +11,16 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Ann owns `ann-bot`; Bob is a stranger to it; Ann and Cy are on team `eng` with `eng-bot`.
+/// Ann owns `ann-bot`; Bob is a stranger to it; Ann, Cy and Dee are on team `eng` with `eng-bot`.
 async fn org(s: &Store) -> mandate::ids::TenantId {
     let t = tenant();
     add_member(s, &t, "ann", "Ann Lee", false).await;
     add_member(s, &t, "bob", "Bob Ray", false).await;
     add_member(s, &t, "cy", "Cy Ng", false).await;
+    add_member(s, &t, "dee", "Dee Ko", false).await;
     personal_agent(s, &t, "ann-bot", "ann").await;
     personal_agent(s, &t, "bob-bot", "bob").await;
-    team_agent(s, &t, "eng-bot", "eng", &["ann", "cy"]).await;
+    team_agent(s, &t, "eng-bot", "eng", &["ann", "cy", "dee"]).await;
     t
 }
 
@@ -73,10 +74,10 @@ async fn others_cannot_decide() {
     let t = org(&s).await;
     let id = ask(&s, &t, "ann-bot", "ann", json!({})).await;
     for d in [Decision::Approved, Decision::Denied] {
-        // Bob is not Ann; a member of another tenant cannot even see it.
+        // Bob can neither see nor decide it, nor can a member of another tenant: not found.
         assert!(matches!(
             decide(&s, &t, id, "bob", d).await,
-            Err(DecideError::Forbidden)
+            Err(DecideError::NotFound)
         ));
         assert!(matches!(
             decide(&s, &tenant(), id, "ann", d).await,
@@ -87,7 +88,7 @@ async fn others_cannot_decide() {
         decide(&s, &t, Uuid::new_v4(), "ann", Decision::Approved).await,
         Err(DecideError::NotFound)
     ));
-    // A disabled agent's requests can no longer be decided.
+    // A disabled agent's requests can no longer be decided: a conflict, not a refusal.
     exec(
         &s,
         &t,
@@ -97,7 +98,12 @@ async fn others_cannot_decide() {
     .await;
     assert!(matches!(
         decide(&s, &t, id, "ann", Decision::Approved).await,
-        Err(DecideError::Forbidden)
+        Err(DecideError::Disabled)
+    ));
+    // ...and still unknown to a stranger.
+    assert!(matches!(
+        decide(&s, &t, id, "bob", Decision::Approved).await,
+        Err(DecideError::NotFound)
     ));
     // Expired: no decision, and the caller learns why.
     let id = ask(&s, &t, "bob-bot", "bob", json!({})).await;
@@ -125,7 +131,7 @@ async fn concurrent_decisions_one_wins() {
     decide_approval(
         &mut first,
         id,
-        &member("ann"),
+        &member("dee"),
         Decision::Approved,
         OffsetDateTime::now_utc(),
     )
@@ -148,7 +154,7 @@ async fn concurrent_decisions_one_wins() {
     for i in 0..20 {
         let id = ask(&s, &t, "eng-bot", "ann", json!({ "race": i })).await;
         let (a, b) = tokio::join!(
-            decide(&s, &t, id, "ann", Decision::Approved),
+            decide(&s, &t, id, "dee", Decision::Approved),
             decide(&s, &t, id, "cy", Decision::Denied)
         );
         let wins = [&a, &b].iter().filter(|r| r.is_ok()).count();
@@ -341,9 +347,10 @@ async fn inbox_lists_pending_i_can_decide_and_my_requests() {
     // Bob sees only his own; his own request is decidable by him (his agent).
     let (_, v) = call(&app, "GET", "/v1/approvals", Some((&t, "bob")), None).await;
     assert_eq!(ids(&v), [bobs.to_string()]);
-    // Cy requested the team's one: it is both his request and his to decide.
+    // Cy requested the team's one: he sees his request but may not decide it himself.
     let (_, v) = call(&app, "GET", "/v1/approvals", Some((&t, "cy")), None).await;
     assert_eq!(ids(&v), [teams.to_string()]);
+    assert_eq!(v["items"][0]["can_decide"], json!(false));
     // Another tenant with the same member id sees nothing of this one.
     let other = tenant();
     add_member(&s, &other, "ann", "Ann Other", false).await;
@@ -425,6 +432,8 @@ async fn approve_route_returns_approval() {
     );
     assert_eq!(v["decided_by"]["id"], json!("cy"));
     assert_eq!(v["can_decide"], json!(false));
+    // Asked outside a conversation: no link.
+    assert_eq!(v["conversation"], json!(null));
     for k in ["requested_at", "expires_at", "decided_at"] {
         let ts = v[k].as_str().unwrap();
         assert!(
@@ -432,7 +441,18 @@ async fn approve_route_returns_approval() {
             "{k}"
         );
     }
-    // Deny works the same way; strangers get 403, unknown or malformed ids 404.
+    // Deny works the same way; a stranger, an unknown or a malformed id get 404; a team
+    // requester deciding their own request gets 403.
+    let own = ask(&s, &t, "eng-bot", "cy", json!({ "own": 1 })).await;
+    let (st, _) = call(
+        &app,
+        "POST",
+        &format!("/v1/approvals/{own}/approve"),
+        Some((&t, "cy")),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
     let id = ask(&s, &t, "ann-bot", "ann", json!({})).await;
     let (st, _) = call(
         &app,
@@ -442,7 +462,7 @@ async fn approve_route_returns_approval() {
         None,
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(st, StatusCode::NOT_FOUND);
     let (st, v) = call(
         &app,
         "POST",
@@ -527,4 +547,46 @@ async fn approval_args_are_shown_exactly() {
     )
     .await;
     assert_eq!(v["args"], args);
+}
+
+#[tokio::test]
+#[ignore]
+async fn team_requester_cannot_decide_their_own_request() {
+    let s = app_store().await;
+    let t = org(&s).await;
+    let id = ask(&s, &t, "eng-bot", "ann", json!({ "self": 1 })).await;
+    for d in [Decision::Approved, Decision::Denied] {
+        assert!(matches!(
+            decide(&s, &t, id, "ann", d).await,
+            Err(DecideError::Forbidden)
+        ));
+    }
+    // A teammate still can; a personal agent's owner still decides their own agent's ask.
+    decide(&s, &t, id, "cy", Decision::Approved).await.unwrap();
+    let own = ask(&s, &t, "ann-bot", "ann", json!({ "self": 2 })).await;
+    decide(&s, &t, own, "ann", Decision::Approved)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn disabled_agent_decision_is_409() {
+    let s = app_store().await;
+    let t = org(&s).await;
+    let app = app(s.clone());
+    let id = ask(&s, &t, "ann-bot", "ann", json!({})).await;
+    exec(
+        &s,
+        &t,
+        "update agents set disabled = true where tenant_id = $1 and id = 'ann-bot'",
+        &[],
+    )
+    .await;
+    let path = format!("/v1/approvals/{id}/approve");
+    let (st, v) = call(&app, "POST", &path, Some((&t, "ann")), None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["code"], json!("conflict"));
+    let (st, _) = call(&app, "POST", &path, Some((&t, "bob")), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }

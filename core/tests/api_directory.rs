@@ -312,8 +312,7 @@ async fn removed_member_operator_is_disabled() {
             .is_none()
     );
     drop(tx);
-    // Back in the directory: a member again, but the disabled operator stays disabled until an
-    // admin enables it.
+    // Back in the directory: a member again, with the operator their removal disabled.
     sync(
         &s,
         vec![event(
@@ -323,15 +322,34 @@ async fn removed_member_operator_is_disabled() {
         )],
     )
     .await;
-    assert_eq!(
-        rows(
-            &s,
-            &t,
-            "select id || ':' || disabled from agents where kind = 'personal'"
-        )
-        .await,
-        [format!("{ann}:true")]
-    );
+    let operator = "select id || ':' || disabled || ':' || coalesce(disabled_reason, '-') \
+                    from agents where kind = 'personal'";
+    assert_eq!(rows(&s, &t, operator).await, [format!("{ann}:false:-")]);
+    // An admin's disable outlives a removal and a return.
+    let mut tx = s.begin(&t).await.unwrap();
+    sqlx::query("update agents set disabled = true, disabled_reason = 'admin' where id = $1")
+        .bind(ann.as_str())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sync(
+        &s,
+        vec![
+            event(
+                4,
+                "dsync.user.deleted",
+                user("directory_user_ANN", &o, "inactive", "Ann", "Lee"),
+            ),
+            event(
+                5,
+                "dsync.user.created",
+                user("directory_user_ANN", &o, "active", "Ann", "Lee"),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(rows(&s, &t, operator).await, [format!("{ann}:true:admin")]);
 }
 
 #[tokio::test]

@@ -226,7 +226,8 @@ A PWA plus Slack and Teams. A Tauri desktop app later for local computer use and
 6. **Several people in one thread.** An agent always acts under its own owner's (or team's) grants.
    Others may ask it; it answers them only from what both they and its owner may see, and any action
    that changes something needs its owner's approval. For a team bot, any team member may ask; the
-   team's admins choose who may approve, and one approval is enough by default.
+   team's admins choose who may approve, and one approval is enough by default. A requester never
+   approves or denies their own request to a team bot.
 
 ## 11. Open questions
 

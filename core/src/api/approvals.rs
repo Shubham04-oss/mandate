@@ -51,6 +51,8 @@ pub struct Approval {
     pub requested_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub state: State,
+    /// The decision recorded, whatever the state now (an approved one may since be used or expired).
+    pub decision: Option<Decision>,
     pub decided_by: Option<MemberId>,
     pub decided_at: Option<OffsetDateTime>,
     /// Set by the agent lane when the call came from a conversation.
@@ -63,6 +65,8 @@ pub enum DecideError {
     NotFound,
     #[error("this member may not decide this approval")]
     Forbidden,
+    #[error("the agent is disabled")]
+    Disabled,
     #[error("already decided")]
     AlreadyDecided,
     #[error("expired")]
@@ -71,11 +75,21 @@ pub enum DecideError {
     Store(#[from] StoreError),
 }
 
-/// Who may decide: the owner of a personal agent, or a member of the team that owns a bot; never
-/// for a disabled agent. `a` is the approvals row alias.
-const MAY_DECIDE: &str = "exists (select 1 from agents g where g.tenant_id = a.tenant_id and g.id = a.agent \
-     and not g.disabled and (g.owner_member = $2 or exists (select 1 from team_members tm \
-     where tm.tenant_id = a.tenant_id and tm.team_id = g.owner_team and tm.member_id = $2)))";
+/// Who would decide if agent `g` were enabled: its owner for a personal agent, or a member of the
+/// owning team other than the requester. `a` is the approvals row alias, `$2` the member.
+macro_rules! decider {
+    () => {
+        "(g.owner_member = $2 or (a.requested_by <> $2 and exists (select 1 from team_members tm \
+         where tm.tenant_id = a.tenant_id and tm.team_id = g.owner_team and tm.member_id = $2)))"
+    };
+}
+/// Who may decide: a decider of the approval's agent; never for a disabled agent.
+const MAY_DECIDE: &str = concat!(
+    "exists (select 1 from agents g where g.tenant_id = a.tenant_id and g.id = a.agent \
+     and not g.disabled and ",
+    decider!(),
+    ")"
+);
 pub(crate) const PENDING: &str =
     "a.approved_by is null and a.denied_by is null and a.used_at is null";
 
@@ -108,13 +122,7 @@ pub async fn decide_approval(
         .await?
         .ok_or(DecideError::NotFound)?;
     let Some(args_hash) = won else {
-        if !may_decide(tx, approval, by).await? {
-            return Err(DecideError::Forbidden);
-        }
-        return Err(match a.state {
-            State::Expired => DecideError::Expired,
-            _ => DecideError::AlreadyDecided,
-        });
+        return Err(why_not(tx, approval, by, a.state).await?);
     };
     let audit = AuditEntry {
         agent: a.agent.clone(),
@@ -139,15 +147,33 @@ pub async fn decide_approval(
     Ok(a)
 }
 
-async fn may_decide(tx: &mut Tx, approval: Uuid, by: &MemberId) -> Result<bool, StoreError> {
-    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "select exists (select 1 from approvals a where a.tenant_id = current_setting('mandate.tenant', true) \
-         and a.id = $1 and {MAY_DECIDE})"
+/// Why `by` could not decide: hidden from them (404), their agent disabled (409), not theirs to
+/// decide (403), or no longer pending (409).
+async fn why_not(
+    tx: &mut Tx,
+    approval: Uuid,
+    by: &MemberId,
+    state: State,
+) -> Result<DecideError, StoreError> {
+    // A missing agent row counts as disabled.
+    let (may, visible, disabled): (bool, bool, bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "select {MAY_DECIDE}, a.requested_by = $2 or exists (select 1 from agents g \
+         where g.tenant_id = a.tenant_id and g.id = a.agent and {}), \
+         coalesce((select g.disabled from agents g where g.tenant_id = a.tenant_id and g.id = a.agent), true) \
+         from approvals a where a.tenant_id = current_setting('mandate.tenant', true) and a.id = $1",
+        decider!()
     )))
     .bind(approval)
     .bind(by.as_str())
     .fetch_one(&mut **tx)
-    .await?)
+    .await?;
+    Ok(match (may, visible, disabled, state) {
+        (true, _, _, State::Expired) => DecideError::Expired,
+        (true, ..) => DecideError::AlreadyDecided,
+        (false, false, ..) => DecideError::NotFound,
+        (false, true, true, _) => DecideError::Disabled,
+        (false, true, false, _) => DecideError::Forbidden,
+    })
 }
 
 fn state_of(r: &sqlx::postgres::PgRow, now: OffsetDateTime) -> Result<State, sqlx::Error> {
@@ -185,9 +211,15 @@ pub async fn load(
     else {
         return Ok(None);
     };
-    let by: Option<String> = r
-        .try_get::<Option<String>, _>("approved_by")?
-        .or(r.try_get("denied_by")?);
+    let approved: Option<String> = r.try_get("approved_by")?;
+    let denied: Option<String> = r.try_get("denied_by")?;
+    let decision = match (&approved, &denied) {
+        // Denied first, as `state_of` reads it.
+        (_, Some(_)) => Some(Decision::Denied),
+        (Some(_), None) => Some(Decision::Approved),
+        (None, None) => None,
+    };
+    let by = approved.or(denied);
     let at: Option<OffsetDateTime> = r
         .try_get::<Option<OffsetDateTime>, _>("approved_at")?
         .or(r.try_get("denied_at")?);
@@ -200,6 +232,7 @@ pub async fn load(
         requested_at: r.try_get("requested_at")?,
         expires_at: r.try_get("expires_at")?,
         state: state_of(&r, now)?,
+        decision,
         decided_by: by.map(|m| MemberId::parse(&m)).transpose()?,
         decided_at: at,
         conversation: r.try_get("conversation")?,
@@ -218,6 +251,7 @@ fn view_sql(filter: &str) -> String {
     format!(
         "select a.id, a.agent, a.tool, a.args, a.requested_by, a.requested_at, a.expires_at, \
          a.approved_by, a.denied_by, a.used_at, coalesce(a.approved_at, a.denied_at) as decided_at, \
+         a.conversation, \
          rm.name as rm_name, rm.email as rm_email, dm.name as dm_name, dm.email as dm_email, \
          {MAY_DECIDE} as may_decide, {AGENT_COLS} \
          from approvals a \
@@ -265,6 +299,8 @@ fn view(s: &ApiState, r: &sqlx::postgres::PgRow, now: OffsetDateTime) -> Result<
         }).transpose()?,
         "decided_at": decided_at.map(ts),
         "can_decide": state == State::Pending && r.try_get::<bool, _>("may_decide").map_err(row)?,
+        // The conversation that asked, when one did: the link is within this tenant's row.
+        "conversation": r.try_get::<Option<String>, _>("conversation").map_err(row)?,
     }))
 }
 
@@ -381,6 +417,7 @@ async fn decide(
         Ok(_) => {}
         Err(DecideError::NotFound) => return Err(ApiError::not_found()),
         Err(DecideError::Forbidden) => return Err(ApiError::forbidden()),
+        Err(DecideError::Disabled) => return Err(ApiError::conflict("This agent is disabled.")),
         Err(DecideError::AlreadyDecided) => {
             return Err(ApiError::conflict("This request was already decided."));
         }

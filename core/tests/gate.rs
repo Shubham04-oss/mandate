@@ -407,7 +407,8 @@ async fn approval_covers_only_its_exact_args() {
     else {
         panic!("expected ask")
     };
-    approve_as(&s, &t, approval, "ann").await;
+    // A teammate approves: the requester may not approve their own team request.
+    approve_as(&s, &t, approval, "bob").await;
 
     assert!(matches!(
         authorize(&s, &p, &w, &tl, Effect::External, &b, now).await,
@@ -465,4 +466,33 @@ async fn approval_dies_with_approver_membership() {
         .await
         .unwrap();
     ask().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_team_requesters_own_approval_is_never_spent() {
+    let s = app_store().await;
+    let t = tenant();
+    seed_team(&t, "mail.send").await;
+    let (p, w, tl, now) = (
+        policy(),
+        as_member(&t, "ann"),
+        tool("mail.send"),
+        OffsetDateTime::now_utc(),
+    );
+    let args = json!({"to": "a@b.c"});
+    let Outcome::Ask { approval } = authorize(&s, &p, &w, &tl, Effect::External, &args, now).await
+    else {
+        panic!("expected ask")
+    };
+    // Written past the decide rule, as a row from before it would be.
+    sqlx::query("update approvals set approved_by = 'ann', approved_at = now() where id = $1")
+        .bind(approval)
+        .execute(&admin_pool().await)
+        .await
+        .unwrap();
+    assert!(matches!(
+        authorize(&s, &p, &w, &tl, Effect::External, &args, now).await,
+        Outcome::Ask { .. }
+    ));
 }
