@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs; this keeps the pins moving.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+  # Base images are pinned by digest; this bumps the digest (and tag) of each FROM line.
+  - package-ecosystem: docker
+    directories: [/core, /agents]
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns: ["*"]

@@ -212,19 +212,37 @@ Add required reviewers there too if you want a manual gate.
 gh variable set MANDATE_DEPLOY_ENABLED --body true   # a repository variable, not an environment one
 ```
 
-From then on every push to `main` deploys. Set it to `false` (or delete it) to stop.
+From then on every push to `main` deploys once `ci` passes on it (the workflow runs on `ci`'s
+completion, not on the push). A red `main` deploys nothing; if two commits land close together and
+the older one goes green last, only the newest deploys. Set it to `false` (or delete it) to stop.
 
 ## 9. First deploy
 
 Run the workflow by hand: `gh workflow run deploy.yml --ref main`, then `gh run watch`. It builds
 and pushes the images (tagged with the commit), runs the migrate task (migrations, then
 `core/sql/app_role.sql`) and fails if it exits non-zero, then rolls the core and eve (eve only once
-`agents/` exists) and waits for them to be stable.
+`agents/` exists), following each new ECS deployment until its rollout is `COMPLETED`; `FAILED`
+(the circuit breaker rolled it back) or 25 minutes without finishing fails the job.
 
 Each step takes the newest revision of the task definition and swaps in the new image, so after a
 `tofu apply` that changes a task definition, run the workflow again to roll it out. A rerun of the
 same commit skips images already pushed (tags are immutable). If the circuit breaker rolls a service
-back, the job fails, naming the revision still running.
+back, the job fails, naming the revision it tried.
+
+## Migrations: expand, then contract
+
+The migrate task runs before the services roll, and the circuit breaker (or a manual rollback) can
+put the previous code back on the new schema. So every migration must work with the code before it
+and after it:
+
+1. **Expand:** add tables, columns (nullable or with a default), indexes. Deploy, along with code
+   that writes both shapes and reads the new one.
+2. **Contract:** once no running code uses the old shape, drop or rename it in a later PR and deploy.
+
+Never drop, rename or change the type of something the live code uses in the same deploy as the code
+change. The `migrations` workflow fails a PR whose new or edited migration contains `DROP`,
+`RENAME` or `ALTER ... TYPE` (`scripts/lint-migrations.sh`); add the label
+`migration-destructive-ok` only for a contract step whose expand step is already live.
 
 ## 10. The web app
 
@@ -262,10 +280,14 @@ with `AWS_PROFILE=mumbai` and the values from `tofu output`.
 
 ## Rollback
 
-- **Code:** point the service at the previous revision:
+- **Code:** revert the commit on `main`; the deploy follows once `ci` passes. In a hurry, point the
+  service at the previous revision:
   `aws ecs update-service --cluster mandate-dev --service core --task-definition mandate-dev-core:<previous>`
   (`aws ecs list-task-definitions --family-prefix mandate-dev-core --sort DESC`). Same for `eve`.
-- **Migrations** only go forward. A bad migration is fixed by a new one, then a deploy.
+  That is safe only because migrations are expand-only (above): the old code runs on the new
+  schema. The next deploy starts from the newest revision again, so revert on `main` as well.
+- **Migrations** only go forward; the migrate task never runs a down migration. A bad migration is
+  fixed by a new one, then a deploy. Rolling code back does not roll the schema back.
 - **Stop deploying:** `gh variable set MANDATE_DEPLOY_ENABLED --body false`.
 - **Infrastructure:** revert the commit and `tofu apply`. The database has deletion protection;
   `tofu destroy` needs `db_deletion_protection = false` applied first and leaves a final snapshot

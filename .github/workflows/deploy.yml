@@ -2,8 +2,11 @@ name: deploy
 
 # Off until the owner turns it on (docs/deploy.md): every job needs the repository variable
 # MANDATE_DEPLOY_ENABLED=true, so merging to main deploys nothing by itself.
+# Runs only after ci passes on a push to main, so a red main never migrates or rolls.
 on:
-  push:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -17,11 +20,36 @@ concurrency:
 env:
   AWS_REGION: ap-south-1
   CLUSTER: mandate-dev
-  TAG: ${{ github.sha }}
+  # The commit ci tested; github.sha of a workflow_run is main's tip when it fired, maybe newer.
+  TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
+  gate:
+    if: >-
+      vars.MANDATE_DEPLOY_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.tip.outputs.go }}
+    steps:
+      # ci runs on main overlap, so an older commit can go green after a newer one; deploying it
+      # would roll the code back. The newer commit deploys when its own ci passes.
+      - id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tip="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$tip" = "$TAG" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$TAG is no longer main's tip ($tip); skipping its deploy"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+
   deploy:
-    if: vars.MANDATE_DEPLOY_ENABLED == 'true'
+    needs: gate
+    if: needs.gate.outputs.go == 'true'
     runs-on: ubuntu-latest
     # The deploy role trusts this repository's `dev` environment only; add reviewers there if wanted.
     environment: dev
@@ -31,6 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.TAG }}
           persist-credentials: false
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -117,16 +146,22 @@ jobs:
           }
           roll() {
             td="$(render "mandate-dev-$1" "$2")"
-            aws ecs update-service --cluster "$CLUSTER" --service "$1" --task-definition "$td" >/dev/null
-            aws ecs wait services-stable --cluster "$CLUSTER" --services "$1"
-            # The circuit breaker's rollback also ends stable, on the old revision.
-            live="$(aws ecs describe-services --cluster "$CLUSTER" --services "$1" \
-              --query 'services[0].deployments[0].taskDefinition' --output text)"
-            if [ "$live" != "$td" ]; then
-              echo "::error::$1 runs $live, not $td: the deployment failed and was rolled back"
-              exit 1
-            fi
-            echo "$1 is on $td"
+            dep="$(aws ecs update-service --cluster "$CLUSTER" --service "$1" --task-definition "$td" \
+              --query "service.deployments[?status=='PRIMARY'].id | [0]" --output text)"
+            # Follow this deployment by id: `services-stable` also ends stable after a circuit-breaker
+            # rollback, and the rollback becomes the new PRIMARY. 100 polls x 15 s = 25 minutes.
+            for _ in $(seq 100); do
+              state="$(aws ecs describe-services --cluster "$CLUSTER" --services "$1" \
+                --query "services[0].deployments[?id=='$dep'].rolloutState | [0]" --output text)"
+              echo "$1 $dep: $state"
+              case "$state" in
+                COMPLETED) echo "$1 is on $td"; return 0 ;;
+                IN_PROGRESS) sleep 15 ;;
+                *) echo "::error::$1 did not roll out $td ($state): the circuit breaker rolls back"; exit 1 ;;
+              esac
+            done
+            echo "::error::$1 did not finish rolling out $td in 25 minutes"
+            exit 1
           }
 
           td="$(render mandate-dev-migrate "$REGISTRY/mandate-dev/core:migrate-$TAG")"
@@ -147,7 +182,6 @@ jobs:
   # The web app ships after the core, so it never calls an API the live core doesn't have yet.
   web:
     needs: deploy
-    if: vars.MANDATE_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: dev
     permissions:
@@ -158,6 +192,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.TAG }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
