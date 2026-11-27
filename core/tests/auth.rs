@@ -259,6 +259,8 @@ async fn cors_allows_event_stream_reconnects_and_exposes_retry_after() {
         .unwrap()
         .to_owned();
     assert!(allowed.contains("last-event-id"), "{allowed}");
+    assert!(allowed.contains("traceparent"), "{allowed}");
+    assert!(allowed.contains("tracestate"), "{allowed}");
 
     let r = app
         .clone()

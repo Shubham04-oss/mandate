@@ -24,6 +24,7 @@ pub trait Guard: Send + Sync {
 pub const NOTICE: &str = "This message was withheld by the output guard.";
 
 /// Guards `text`; a guard error or timeout counts as a block (fail closed). `Err` names why, for the audit.
+#[tracing::instrument(name = "guard.screen", skip_all)]
 pub async fn screen(guard: &dyn Guard, text: &str) -> Result<(), &'static str> {
     match tokio::time::timeout(TIMEOUT, guard.check(text)).await {
         Ok(Ok(Verdict::Pass)) => Ok(()),

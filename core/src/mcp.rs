@@ -25,6 +25,7 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
+use tracing::Instrument;
 
 const MAX_ARGS_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -116,7 +117,11 @@ impl ServerHandler for Mcp {
         let effect = tool.effect(&args);
         let now = OffsetDateTime::now_utc();
         let result = match authorize(&s.store, &s.policy, &who, &id, effect, &args, now).await {
-            Outcome::Run => match tool.call(&who, args).await {
+            Outcome::Run => match tool
+                .call(&who, args)
+                .instrument(tracing::info_span!("tool.call", tool = %id))
+                .await
+            {
                 Ok(v) => CallToolResult::structured(v),
                 Err(e @ ToolError::InvalidArgs(_)) => {
                     CallToolResult::error(vec![ContentBlock::text(e.to_string())])
@@ -146,6 +151,7 @@ async fn bearer(State(s): State<Arc<AppState>>, mut req: Request, next: Next) ->
         .and_then(|t| verify(t, &s.assertion_key, now).ok());
     match who {
         Some(a) => {
+            crate::telemetry::record_tenant(a.tenant.as_str());
             req.extensions_mut().insert(a);
             next.run(req).await
         }

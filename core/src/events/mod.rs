@@ -1,6 +1,7 @@
 //! Core events: a versioned envelope, written to the outbox in the caller's transaction and
 //! signed when it is sent. `data` carries ids only, never text, arguments, emails or tokens.
 pub mod consume;
+pub mod posthog;
 pub mod publisher;
 pub mod run;
 pub mod sign;

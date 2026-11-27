@@ -9,4 +9,5 @@ pub mod ids;
 pub mod mcp;
 pub mod policy;
 pub mod store;
+pub mod telemetry;
 pub mod tools;

@@ -162,6 +162,7 @@ async fn audit(
 }
 
 /// Decides one call. Any failure is a refusal.
+#[tracing::instrument(name = "gate.authorize", skip_all, fields(tool = %tool))]
 pub async fn authorize(
     store: &Store,
     policy: &Policy,

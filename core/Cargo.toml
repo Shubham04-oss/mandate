@@ -29,6 +29,11 @@ schemars = { version = "1.2.3", features = ["uuid1"] }
 jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 # Already in the tree through workos; the core's client for eve's private session API.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "logs"] }
+opentelemetry-appender-tracing = { version = "0.33.1", default-features = false }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "logs"] }
+opentelemetry-http = { version = "0.33.1", default-features = false }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "logs", "http-proto", "reqwest-blocking-client"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rmcp = { version = "3.11.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
 serde = { version = "1", features = ["derive"] }
@@ -41,6 +46,7 @@ tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "s
 tower-http = { version = "0.6.11", features = ["cors", "limit", "timeout"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
 url = "2.5.9"
 uuid = { version = "1", features = ["v4", "serde"] }
 workos = "3.7"
@@ -48,6 +54,8 @@ workos = "3.7"
 [dev-dependencies]
 cedar-policy-symcc = "0.9.0"
 http-body-util = "0.1.5"
+# The in-memory exporters the telemetry tests read spans and logs from.
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "logs", "testing"] }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 # Paused clock for timeout tests.

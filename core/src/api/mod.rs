@@ -193,11 +193,14 @@ fn cors(web_origin: &str) -> CorsLayer {
         .allow_origin(origin)
         .allow_credentials(true)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        // EventSource reconnects send Last-Event-ID; the web reads Retry-After on a 429.
+        // EventSource reconnects send Last-Event-ID; the web reads Retry-After on a 429; trace
+        // context lets a browser trace link to ours (`telemetry::http_span` never joins it).
         .allow_headers([
             header::CONTENT_TYPE,
             CSRF_HEADER,
             HeaderName::from_static("last-event-id"),
+            HeaderName::from_static("traceparent"),
+            HeaderName::from_static("tracestate"),
         ])
         .expose_headers([header::RETRY_AFTER])
 }

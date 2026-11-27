@@ -209,6 +209,7 @@ impl TokenVerifier {
         Ok(set)
     }
 
+    #[tracing::instrument(name = "workos.verify", skip_all)]
     pub async fn verify(&self, token: &str, now: i64) -> Result<WorkosClaims, IdentityError> {
         use IdentityError::*;
         if token.len() > MAX_TOKEN_LEN {

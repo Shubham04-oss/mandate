@@ -1774,6 +1774,7 @@ fn authenticated(r: workos::AuthenticateResponse) -> Authenticated {
 
 #[async_trait]
 impl AuthProvider for WorkosAuth {
+    #[tracing::instrument(name = "workos.authenticate_with_password", skip_all)]
     async fn authenticate_with_password(
         &self,
         email: &str,
@@ -1790,6 +1791,7 @@ impl AuthProvider for WorkosAuth {
         r.map(authenticated).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.create_magic_auth", skip_all)]
     async fn create_magic_auth(&self, email: &str) -> Result<(), AuthError> {
         let p =
             workos::user_management::CreateMagicAuthParams::new(workos::CreateMagicCodeAndReturn {
@@ -1805,6 +1807,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|_| ()).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.authenticate_with_magic_auth", skip_all)]
     async fn authenticate_with_magic_auth(
         &self,
         email: &str,
@@ -1821,6 +1824,7 @@ impl AuthProvider for WorkosAuth {
         r.map(authenticated).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.authenticate_with_email_verification", skip_all)]
     async fn authenticate_with_email_verification(
         &self,
         token: &str,
@@ -1835,6 +1839,7 @@ impl AuthProvider for WorkosAuth {
         r.map(authenticated).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.authenticate_with_totp", skip_all)]
     async fn authenticate_with_totp(
         &self,
         token: &str,
@@ -1850,6 +1855,7 @@ impl AuthProvider for WorkosAuth {
         r.map(authenticated).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.authenticate_with_organization_selection", skip_all)]
     async fn authenticate_with_organization_selection(
         &self,
         token: &str,
@@ -1865,6 +1871,7 @@ impl AuthProvider for WorkosAuth {
         r.map(authenticated).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.authenticate_with_code", skip_all)]
     async fn authenticate_with_code(&self, code: &str) -> Result<Authenticated, AuthError> {
         let p = workos::user_management::AuthenticateWithCodeParams::new(code);
         let r = self
@@ -1875,6 +1882,7 @@ impl AuthProvider for WorkosAuth {
         r.map(authenticated).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.sso_connection", skip_all)]
     async fn sso_connection(&self, domain: &str) -> Result<Option<String>, AuthError> {
         let p = workos::sso::ListConnectionsParams {
             domain: Some(domain.to_owned()),
@@ -1907,6 +1915,7 @@ impl AuthProvider for WorkosAuth {
             .map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.create_password_reset", skip_all)]
     async fn create_password_reset(&self, email: &str) -> Result<(), AuthError> {
         let p =
             workos::user_management::ResetPasswordParams::new(workos::CreatePasswordResetToken {
@@ -1917,6 +1926,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|_| ()).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.confirm_password_reset", skip_all)]
     async fn confirm_password_reset(
         &self,
         token: &str,
@@ -1935,6 +1945,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|r| auth_user(r.user)).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.set_password", skip_all)]
     async fn set_password(&self, user: &str, password: &str) -> Result<(), AuthError> {
         let mut body = workos::user_management::UpdateUserParamsBody::new();
         body.password = Some(workos::user_management::Password::Plaintext {
@@ -1945,6 +1956,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|_| ()).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.invitation", skip_all)]
     async fn invitation(&self, token: &str) -> Result<Invitation, AuthError> {
         let i = self
             .client
@@ -1960,11 +1972,13 @@ impl AuthProvider for WorkosAuth {
         })
     }
 
+    #[tracing::instrument(name = "workos.user", skip_all)]
     async fn user(&self, id: &str) -> Result<AuthUser, AuthError> {
         let r = self.client.user_management().get_user(id).await;
         r.map(auth_user).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.create_user", skip_all)]
     async fn create_user(
         &self,
         email: &str,
@@ -1997,6 +2011,7 @@ impl AuthProvider for WorkosAuth {
         })
     }
 
+    #[tracing::instrument(name = "workos.send_verification_email", skip_all)]
     async fn send_verification_email(&self, user: &str) -> Result<(), AuthError> {
         let p = workos::user_management::SendVerificationEmailParams::new(
             workos::SendVerificationEmail { locale: None },
@@ -2009,6 +2024,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|_| ()).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.verify_email", skip_all)]
     async fn verify_email(&self, user: &str, code: &str) -> Result<AuthUser, AuthError> {
         let p = workos::user_management::VerifyEmailParams::new(workos::VerifyEmailAddress {
             code: code.into(),
@@ -2017,6 +2033,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|r| auth_user(r.user)).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.organization", skip_all)]
     async fn organization(&self, id: &str) -> Result<OrgRef, AuthError> {
         let o = self
             .client
@@ -2032,6 +2049,7 @@ impl AuthProvider for WorkosAuth {
 
     // `OrganizationInput` has no constructor, so its deprecated `domains` must be named.
     #[allow(deprecated)]
+    #[tracing::instrument(name = "workos.create_organization", skip_all)]
     async fn create_organization(&self, name: &str) -> Result<OrgRef, AuthError> {
         let p = workos::organizations::CreateOrganizationParams::new(workos::OrganizationInput {
             name: name.to_owned(),
@@ -2053,6 +2071,7 @@ impl AuthProvider for WorkosAuth {
         })
     }
 
+    #[tracing::instrument(name = "workos.create_membership", skip_all)]
     async fn create_membership(&self, user: &str, org: &str, role: &str) -> Result<(), AuthError> {
         let mut body =
             workos::organization_membership::CreateOrganizationMembershipParamsBody::new(user, org);
@@ -2068,6 +2087,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|_| ()).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.memberships", skip_all)]
     async fn memberships(&self, user: &str) -> Result<Vec<Membership>, AuthError> {
         let p = workos::organization_membership::ListOrganizationMembershipsParams {
             user_id: Some(user.to_owned()),
@@ -2091,6 +2111,7 @@ impl AuthProvider for WorkosAuth {
             .collect())
     }
 
+    #[tracing::instrument(name = "workos.enroll_auth_factor", skip_all)]
     async fn enroll_auth_factor(&self, user: &str) -> Result<TotpEnrollment, AuthError> {
         let p = workos::multi_factor_auth::CreateUserAuthFactorParams::new(
             workos::EnrollUserAuthenticationFactor {
@@ -2118,6 +2139,7 @@ impl AuthProvider for WorkosAuth {
         })
     }
 
+    #[tracing::instrument(name = "workos.challenge_factor", skip_all)]
     async fn challenge_factor(&self, factor: &str) -> Result<String, AuthError> {
         let p = workos::multi_factor_auth::ChallengeFactorParams::new(
             workos::ChallengeAuthenticationFactor { sms_template: None },
@@ -2130,6 +2152,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|c| c.id).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.verify_challenge", skip_all)]
     async fn verify_challenge(&self, challenge: &str, code: &str) -> Result<bool, AuthError> {
         let p = workos::multi_factor_auth::VerifyChallengeParams::new(
             workos::AuthenticationChallengesVerifyRequest { code: code.into() },
@@ -2142,6 +2165,7 @@ impl AuthProvider for WorkosAuth {
         r.map(|r| r.valid).map_err(classify)
     }
 
+    #[tracing::instrument(name = "workos.has_totp", skip_all)]
     async fn has_totp(&self, user: &str) -> Result<bool, AuthError> {
         let p = workos::multi_factor_auth::ListUserAuthFactorsParams::default();
         let r = self
