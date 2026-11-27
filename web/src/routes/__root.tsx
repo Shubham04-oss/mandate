@@ -1,6 +1,7 @@
 import { TanStackDevtools } from "@tanstack/react-devtools";
 import { createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
 import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
+import { Analytics } from "#/components/app/analytics.tsx";
 import { Toaster } from "#/components/ui/sonner.tsx";
 import { motionScript } from "#/lib/preferences.ts";
 import { themeScript } from "#/lib/theme.ts";
@@ -56,6 +57,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
 					]}
 				/>
 				<Toaster />
+				<Analytics />
 				<Scripts />
 			</body>
 		</html>

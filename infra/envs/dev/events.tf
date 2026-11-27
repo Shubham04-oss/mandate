@@ -3,7 +3,17 @@
 locals {
   consumers = {
     "agent-resume" = ["approval.decided.v1"]
+    # Ids-only product events to PostHog's /batch. Always here, so the core starts whenever the key appears.
+    "posthog" = [
+      "approval.requested.v1", "approval.decided.v1", "conversation.started.v1", "conversation.finished.v1",
+      "grant.created.v1", "grant.revoked.v1", "member.created.v1", "member.updated.v1", "member.removed.v1",
+      "organization.created.v1", "member.signed_up.v1", "member.signed_in.v1", "organization.chosen.v1",
+      "setting.changed.v1",
+    ]
   }
+  # Receives before the dead-letter queue: PostHog is an outside service, so ride out about 50 minutes
+  # of outage (60 s visibility each) instead of 5.
+  receive_limits = { "posthog" = 50 }
 }
 
 resource "awscc_eventsv2_event_bus" "main" {
@@ -32,7 +42,7 @@ resource "aws_sqs_queue" "consumer" {
   visibility_timeout_seconds  = 60
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.dead_letter[each.key].arn
-    maxReceiveCount     = 5
+    maxReceiveCount     = lookup(local.receive_limits, each.key, 5)
   })
 }
 

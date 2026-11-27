@@ -58,6 +58,7 @@ pub async fn current(s: &ApiState, headers: &HeaderMap) -> Result<Session, ApiEr
     let found = find(&mut tx, token, now).await?;
     tx.commit().await?;
     let (session, verified_at) = found.ok_or_else(ApiError::signed_out)?;
+    crate::telemetry::record_tenant(session.tenant.as_str());
     if now - verified_at <= RECHECK {
         return Ok(session);
     }

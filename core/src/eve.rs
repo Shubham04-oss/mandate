@@ -93,6 +93,13 @@ async fn failure(res: reqwest::Response) -> EveError {
     }
 }
 
+/// The current span's `traceparent`, so eve's spans join this request's trace.
+fn trace_headers() -> reqwest::header::HeaderMap {
+    let mut h = reqwest::header::HeaderMap::new();
+    crate::telemetry::inject(&mut h);
+    h
+}
+
 #[derive(Clone)]
 pub struct EveClient {
     http: reqwest::Client,
@@ -121,6 +128,7 @@ impl EveClient {
         let res = self
             .http
             .post(self.url(path)?)
+            .headers(trace_headers())
             .bearer_auth(assertion)
             .timeout(CALL_TIMEOUT)
             .json(&body)
@@ -138,6 +146,7 @@ impl EveClient {
     // makes a repeat return the first receipt without running the input again.
 
     /// Creates a session with no turn yet, once per caller and `operation`.
+    #[tracing::instrument(name = "eve.create", skip_all)]
     pub async fn create(&self, assertion: &str, operation: &str) -> Result<EveSessionId, EveError> {
         let body = json!({ "operationId": operation });
         let v = self.post(assertion, "/eve/v1/session", body).await?;
@@ -145,6 +154,7 @@ impl EveClient {
     }
 
     /// Sends a message; a repeat with the same `key` runs it only once.
+    #[tracing::instrument(name = "eve.send", skip_all)]
     pub async fn send(
         &self,
         assertion: &str,
@@ -163,6 +173,7 @@ impl EveClient {
     }
 
     /// Answers an approval eve is waiting on.
+    #[tracing::instrument(name = "eve.answer", skip_all)]
     pub async fn answer(
         &self,
         assertion: &str,
@@ -177,6 +188,7 @@ impl EveClient {
         self.post(assertion, &path, body).await.map(drop)
     }
 
+    #[tracing::instrument(name = "eve.cancel", skip_all)]
     pub async fn cancel(&self, assertion: &str, session: &EveSessionId) -> Result<(), EveError> {
         let path = format!("/eve/v1/session/{session}/cancel");
         self.post(assertion, &path, json!({})).await.map(drop)
@@ -184,6 +196,7 @@ impl EveClient {
 
     /// Reads stored lines from `start` until eve ends the lease (the caller reconnects from its
     /// cursor) or the session ends.
+    #[tracing::instrument(name = "eve.stream", skip_all)]
     pub async fn stream(
         &self,
         assertion: &str,
@@ -196,6 +209,7 @@ impl EveClient {
         let res = self
             .http
             .get(url)
+            .headers(trace_headers())
             .bearer_auth(assertion)
             .send()
             .await

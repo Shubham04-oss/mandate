@@ -11,6 +11,8 @@ locals {
     "eve/database-url"           = "Postgres URL as eve's own role, to its own database (eve)"
     "eve/ai-gateway-key"         = "AI gateway key"
     "eve/assertion-public-key"   = "Ed25519 SPKI PEM eve's route auth verifies assertions with"
+    # Read by two tasks (the collector and the core), so named by neither; only telemetry_enabled wires it.
+    "posthog-key" = "PostHog project API key (phc_...): OTLP export from the collector, events from the core"
   }
 }
 

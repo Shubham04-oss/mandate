@@ -22,6 +22,7 @@ import {
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from "#/components/ui/dropdown-menu.tsx";
+import { lengthBucket, track } from "#/lib/analytics.ts";
 import { ApiError, api, type Conversation } from "#/lib/api/index.ts";
 import {
 	applyEvent,
@@ -94,6 +95,7 @@ export function ConversationView({
 	const send = async (text: string) => {
 		try {
 			await api.conversations.send(conversation.id, text);
+			track("message_sent", { length: lengthBucket(text), first: false });
 			// The stream closed when the last turn ended; this one needs it again.
 			stream.current?.resume();
 			return true;
@@ -107,6 +109,7 @@ export function ConversationView({
 	const stop = async () => {
 		try {
 			await api.conversations.cancel(conversation.id);
+			track("conversation_stopped");
 			// A stopped wait ends with a `done` the stream must be open to hear.
 			stream.current?.resume();
 		} catch (e) {

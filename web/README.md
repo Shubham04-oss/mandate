@@ -120,6 +120,32 @@ Checked against the core on `main` (`core/src/api`). The contract is unchanged b
   for it.
 - **Request bodies** for every auth route match the core's.
 
+## Product analytics (PostHog, EU)
+
+Off unless the build names a PostHog project key: `VITE_POSTHOG_KEY=phc_… npm run build` (a public
+key, safe in the bundle, fixed at build time like `VITE_MANDATE_API_URL`). Without it PostHog is not
+in the bundle and `/ingest` is not found.
+
+- **Code:** `src/lib/analytics.ts` (config, `track`, scrubbing), `src/components/app/analytics.tsx`
+  (page views and identity), `src/lib/ingest.ts` (the Worker's `/ingest` proxy).
+- **No external scripts:** the bundled `posthog-js/no-external` build plus its exception and Web
+  Vitals extensions; flags, remote config, autocapture, recordings, surveys and heatmaps are off.
+  The CSP is unchanged: events go to `/ingest` on this origin.
+- **Nothing kept on the device:** `persistence: "memory"`. A signed-in page starts as the member
+  (bootstrap), so reloads merge nothing; a sign-in in the same page identifies once.
+- **Ids only:** `identify` with `Me.person.id` (the core's MemberId) and `group("organization",
+  Me.org.id)` (the TenantId); `reset()` on sign-out.
+- **Addresses:** every URL or pathname PostHog records becomes its route pattern
+  (`/agent/$conversationId`), with no query or hash; referrers and page titles are dropped.
+  Exceptions keep their type and stack, never their message.
+- **Events from the browser:** `message_sent` (length bucket, first or not), `conversation_stopped`,
+  `approval_shown` (can decide), `approval_answered` (outcome, wait in ms). Sign-ups, sign-ins, org
+  choices, settings, conversations started, approvals decided and grants created come from the core.
+- **`/ingest`:** only `POST`/`GET` to `/ingest/e/`, forwarded to `https://eu.i.posthog.com/e/` with
+  its query, body, `Content-Type` and `Content-Encoding` and nothing else (no cookies,
+  Authorization or client IP headers); bodies over 512 KiB are refused; only `Content-Type` comes
+  back (no `Set-Cookie`, no redirects followed).
+
 ## Settings kept on this device
 
 Settings → Appearance (theme, reduce motion, time format) and Settings → Notifications (desktop

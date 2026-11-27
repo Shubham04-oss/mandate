@@ -2,7 +2,7 @@ import { defineAgent } from "eve";
 import { defineDynamic } from "eve/models";
 import { assertionOf, tokenOf } from "#lib/caller.ts";
 import { approvalFor, listTools } from "#lib/core.ts";
-import { gatewayModel } from "#lib/model.ts";
+import { gatewayModel, withMetadata } from "#lib/model.ts";
 
 function env(name: string): string {
   const v = process.env[name];
@@ -12,14 +12,20 @@ function env(name: string): string {
 
 export default defineAgent({
   // Model ids and the gateway come from the environment: nothing here names a provider or model.
-  model: defineDynamic(() => ({
-    model: gatewayModel(
-      env("MANDATE_AI_GATEWAY_URL"),
-      env("MANDATE_AI_GATEWAY_KEY"),
-      env("MANDATE_MODEL_DEFAULT"),
-    ),
-    modelContextWindowTokens: Number(process.env.MANDATE_MODEL_CONTEXT_TOKENS ?? 128000),
-  })),
+  // Runs before every model call, so each call's gateway log names its caller's verified ids.
+  model: defineDynamic(({ session }) => {
+    const caller = assertionOf(session.auth.current);
+    const ids = { tenant: caller?.tenant, agent: caller?.agent, session: session.id };
+    return {
+      model: gatewayModel(
+        env("MANDATE_AI_GATEWAY_URL"),
+        env("MANDATE_AI_GATEWAY_KEY"),
+        env("MANDATE_MODEL_DEFAULT"),
+        withMetadata(fetch, ids),
+      ),
+      modelContextWindowTokens: Number(process.env.MANDATE_MODEL_CONTEXT_TOKENS ?? 128000),
+    };
+  }),
   defaultTools: false,
   // Cards appear early; the core checks every call again at its MCP gate.
   approval: ({ session, toolName, abortSignal }) =>

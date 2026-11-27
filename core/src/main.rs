@@ -23,7 +23,6 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::MissedTickBehavior;
-use tracing_subscriber::EnvFilter;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -57,15 +56,16 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // Logs go to stderr so `dev-assert` stdout carries the token and nothing else.
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-    let result = match Cli::parse().cmd {
+    let cmd = Cli::parse().cmd;
+    // Only the server exports spans; the one-off commands just log.
+    let telemetry = match mandate::telemetry::init(matches!(cmd, Cmd::Serve)) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("mandate: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = match cmd {
         Cmd::Migrate => migrate().await,
         Cmd::Serve => serve().await,
         Cmd::Healthcheck => healthcheck().await,
@@ -76,13 +76,16 @@ async fn main() -> ExitCode {
             space,
         } => dev_assert(tenant, member, agent, space),
     };
-    match result {
+    let code = match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!(error = %e, "mandate failed");
             ExitCode::FAILURE
         }
-    }
+    };
+    // The exporter's client blocks; flushing off the runtime's threads keeps it from panicking.
+    let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
+    code
 }
 
 fn env(name: &str) -> Result<String> {
@@ -209,16 +212,19 @@ async fn serve() -> Result<()> {
         workos: workos.map(|(client, id)| Arc::new(Workos::new(client, id))),
     });
     let (web_api, conv) = web_api(&state, &aws)?.unzip();
-    let consumers = conv
+    let mut consumers: Vec<_> = conv
         .flatten()
         .map(|c| mandate::events::consumer("agent-resume", Resume(c)))
         .into_iter()
         .collect();
+    consumers.extend(posthog()?);
     let events = mandate::events::start(&store, &aws, consumers).await?;
     let mut app = router(state).route("/healthz", axum::routing::get(|| async { "ok" }));
     if let Some(web_api) = web_api {
         app = app.merge(web_api);
     }
+    // Last, so it wraps every route and reads its matched pattern.
+    let app = app.layer(axum::middleware::from_fn(mandate::telemetry::http_span));
 
     let bind = std::env::var("MANDATE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -241,6 +247,17 @@ async fn serve() -> Result<()> {
     served?;
     tracing::info!("stopped");
     Ok(())
+}
+
+/// Product events to PostHog; off unless `POSTHOG_API_KEY` is set.
+fn posthog() -> Result<Option<mandate::events::Consumer>> {
+    let Ok(key) = env("POSTHOG_API_KEY") else {
+        tracing::info!("POSTHOG_API_KEY not set: product events stay in the core");
+        return Ok(None);
+    };
+    let host = std::env::var("POSTHOG_HOST").unwrap_or_else(|_| "https://eu.i.posthog.com".into());
+    let handler = mandate::events::posthog::Posthog::new(&host, key)?;
+    Ok(Some(mandate::events::consumer("posthog", handler)))
 }
 
 /// The web app's API, and the agent conversations when eve is configured; off unless WorkOS

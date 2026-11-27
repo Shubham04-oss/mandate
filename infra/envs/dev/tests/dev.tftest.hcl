@@ -84,6 +84,10 @@ override_resource {
   target = aws_secretsmanager_secret.this["eve/assertion-public-key"]
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/assertion-public-key" }
 }
+override_resource {
+  target = aws_secretsmanager_secret.this["posthog-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/posthog-key" }
+}
 # Mocks leave computed blocks empty; RDS always returns the managed secret when it manages the password.
 override_resource {
   target = aws_db_instance.main
@@ -129,6 +133,10 @@ override_resource {
   values = { id = "sg-db-bootstrap" }
 }
 override_resource {
+  target = aws_security_group.collector[0]
+  values = { id = "sg-collector" }
+}
+override_resource {
   target = aws_secretsmanager_secret.tunnel_token
   # A secret's id is its ARN.
   values = {
@@ -143,6 +151,14 @@ override_resource {
 override_resource {
   target = aws_sqs_queue.dead_letter["agent-resume"]
   values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-agent-resume-dlq.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.consumer["posthog"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-posthog.fifo", url = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-posthog.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.dead_letter["posthog"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-posthog-dlq.fifo" }
 }
 
 override_resource {
@@ -326,9 +342,9 @@ run "secrets_are_containers_under_the_cmk" {
     condition = toset(keys(aws_secretsmanager_secret.this)) == toset([
       "core/database-url", "core/workos-api-key", "core/workos-client-id",
       "core/assertion-private-key", "core/event-signing-key", "core/event-public-key",
-      "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key",
+      "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key", "posthog-key",
     ])
-    error_message = "one secret per value a task needs, named by who reads it"
+    error_message = "one secret per value a task needs, named by who reads it (posthog-key: the collector and the core)"
   }
   assert {
     condition     = aws_kms_key.main.enable_key_rotation
@@ -597,8 +613,30 @@ run "each_consumer_has_a_fifo_queue_with_a_dead_letter_queue" {
   command = apply
 
   assert {
-    condition     = keys(aws_sqs_queue.consumer) == ["agent-resume"] && alltrue([for q in aws_sqs_queue.consumer : q.fifo_queue && q.sqs_managed_sse_enabled])
-    error_message = "one encrypted FIFO queue per consumer, starting with agent-resume"
+    condition     = keys(aws_sqs_queue.consumer) == ["agent-resume", "posthog"] && alltrue([for q in aws_sqs_queue.consumer : q.fifo_queue && q.sqs_managed_sse_enabled])
+    error_message = "one encrypted FIFO queue per consumer: agent-resume and posthog"
+  }
+  assert {
+    condition = toset(jsondecode(awscc_eventsv2_subscriber.consumer["posthog"].filter_configuration.filters[0].pattern)["aws:DetailType"]) == toset([
+      "approval.requested.v1", "approval.decided.v1", "conversation.started.v1", "conversation.finished.v1",
+      "grant.created.v1", "grant.revoked.v1", "member.created.v1", "member.updated.v1", "member.removed.v1",
+      "organization.created.v1", "member.signed_up.v1", "member.signed_in.v1", "organization.chosen.v1",
+      "setting.changed.v1",
+    ]) && awscc_eventsv2_subscriber.consumer["posthog"].filter_configuration.filters[0].scope == "SYSTEM_METADATA"
+    error_message = "posthog receives every core event type, matched on the trusted detail type"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name => e.value if startswith(e.name, "MANDATE_QUEUE_")
+      } == {
+      MANDATE_QUEUE_AGENT_RESUME = aws_sqs_queue.consumer["agent-resume"].url
+      MANDATE_QUEUE_POSTHOG      = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-posthog.fifo"
+    }
+    error_message = "the core gets one MANDATE_QUEUE_<NAME> per consumer, posthog included even with telemetry off"
+  }
+  assert {
+    condition     = keys(aws_cloudwatch_metric_alarm.dlq) == ["agent-resume", "posthog"]
+    error_message = "the posthog dead-letter queue has an alarm too"
   }
   assert {
     condition     = alltrue([for k, q in aws_sqs_queue.consumer : jsondecode(q.redrive_policy).deadLetterTargetArn == aws_sqs_queue.dead_letter[k].arn])
@@ -632,7 +670,7 @@ run "the_core_may_publish_and_consume_and_nothing_more" {
       {
         Effect   = "Allow"
         Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]
-        Resource = [aws_sqs_queue.consumer["agent-resume"].arn]
+        Resource = [aws_sqs_queue.consumer["agent-resume"].arn, "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-posthog.fifo"]
       },
     ]
     error_message = "the core publishes to its bus and reads its consumer queues; nothing else"
@@ -786,5 +824,254 @@ run "alarms_cover_every_dlq_and_service_with_no_default_subscriber" {
   assert {
     condition     = strcontains(jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].healthCheck.command[3], "http://127.0.0.1:3000/eve/v1/health")
     error_message = "eve's health check probes its own health route"
+  }
+}
+
+run "telemetry_is_off_by_default_and_changes_nothing" {
+  command = apply
+
+  assert {
+    condition = (
+      length(aws_ecs_service.collector) == 0 && length(aws_ecs_task_definition.collector) == 0
+      && length(aws_security_group.collector) == 0 && length(aws_iam_role.collector_execution) == 0
+      && length(aws_vpc_security_group_ingress_rule.collector) == 0 && length(aws_vpc_security_group_egress_rule.to_collector) == 0
+      && !contains(keys(aws_service_discovery_service.this), "collector") && !contains(keys(aws_cloudwatch_log_group.this), "collector")
+    )
+    error_message = "with telemetry_enabled false there is no collector at all"
+  }
+  assert {
+    condition = !anytrue([for td in [aws_ecs_task_definition.core, aws_ecs_task_definition.eve] : anytrue([
+      for e in jsondecode(td.container_definitions)[0].environment : startswith(e.name, "OTEL_") || startswith(e.name, "POSTHOG_")
+    ])])
+    error_message = "no OTEL or PostHog env on the core or eve while telemetry is off"
+  }
+  assert {
+    condition = !anytrue([for td in [aws_ecs_task_definition.core, aws_ecs_task_definition.eve] : contains(
+      [for s in jsondecode(td.container_definitions)[0].secrets : s.valueFrom], aws_secretsmanager_secret.this["posthog-key"].arn
+    )])
+    error_message = "the PostHog key reaches no task while telemetry is off"
+  }
+  assert {
+    condition = !contains(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["core"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ]), aws_secretsmanager_secret.this["posthog-key"].arn)
+    error_message = "the core's execution role cannot read the PostHog key while telemetry is off"
+  }
+}
+
+run "the_collector_is_the_only_way_out_for_telemetry" {
+  command = apply
+  variables {
+    telemetry_enabled = true
+  }
+
+  assert {
+    condition = (
+      toset([for r in aws_vpc_security_group_ingress_rule.collector : r.referenced_security_group_id]) == toset([aws_security_group.core.id, aws_security_group.eve.id])
+      && alltrue([for r in aws_vpc_security_group_ingress_rule.collector : r.security_group_id == "sg-collector" && r.ip_protocol == "tcp" && r.from_port == 4318 && r.to_port == 4318 && r.cidr_ipv4 == null && r.cidr_ipv6 == null && r.prefix_list_id == null])
+    )
+    error_message = "the collector admits OTLP/HTTP on 4318 from the core and eve only, by security group"
+  }
+  assert {
+    condition = length([
+      for r in concat([aws_vpc_security_group_ingress_rule.core_from_eve, aws_vpc_security_group_ingress_rule.eve_from_core], values(aws_vpc_security_group_ingress_rule.db)) : r if r.security_group_id == "sg-collector"
+    ]) == 0 && length(aws_security_group.collector[0].ingress) == 0
+    error_message = "no other rule admits anything to the collector"
+  }
+  assert {
+    condition = (
+      aws_vpc_security_group_egress_rule.collector_https[0].security_group_id == "sg-collector"
+      && aws_vpc_security_group_egress_rule.collector_https[0].cidr_ipv4 == "0.0.0.0/0"
+      && aws_vpc_security_group_egress_rule.collector_https[0].from_port == 443 && aws_vpc_security_group_egress_rule.collector_https[0].to_port == 443
+      && !contains([for r in aws_vpc_security_group_egress_rule.to_db : r.security_group_id], "sg-collector")
+    )
+    error_message = "the collector reaches HTTPS (PostHog) and not the database"
+  }
+  assert {
+    condition = alltrue([for k, sg in { core = aws_security_group.core.id, eve = aws_security_group.eve.id } : (
+      aws_vpc_security_group_egress_rule.to_collector[k].security_group_id == sg
+      && aws_vpc_security_group_egress_rule.to_collector[k].referenced_security_group_id == "sg-collector"
+      && aws_vpc_security_group_egress_rule.to_collector[k].from_port == 4318 && aws_vpc_security_group_egress_rule.to_collector[k].to_port == 4318
+    )])
+    error_message = "the core and eve reach the collector on 4318"
+  }
+  assert {
+    condition = (
+      aws_ecs_service.collector[0].desired_count == 1
+      && aws_ecs_service.collector[0].network_configuration[0].assign_public_ip
+      && toset(aws_ecs_service.collector[0].network_configuration[0].subnets) == toset(aws_subnet.public[*].id)
+      && aws_ecs_service.collector[0].network_configuration[0].security_groups == toset(["sg-collector"])
+      && one(aws_ecs_service.collector[0].service_registries).registry_arn == aws_service_discovery_service.this["collector"].arn
+      && aws_service_discovery_service.this["collector"].name == "collector"
+      && aws_ecs_task_definition.collector[0].cpu == "256" && aws_ecs_task_definition.collector[0].memory == "512"
+    )
+    error_message = "one small collector task in the public subnets, registered as collector.<ns>"
+  }
+  assert {
+    condition = (
+      can(regex("^docker\\.io/otel/opentelemetry-collector-contrib@sha256:[0-9a-f]{64}$", jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].image))
+      && jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].user == "10001:10001"
+      && jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].command == ["--config=env:OTELCOL_CONFIG"]
+      && jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].portMappings == [{ containerPort = 4318, protocol = "tcp" }]
+    )
+    error_message = "the contrib collector, pinned by digest, non-root, config from the env, OTLP/HTTP port only"
+  }
+  assert {
+    condition     = jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].secrets == [{ name = "POSTHOG_API_KEY", valueFrom = aws_secretsmanager_secret.this["posthog-key"].arn }]
+    error_message = "the collector gets the PostHog key as a task secret, and nothing else"
+  }
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.collector_execution[0].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ])) == toset([aws_secretsmanager_secret.this["posthog-key"].arn])
+    error_message = "the collector's execution role reads only the PostHog key"
+  }
+  assert {
+    condition     = !contains(one([for st in jsondecode(aws_iam_role_policy.deploy.policy).Statement : st.Resource if contains(flatten([st.Action]), "iam:PassRole")]), aws_iam_role.collector_execution[0].arn)
+    error_message = "the deploy workflow cannot run anything as the collector"
+  }
+  assert {
+    condition = (
+      contains(jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets, { name = "POSTHOG_API_KEY", valueFrom = aws_secretsmanager_secret.this["posthog-key"].arn })
+      && contains(flatten([
+        for st in jsondecode(aws_iam_role_policy.execution["core"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+      ]), aws_secretsmanager_secret.this["posthog-key"].arn)
+    )
+    error_message = "the core gets the PostHog key for product events"
+  }
+  assert {
+    condition = !contains([for s in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].secrets : s.valueFrom], aws_secretsmanager_secret.this["posthog-key"].arn) && !contains(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["eve"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ]), aws_secretsmanager_secret.this["posthog-key"].arn)
+    error_message = "eve never sees the PostHog key"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name => e.value if startswith(e.name, "OTEL_") || startswith(e.name, "POSTHOG_")
+      } == {
+      OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.mandate-dev.internal:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL = "http/protobuf"
+      OTEL_SERVICE_NAME           = "mandate-core"
+      POSTHOG_HOST                = "https://eu.i.posthog.com"
+    }
+    error_message = "the core exports to the collector as mandate-core and sends product events to PostHog EU"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].environment : e.name => e.value if startswith(e.name, "OTEL_") || startswith(e.name, "POSTHOG_")
+      } == {
+      OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.mandate-dev.internal:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL = "http/protobuf"
+      OTEL_SERVICE_NAME           = "eve"
+    }
+    error_message = "eve exports to the collector as eve, and has no PostHog env"
+  }
+}
+
+run "the_collector_config_lets_only_allowlisted_data_out" {
+  command = apply
+  variables {
+    telemetry_enabled = true
+  }
+
+  assert {
+    condition     = keys(yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).receivers) == ["otlp"]
+    error_message = "one receiver: OTLP"
+  }
+  assert {
+    condition     = yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).receivers.otlp.protocols == { http = { endpoint = "0.0.0.0:4318" } }
+    error_message = "OTLP over HTTP on 4318 only, no gRPC"
+  }
+  assert {
+    condition = yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).service.pipelines == {
+      traces = { receivers = ["otlp"], processors = ["memory_limiter", "redaction", "transform", "batch"], exporters = ["otlp_http/posthog"] }
+      logs   = { receivers = ["otlp"], processors = ["memory_limiter", "filter/warn", "redaction", "batch"], exporters = ["otlp_http/posthog"] }
+    }
+    error_message = "every pipeline redacts before it exports; logs below WARN are dropped; no sampling at 100%"
+  }
+  assert {
+    condition     = yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors["filter/warn"].log_conditions == ["log.severity_number < SEVERITY_NUMBER_WARN"]
+    error_message = "the logs pipeline keeps WARN and above only"
+  }
+  assert {
+    condition = (
+      yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.allow_all_keys == false
+      && yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.ignored_keys == ["trace_id", "span_id"]
+      && length(setintersection(toset(yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.allowed_keys), toset([
+        "exception.message", "exception.stacktrace", "otel.status_description", "url.full", "url.path", "url.query",
+        "db.statement", "db.query.text", "http.request.header.authorization", "user.email", "enduser.id", "client.address",
+        "gen_ai.prompt", "gen_ai.completion",
+      ]))) == 0
+      && length(setsubtract(toset(["tenant.id", "agent.id", "conversation.id", "http.route", "http.request.method", "http.response.status_code", "otel.status_code", "error.type", "exception.type", "service.name"]),
+      toset(yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.allowed_keys))) == 0
+    )
+    error_message = "an allowlist: ids, routes, codes and types pass; messages, stack traces, URLs, queries and user fields do not"
+  }
+  assert {
+    # Fake look-alikes of each kind of secret; tofu's regex() is RE2 like the collector's Go regexp.
+    condition = alltrue([for v in [
+      "mail alice@example.com now", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl", "Bearer abc.def",
+      "sk-xxxxxxxxxxxxxxxxxxxxxxxx", "sk_test_xxxxxxxxxxxxxxxxxxxx", "phc_xxxxxxxxxxxxxxxxxxxxxxxx", "AKIAIOSFODNN7EXAMPLE",
+      "xoxb-xxxxxxxxxxxx", "-----BEGIN PRIVATE KEY-----", "0123456789abcdef0123456789abcdef0123456789abcdef",
+      "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5", "your code is 123456", "from 203.0.113.7",
+      ] : anytrue([for re in yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.blocked_values : can(regex(re, v))])
+    ])
+    error_message = "emails, tokens, keys, long hex/base64, 6-digit codes and IPs are masked"
+  }
+  assert {
+    condition = alltrue([for re in yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.blocked_values : anytrue([for v in [
+      "mail alice@example.com now", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl", "Bearer abc.def",
+      "sk-xxxxxxxxxxxxxxxxxxxxxxxx", "sk_test_xxxxxxxxxxxxxxxxxxxx", "phc_xxxxxxxxxxxxxxxxxxxxxxxx", "AKIAIOSFODNN7EXAMPLE",
+      "xoxb-xxxxxxxxxxxx", "-----BEGIN PRIVATE KEY-----", "0123456789abcdef0123456789abcdef0123456789abcdef",
+      "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5", "your code is 123456", "from 203.0.113.7",
+    ] : can(regex(re, v))])])
+    error_message = "every blocked pattern compiles and masks at least one sample (an invalid RE2 pattern would match nothing)"
+  }
+  assert {
+    condition = !anytrue([for v in [
+      "GET /v1/conversations/{conversation}/approvals", "/v1/things/{id}", "acme", "mandate-core", "eve",
+      "0b9d6c1e-3c2a-4f1e-9a7b-2d1f0e8c4b5a", "core/src/telemetry.rs", "approval.decided.v1", "0.33.1", "200", "dynamic/mandate-default",
+      ] : anytrue([for re in yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.blocked_values : can(regex(re, v))])
+    ])
+    error_message = "routes, names, UUIDs, paths, versions and status codes are not masked"
+  }
+  assert {
+    condition = (
+      yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.transform.error_mode == "propagate"
+      && yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.transform.trace_statements[0].statements[0] == "set(span.status.message, \"\")"
+      && length(yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.transform.trace_statements[0].statements) == 1 + length(yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.blocked_values)
+      && length(yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.transform.trace_statements[1].statements) == length(yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.redaction.blocked_values)
+      && yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.transform.trace_statements[1].statements[0] == "replace_pattern(spanevent.name, \"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\\\.[A-Za-z]{2,}\", \"****\")"
+    )
+    error_message = "status messages are cleared; span and event names are masked with every blocked pattern; a failing statement drops the batch"
+  }
+  assert {
+    condition = yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).exporters == {
+      "otlp_http/posthog" = {
+        traces_endpoint = "https://eu.i.posthog.com/i/v1/traces"
+        logs_endpoint   = "https://eu.i.posthog.com/i/v1/logs"
+        headers         = { Authorization = "Bearer $${env:POSTHOG_API_KEY}" }
+      }
+    }
+    error_message = "one exporter: PostHog EU, the project key from the task secret (never in the config itself)"
+  }
+}
+
+run "tail_sampling_keeps_errors_and_samples_the_rest" {
+  command = apply
+  variables {
+    telemetry_enabled        = true
+    telemetry_sample_percent = 25
+  }
+
+  assert {
+    condition     = yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).service.pipelines.traces.processors == ["memory_limiter", "tail_sampling", "redaction", "transform", "batch"]
+    error_message = "below 100% the traces pipeline samples first"
+  }
+  assert {
+    condition = [for p in yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).processors.tail_sampling.policies : p.type == "status_code" ? jsonencode(p.status_code) : jsonencode(p.probabilistic)] == [
+      jsonencode({ status_codes = ["ERROR"] }), jsonencode({ sampling_percentage = 25 }),
+    ]
+    error_message = "every error trace is kept, and the given percentage of the rest"
   }
 }

@@ -39,6 +39,7 @@ import {
 	TooltipTrigger,
 } from "#/components/ui/tooltip.tsx";
 import { describeApproval } from "#/lib/activity.ts";
+import { signedOut } from "#/lib/analytics.ts";
 import { type Approval, api, type Me, type Person } from "#/lib/api/index.ts";
 import { shortcutLabel, useShortcut } from "#/lib/shortcuts.ts";
 import { signOut } from "#/lib/sign-out.ts";
@@ -188,6 +189,7 @@ function useSignOut() {
 		signOut({
 			request: api.auth.signOut,
 			leave: async () => {
+				signedOut();
 				await router.invalidate();
 				await navigate({ to: "/sign-in" });
 			},

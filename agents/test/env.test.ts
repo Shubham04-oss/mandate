@@ -19,6 +19,8 @@ const good = {
 
 test("a complete environment passes", () => {
   assert.deepEqual(envProblems(good), []);
+  const otlp = "http://collector.observability:4318";
+  assert.deepEqual(envProblems({ ...good, OTEL_EXPORTER_OTLP_ENDPOINT: otlp }), []);
 });
 
 test("each missing variable is named", () => {
@@ -30,6 +32,8 @@ test("each missing variable is named", () => {
 test("bad URLs and keys are named without echoing the value", () => {
   for (const [name, value, msg] of [
     ["MANDATE_AI_GATEWAY_URL", "not a url", "is not a valid URL"],
+    ["OTEL_EXPORTER_OTLP_ENDPOINT", "collector:4318", "is not an http(s) URL"],
+    ["OTEL_EXPORTER_OTLP_ENDPOINT", "not a url", "is not an http(s) URL"],
     [
       "MANDATE_ASSERTION_PUBLIC_KEY",
       "-----BEGIN PUBLIC KEY-----\nsecretish\n",
