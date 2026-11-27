@@ -71,6 +71,28 @@
   view and human takeover need sessions that outlive a call; that is future work.
 - A backend failure reaches the agent as a generic error; the detail goes only to the operator log.
 
+## Telemetry (ORY-61)
+
+Everything is off until the owner adds the PostHog key and sets `telemetry_enabled`; until then
+logs go to CloudWatch only, as before.
+
+- **What leaves:** spans (route pattern, method, status, tenant id, trace id, timings), warn and
+  error logs, product events, and in the browser page views by route pattern, exceptions and
+  Web Vitals. All of it goes to PostHog (EU). Info logs stay in CloudWatch.
+- **What never leaves:** emails, names, message text, prompts, model inputs and outputs, tool
+  arguments, codes, tokens, raw URLs and IP addresses. The core builds every PostHog property field
+  by field from typed ids and enums; spans are named by route pattern, never the raw path; the
+  web app's `/ingest` proxy forwards no cookies or client IP.
+- **One funnel:** the core and eve send OTLP only to the collector, which drops attributes not on
+  its allowlist and redacts anything shaped like an email, code or token before export. That is a
+  backstop, not the control: each sender keeps to ids at the source. Cloudflare sources (AI Gateway
+  logs, Worker traces) can't reach the private collector and go straight to PostHog, so AI Gateway
+  logs must keep prompt and response bodies off.
+- **Trace context is not trust.** A browser's `traceparent` is recorded as a link on a new trace,
+  never as the parent; only eve's calls to `/mcp` over the private network may parent a span. The
+  core keeps every span and the collector samples, so no caller decides what is sampled.
+- **AI Gateway metadata** (`cf-aig-metadata`) carries ids only: tenant, agent, conversation, trace.
+
 ## Dev network (infra/envs/dev)
 
 - The public API reaches the core only through a Cloudflare Tunnel: `cloudflared` beside the core
