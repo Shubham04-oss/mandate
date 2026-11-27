@@ -204,9 +204,27 @@ async fn fake_stream(
     Body::from_stream(lines.chain(end))
 }
 
+/// eve's debug route: records the call, then fails as eve does once it has reported the error.
+async fn fake_debug(
+    State(f): State<Arc<FakeEve>>,
+    headers: HeaderMap,
+    body: Option<Json<Value>>,
+) -> (axum::http::StatusCode, Json<Value>) {
+    f.record(
+        "/mandate/v1/debug/error".into(),
+        &headers,
+        body.map(|b| b.0).unwrap_or(Value::Null),
+    );
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "forced test error ann@example.com" })),
+    )
+}
+
 /// Serves the fake on a random local port; returns its base URL.
 async fn serve_fake(f: Arc<FakeEve>) -> Url {
     let app = axum::Router::new()
+        .route("/mandate/v1/debug/error", post(fake_debug))
         .route("/eve/v1/session", post(fake_start))
         .route("/eve/v1/session/{id}", post(fake_post))
         .route(
@@ -2196,4 +2214,127 @@ async fn a_start_whose_session_cannot_be_recorded_is_failed_not_left_working() {
     let (_, list) = call(&app, "GET", "/v1/conversations", None).await;
     assert_eq!(list["items"][0]["state"], "failed");
     assert!(h.fake.messages_run().is_empty());
+}
+
+/// The web API with `POST /v1/debug/error` mounted as `serve` mounts it, behind the request span;
+/// `enabled` is `MANDATE_DEBUG_ROUTES`, `eve` whether eve is configured.
+fn debug_app(h: &Harness, who: &Who, enabled: bool, eve: bool) -> Who {
+    let state = api_support::state_with(h.store.clone(), enabled);
+    let conv = eve.then(|| h.conv.clone());
+    let router = api::router(state.clone())
+        .merge(api::with_routes(api::debug::routes(&state, conv), state))
+        .layer(axum::middleware::from_fn(mandate::telemetry::http_span));
+    Who {
+        router,
+        cookie: who.cookie.clone(),
+    }
+}
+
+async fn make_admin(t: &TenantId, member: &str) {
+    sqlx::query("update members set is_admin = true where tenant_id = $1 and id = $2")
+        .bind(t.as_str())
+        .bind(member)
+        .execute(&common::admin_pool().await)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn the_debug_route_is_off_by_default_and_for_admins_only() {
+    let h = harness().await;
+    let t = tenant();
+    members(&t).await;
+    make_admin(&t, "ann").await;
+    let core = Some(json!({ "service": "core" }));
+    let ann = h.app(&t, "ann").await;
+
+    let off = debug_app(&h, &ann, false, true);
+    let (status, _) = call(&off, "POST", "/v1/debug/error", core.clone()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let bob = debug_app(&h, &h.app(&t, "bob").await, true, true);
+    let (status, _) = call(&bob, "POST", "/v1/debug/error", core.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let anon = debug_app(&h, &h.anon(), true, true);
+    let (status, _) = call(&anon, "POST", "/v1/debug/error", core).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let on = debug_app(&h, &ann, true, true);
+    let web = Some(json!({ "service": "web" }));
+    let (status, body) = call(&on, "POST", "/v1/debug/error", web).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_input");
+    // Without eve configured there is no one to ask.
+    let no_eve = debug_app(&h, &ann, true, false);
+    let eve = Some(json!({ "service": "eve" }));
+    let (status, _) = call(&no_eve, "POST", "/v1/debug/error", eve).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(h.fake.seen().is_empty());
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_forced_core_error_is_reported_with_its_trace_and_org() {
+    use mandate::exceptions::{ExceptionLayer, Reporter};
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt;
+    let h = harness().await;
+    let t = tenant();
+    members(&t).await;
+    make_admin(&t, "ann").await;
+    let app = debug_app(&h, &h.app(&t, "ann").await, true, true);
+
+    let (reporter, mut queue) = Reporter::new(16);
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
+        .with(ExceptionLayer::new(reporter));
+    let guard = tracing::subscriber::set_default(subscriber);
+    let core = Some(json!({ "service": "core" }));
+    let (status, body) = call(&app, "POST", "/v1/debug/error", core).await;
+    drop(guard);
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["code"], "internal");
+
+    let mut reported = Vec::new();
+    while let Ok(e) = queue.try_recv() {
+        reported.push(e);
+    }
+    let e = reported
+        .iter()
+        .find(|e| e["properties"]["$exception_list"][0]["type"] == "mandate::api::debug")
+        .unwrap_or_else(|| panic!("no report from the debug route: {reported:?}"));
+    let p = &e["properties"];
+    let at = p["$exception_list"][0]["value"].as_str().unwrap();
+    assert!(at.starts_with("src/api/debug.rs:"), "{at}");
+    assert_eq!(p["$groups"]["organization"], t.as_str());
+    assert_eq!(p["trace_id"].as_str().unwrap().len(), 32);
+    assert!(!e.to_string().contains("forced test error"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_forced_eve_error_calls_eves_debug_route_as_the_admin() {
+    let h = harness().await;
+    let t = tenant();
+    members(&t).await;
+    make_admin(&t, "ann").await;
+    let app = debug_app(&h, &h.app(&t, "ann").await, true, true);
+    let eve = Some(json!({ "service": "eve" }));
+    let (status, body) = call(&app, "POST", "/v1/debug/error", eve).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["code"], "internal");
+    // eve's own answer never reaches the browser.
+    assert!(!body.to_string().contains("ann@example.com"));
+    let seen = h.fake.seen();
+    let [call] = seen.as_slice() else {
+        panic!("one eve call, got {seen:?}")
+    };
+    assert_eq!(call.path, "/mandate/v1/debug/error");
+    let a = assertion_of(call);
+    assert_eq!(
+        (a.tenant, a.member.as_str(), a.agent.as_str()),
+        (t, "ann", "debug")
+    );
 }

@@ -67,6 +67,11 @@ pub fn app(store: Store) -> App {
 
 /// The web API's state, with a catalog whose tools only report their effects.
 pub fn state(store: Store) -> Arc<ApiState> {
+    state_with(store, false)
+}
+
+/// `state`, with `debug_routes` as `MANDATE_DEBUG_ROUTES` would set it.
+pub fn state_with(store: Store, debug_routes: bool) -> Arc<ApiState> {
     Arc::new(ApiState {
         store: store.clone(),
         web_origin: WEB.into(),
@@ -79,6 +84,7 @@ pub fn state(store: Store) -> Arc<ApiState> {
         )),
         sso_redirect_uri: "http://localhost:8080/v1/auth/sso/callback".into(),
         trust_cf_ip: false,
+        debug_routes,
         catalog: Catalog::new(vec![
             Arc::new(Fake(ToolId::parse("web.read_page").unwrap(), Effect::Read)),
             Arc::new(Fake(

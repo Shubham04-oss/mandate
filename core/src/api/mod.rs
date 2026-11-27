@@ -5,6 +5,7 @@ pub mod agents;
 pub mod approvals;
 pub mod auth;
 pub mod conversations;
+pub mod debug;
 pub mod grants;
 pub mod org;
 pub mod ratelimit;
@@ -42,6 +43,8 @@ pub struct ApiState {
     pub trust_cf_ip: bool,
     /// The served tools: grants name one, and an approval shows its call's effect.
     pub catalog: Catalog,
+    /// `MANDATE_DEBUG_ROUTES=1`: mounts `POST /v1/debug/error` (admins force a reported error).
+    pub debug_routes: bool,
 }
 
 /// A JSON body (an empty one reads as `{}`); a malformed one is `invalid_input`, never serde's
