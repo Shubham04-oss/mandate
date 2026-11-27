@@ -1,5 +1,13 @@
 // Traces, and warn/error logs, to an OpenTelemetry Collector; off unless OTEL_EXPORTER_OTLP_ENDPOINT
 // is set. eve owns the tracer provider; `agent/instrumentation/` hands it these.
+import {
+  type Attributes,
+  type Context,
+  isSpanContextValid,
+  SpanKind,
+  TraceFlags,
+  trace,
+} from "@opentelemetry/api";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { UndiciInstrumentation } from "@opentelemetry/instrumentation-undici";
@@ -27,11 +35,41 @@ export function tracing(env: NodeJS.ProcessEnv) {
     traceChannelRequests: true,
     // Only traceparent crosses the wire: eve's baggage (conversation id) stays in-process.
     propagators: ["tracecontext"],
+    sampler: skipHealthChecks,
     // fetch (the core's MCP server) gets a client span and sends traceparent; model calls already
     // carry eve's, and a second one would make the header invalid.
     instrumentations: [new UndiciInstrumentation({ ignoreRequestHook: hasTraceparent })],
   });
 }
+
+// OpenTelemetry's SamplingDecision, without pulling in sdk-trace-base for two numbers.
+const NOT_RECORD = 0;
+const RECORD_AND_SAMPLED = 2;
+const HEALTH_ROUTE = "/eve/v1/health";
+
+/**
+ * Parent-based always-on, except ECS's health probe (every 10 s): noise, not traffic. The core
+ * skips its `/healthz` the same way.
+ */
+export const skipHealthChecks = {
+  shouldSample(
+    parent: Context,
+    _traceId: string,
+    _name: string,
+    kind: SpanKind,
+    attributes: Attributes = {},
+  ) {
+    if (kind === SpanKind.SERVER && attributes["http.route"] === HEALTH_ROUTE) {
+      return { decision: NOT_RECORD };
+    }
+    const p = trace.getSpanContext(parent);
+    if (p && isSpanContextValid(p) && !(p.traceFlags & TraceFlags.SAMPLED)) {
+      return { decision: NOT_RECORD };
+    }
+    return { decision: RECORD_AND_SAMPLED };
+  },
+  toString: () => "SkipHealthChecks{ParentBased{AlwaysOn}}",
+};
 
 /** Whether an outgoing undici request already carries a `traceparent` (v6+ array, or v5 string). */
 export function hasTraceparent(request: { headers: string | (string | string[])[] }): boolean {

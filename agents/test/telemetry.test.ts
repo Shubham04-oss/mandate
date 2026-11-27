@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { context, trace } from "@opentelemetry/api";
+import { context, ROOT_CONTEXT, SpanKind, TraceFlags, trace } from "@opentelemetry/api";
 import {
   InMemoryLogRecordExporter,
   LoggerProvider,
@@ -13,6 +13,7 @@ import {
   hasTraceparent,
   logExport,
   scrubAttribute,
+  skipHealthChecks,
   tracing,
   type WarningRecord,
   warningRecord,
@@ -27,6 +28,7 @@ interface Declared {
     tracePolicy: (c: { audience: string; environment: string }) => unknown;
     traceChannelRequests: boolean;
     propagators: unknown[];
+    sampler: unknown;
     instrumentations: { disable(): void }[];
   };
 }
@@ -68,11 +70,48 @@ test("with an endpoint, spans carry metadata only and join the core's trace", ()
     }
     assert.equal(options.traceChannelRequests, true);
     assert.deepEqual(options.propagators, ["tracecontext"]);
+    assert.equal(options.sampler, skipHealthChecks);
     assert.equal(options.resource["service.name"], "eve");
     assert.equal(options.instrumentations.length, 1);
   } finally {
     for (const i of options.instrumentations) i.disable();
   }
+});
+
+const TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+function sampled(kind: SpanKind, route: string, parent = ROOT_CONTEXT): boolean {
+  const { decision } = skipHealthChecks.shouldSample(parent, TRACE, "x", kind, {
+    "http.route": route,
+  });
+  return decision === 2;
+}
+
+function withParent(flags: TraceFlags) {
+  return trace.setSpanContext(ROOT_CONTEXT, {
+    traceId: TRACE,
+    spanId: "00f067aa0ba902b7",
+    traceFlags: flags,
+  });
+}
+
+test("the health probe's request span is never recorded; other requests are", () => {
+  assert.equal(sampled(SpanKind.SERVER, "/eve/v1/health"), false);
+  assert.equal(sampled(SpanKind.SERVER, "/eve/v1/session"), true);
+  assert.equal(sampled(SpanKind.SERVER, "/eve/v1/health/x"), true);
+  // Only the inbound request is the probe; an outgoing call to that path is real work.
+  assert.equal(sampled(SpanKind.CLIENT, "/eve/v1/health"), true);
+  assert.equal(
+    skipHealthChecks.shouldSample(ROOT_CONTEXT, TRACE, "x", SpanKind.INTERNAL).decision,
+    2,
+  );
+});
+
+test("otherwise the parent's sampling decision holds", () => {
+  assert.equal(sampled(SpanKind.SERVER, "/mcp", withParent(TraceFlags.SAMPLED)), true);
+  assert.equal(sampled(SpanKind.INTERNAL, "", withParent(TraceFlags.NONE)), false);
+  // The probe stays out even when something upstream sampled it.
+  assert.equal(sampled(SpanKind.SERVER, "/eve/v1/health", withParent(TraceFlags.SAMPLED)), false);
 });
 
 test("OTEL_SERVICE_NAME overrides the service name", () => {
