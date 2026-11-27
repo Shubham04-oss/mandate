@@ -208,6 +208,8 @@ jobs:
       # Marks each file with a chunk id and uploads its map, so a browser error shows the real file
       # and line in PostHog. Before the deploy: the served files must be the marked ones.
       - name: Upload source maps to PostHog
+        # A PostHog or CLI problem only costs readable stacks; the next step still drops the maps.
+        continue-on-error: true
         env:
           # A personal key scoped to error tracking write (+ organization read); unset skips this.
           POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}

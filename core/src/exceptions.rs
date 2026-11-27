@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::dispatcher::WeakDispatch;
 use tracing::field::{Field, Visit};
-use tracing::span::{Id, Record};
+use tracing::span::{Attributes, Id, Record};
 use tracing::{Dispatch, Event, Level, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
@@ -107,6 +107,16 @@ impl Visit for TenantField {
     fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
 }
 
+/// Keeps a span's valid `tenant.id`, set when it was created or recorded later.
+fn keep_tenant<S>(tenant: TenantField, id: &Id, ctx: &Context<'_, S>)
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    if let (Some(tenant), Some(span)) = (tenant.0, ctx.span(id)) {
+        span.extensions_mut().replace(Tenant(tenant));
+    }
+}
+
 /// Reports every ERROR event; see the module docs for what leaves.
 pub struct ExceptionLayer {
     reporter: Reporter,
@@ -140,12 +150,16 @@ where
         let _ = self.dispatch.set(subscriber.downgrade());
     }
 
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        let mut tenant = TenantField::default();
+        attrs.record(&mut tenant);
+        keep_tenant(tenant, id, &ctx);
+    }
+
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
         let mut tenant = TenantField::default();
         values.record(&mut tenant);
-        if let (Some(tenant), Some(span)) = (tenant.0, ctx.span(id)) {
-            span.extensions_mut().replace(Tenant(tenant));
-        }
+        keep_tenant(tenant, id, &ctx);
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
@@ -329,6 +343,17 @@ mod tests {
             assert_eq!(e["properties"]["trace_id"], outer.to_string());
             assert!(!e.to_string().contains("ana@"));
         }
+    }
+
+    #[test]
+    fn a_tenant_set_when_the_span_is_created_counts_too() {
+        let ((), got) = reported(|| {
+            tracing::info_span!("job", tenant.id = "acme").in_scope(|| tracing::error!("x"));
+        });
+        let [e] = got.as_slice() else {
+            panic!("one report, got {got:?}")
+        };
+        assert_eq!(e["properties"]["$groups"]["organization"], "acme");
     }
 
     #[test]

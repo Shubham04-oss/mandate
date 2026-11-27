@@ -2307,7 +2307,8 @@ async fn a_forced_core_error_is_reported_with_its_trace_and_org() {
         .unwrap_or_else(|| panic!("no report from the debug route: {reported:?}"));
     let p = &e["properties"];
     let at = p["$exception_list"][0]["value"].as_str().unwrap();
-    assert!(at.starts_with("src/api/debug.rs:"), "{at}");
+    // Relative to wherever cargo built from: the workspace (core/src/…) or the crate (src/…).
+    assert!(at.contains("src/api/debug.rs:"), "{at}");
     assert_eq!(p["$groups"]["organization"], t.as_str());
     assert_eq!(p["trace_id"].as_str().unwrap().len(), 32);
     assert!(!e.to_string().contains("forced test error"));
