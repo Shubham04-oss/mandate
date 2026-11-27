@@ -12,7 +12,7 @@ export default function VerifyEmail(p: {
     <Layout
       assets={p.assets}
       preview="One code, and your account is ready."
-      scene="moon-dawn"
+      scene="moon-rise-v2"
       to={p.email}
     >
       <Headline>Confirm your email</Headline>

@@ -11,10 +11,16 @@ export const color = {
   nightInk: "#eef0fa",
   nightInk3: "#8f96b8",
   nightLine: "#1a1e42",
+  nebulaSky: "#161228",
   sea: "#34498a",
   ember: "#d98e62",
 } as const;
 
 export const font = `"Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif`;
 
-export type Scene = "moon-night" | "moon-earth" | "moon-terminator" | "moon-dawn" | "moon-rille";
+export type Scene =
+  | "moon-night-nebula-v2"
+  | "moon-rise-v2"
+  | "sky-veil-v2"
+  | "moon-earth-v2"
+  | "moon-dawn-v2";

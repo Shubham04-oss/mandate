@@ -16,7 +16,7 @@ export default function ApprovalRequested(p: {
     <Layout
       assets={p.assets}
       preview={`${p.agent} is waiting for your decision.`}
-      scene="moon-terminator"
+      scene="moon-dawn-v2"
       to={p.email}
     >
       <NeedsYou />

@@ -14,7 +14,7 @@ export default function Invitation(p: {
     <Layout
       assets={p.assets}
       preview={`${p.inviter} invited you to work together on oryxa.`}
-      scene="moon-earth"
+      scene="moon-earth-v2"
       to={p.email}
     >
       <Headline>Join {p.organization} on oryxa</Headline>

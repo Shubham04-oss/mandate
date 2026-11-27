@@ -48,8 +48,30 @@ export function Layout(props: {
             style={{ display: "block", width: "100%", height: "auto", borderRadius: 24 }}
           />
           <Section style={panel}>{props.children}</Section>
-          <Section style={{ padding: "28px 8px 8px" }}>
-            <Text style={footer}>
+          {/* Ends like every oryxa page: a night sea faded into the nebula sky (baked into the JPG). */}
+          <Section style={footerPanel}>
+            <Img
+              src={`${props.assets}/starry-v2.jpg`}
+              width="568"
+              alt=""
+              style={{
+                display: "block",
+                width: "100%",
+                height: "auto",
+                borderRadius: "24px 24px 0 0",
+              }}
+            />
+          </Section>
+          <Section
+            style={{
+              ...footerPanel,
+              marginTop: 0,
+              borderRadius: "0 0 24px 24px",
+              padding: "0 28px 28px",
+            }}
+          >
+            <Wordmark small />
+            <Text style={{ ...footer, marginTop: 14 }}>
               Sent by oryxa to {props.to}. Questions? Write to{" "}
               <Link
                 href={`mailto:${SUPPORT}`}
@@ -67,9 +89,9 @@ export function Layout(props: {
   );
 }
 
-function Wordmark() {
+function Wordmark({ small = false }: { small?: boolean }) {
   return (
-    <Text style={wordmark}>
+    <Text style={small ? { ...wordmark, fontSize: 18, lineHeight: "18px" } : wordmark}>
       oryxa
       <span style={dot} />
     </Text>
@@ -245,6 +267,11 @@ const pill: CSSProperties = {
   lineHeight: "16px",
   fontWeight: 500,
   color: color.ink2,
+};
+const footerPanel: CSSProperties = {
+  marginTop: 12,
+  backgroundColor: color.nebulaSky,
+  borderRadius: "24px 24px 0 0",
 };
 const footer: CSSProperties = {
   margin: 0,

@@ -12,7 +12,7 @@ export default function ResetPassword(p: {
     <Layout
       assets={p.assets}
       preview="Choose a new password for your account."
-      scene="moon-rille"
+      scene="sky-veil-v2"
       to={p.email}
     >
       <Headline>Reset your password</Headline>

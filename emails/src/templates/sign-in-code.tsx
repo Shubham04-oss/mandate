@@ -12,7 +12,7 @@ export default function SignInCode(p: {
     <Layout
       assets={p.assets}
       preview="Enter it on the sign-in page to continue."
-      scene="moon-night"
+      scene="moon-night-nebula-v2"
       to={p.email}
     >
       <Headline>Your sign-in code</Headline>
