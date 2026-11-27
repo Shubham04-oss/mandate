@@ -1,7 +1,11 @@
 import { useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "#/components/ui/button.tsx";
+import { track, waitedMs } from "#/lib/analytics.ts";
 import { ApiError, type Approval, api } from "#/lib/api/index.ts";
+
+// Each approval counts as shown once per page load, however often its card re-renders or remounts.
+const shownApprovals = new Set<string>();
 
 /** An approval's arguments as plain text; the page first, under a name people use. */
 function details(args: Record<string, unknown>): [string, string][] {
@@ -39,12 +43,22 @@ export function Decide({
 	useEffect(() => {
 		if (outcome) said.current?.focus();
 	}, [outcome]);
+	useEffect(() => {
+		if (shownApprovals.has(approval.id)) return;
+		shownApprovals.add(approval.id);
+		track("approval_shown", { can_decide: approval.can_decide });
+	}, [approval.id, approval.can_decide]);
 
 	const decide = async (approve: boolean) => {
 		setBusy(true);
 		setError(null);
 		try {
 			await (approve ? api.approvals.approve : api.approvals.deny)(approval.id);
+			// The core counts the decision itself; this adds how long the request waited.
+			track("approval_answered", {
+				outcome: approve ? "approved" : "denied",
+				wait_ms: waitedMs(approval.requested_at),
+			});
 			setBusy(false);
 			const text = approve ? "You approved it." : "You denied it.";
 			setOutcome(text);

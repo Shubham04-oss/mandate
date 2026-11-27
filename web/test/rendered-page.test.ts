@@ -72,4 +72,11 @@ describe("a server-rendered page", () => {
 			)?.[1];
 		expect(await nonceOf()).not.toBe(await nonceOf());
 	});
+
+	// CI builds without a key; a build with one forwards /ingest to PostHog instead.
+	it.skipIf(process.env.VITE_POSTHOG_KEY)("has no /ingest when the build has no PostHog key", async () => {
+		const res = await fetch(`${origin}/ingest/e/`, { method: "POST", body: "{}" });
+		expect(res.status).toBe(404);
+		expect(res.headers.get("set-cookie")).toBeNull();
+	});
 });

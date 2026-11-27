@@ -1,5 +1,6 @@
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { toast } from "sonner";
+import { lengthBucket, track } from "#/lib/analytics.ts";
 import { ApiError, api } from "#/lib/api/index.ts";
 
 /** Starts a conversation with your agent and opens it; resolves false when it couldn't start. */
@@ -9,6 +10,8 @@ export function useStartConversation() {
 	return async (message: string): Promise<boolean> => {
 		try {
 			const c = await api.conversations.start(message);
+			// The core counts the conversation; this counts the message, as its length only.
+			track("message_sent", { length: lengthBucket(message), first: true });
 			await navigate({
 				to: "/agent/$conversationId",
 				params: { conversationId: c.id },
