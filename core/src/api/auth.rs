@@ -3,7 +3,7 @@
 //! a WorkOS token, and WorkOS's error text never leaves this module.
 use super::session::{self, NewPending, Session};
 use super::{ApiError, ApiState, Input, ratelimit};
-use crate::events;
+use crate::events::{self, SignInMethod};
 use crate::identity::slug;
 use crate::ids::{MemberId, TenantId};
 use crate::store::{self, StoreError, Tx};
@@ -453,7 +453,7 @@ async fn code_verify(
         .auth
         .authenticate_with_magic_auth(b.email.as_str(), &b.code.0, None)
         .await;
-    outcome(&s, r, false).await
+    outcome(&s, r, Via::new(SignInMethod::MagicCode)).await
 }
 
 async fn password(
@@ -465,7 +465,7 @@ async fn password(
         .authenticate_with_password(b.email.as_str(), &b.password.0, None)
         .await;
     let r = guard_password(&s, b.email.as_str(), r).await?;
-    outcome(&s, r, true).await
+    outcome(&s, r, Via::new(SignInMethod::Password)).await
 }
 
 /// Whether WorkOS took the credentials: signed in, or a further step other than proving the email.
@@ -577,16 +577,63 @@ impl SignedIn {
     }
 }
 
+/// How a sign-in began and what its steps did so far; kept with each step it leaves, so the
+/// step that finishes it records them.
+#[derive(Debug, Clone, Copy)]
+struct Via {
+    method: SignInMethod,
+    chose_org: bool,
+    enabled_two_step: bool,
+}
+
+impl Via {
+    fn new(method: SignInMethod) -> Via {
+        Via {
+            method,
+            chose_org: false,
+            enabled_two_step: false,
+        }
+    }
+
+    /// A stored step's. Only password and code sign-ins leave steps (SSO's landing runs none),
+    /// and a step stored before `via` named every method was a code sign-in's.
+    fn of(data: &Value) -> Via {
+        let method = match data["via"].as_str() {
+            Some("password") => SignInMethod::Password,
+            Some("sso") => SignInMethod::Sso,
+            _ => SignInMethod::MagicCode,
+        };
+        Via {
+            method,
+            chose_org: data["chose_org"] == true,
+            enabled_two_step: data["enabled_two_step"] == true,
+        }
+    }
+
+    fn password(self) -> bool {
+        self.method == SignInMethod::Password
+    }
+
+    fn keep(self, data: &mut Value) {
+        data["via"] = json!(self.method.as_str());
+        if self.chose_org {
+            data["chose_org"] = json!(true);
+        }
+        if self.enabled_two_step {
+            data["enabled_two_step"] = json!(true);
+        }
+    }
+}
+
 /// Spec 4.2: signed in, another step, or an error.
-/// `via_password`: the sign-in began with a password (directly or through the step it left).
 async fn outcome(
     s: &ApiState,
     r: Result<Authenticated, AuthError>,
-    via_password: bool,
+    via: Via,
 ) -> Result<Response, ApiError> {
     match r {
-        Ok(a) => finish(s, a, via_password).await?.into_json(),
-        Err(AuthError::Step(step)) => next(s, step, via_password).await,
+        Ok(a) => finish(s, a, via).await?.into_json(),
+        Err(AuthError::Step(step)) => next(s, step, via).await,
         Err(e) => Err(e.into()),
     }
 }
@@ -646,16 +693,11 @@ async fn drop_pending(s: &ApiState, id: &str) -> Result<(), ApiError> {
 
 /// The outcome of finishing a step: a wrong code may be retried on the same step (the rate
 /// limit caps guesses); anything else uses the step up.
-/// Whether a stored step was left by a password sign-in.
-fn via_password(data: &Value) -> bool {
-    data["via"] == "password"
-}
-
 async fn settle(
     s: &ApiState,
     pending: &str,
     r: Result<Authenticated, AuthError>,
-    via_password: bool,
+    via: Via,
 ) -> Result<Response, ApiError> {
     if !matches!(
         r,
@@ -663,7 +705,7 @@ async fn settle(
     ) {
         drop_pending(s, pending).await?;
     }
-    outcome(s, r, via_password).await
+    outcome(s, r, via).await
 }
 
 /// WorkOS's own password rules apply too; this floor is checked first, for every email alike.
@@ -763,10 +805,10 @@ async fn verify_email(
             .auth
             .authenticate_with_email_verification(&token, &b.code.0)
             .await;
-        let via = via_password(&p.data);
+        let via = Via::of(&p.data);
         // A password sign-in's step: the password and the emailed code together are as good as
         // sign-up's own verify step. Any other step confirms nothing.
-        if via && accepted(&r) {
+        if via.password() && accepted(&r) {
             forget_sign_up_password(&s, None, email, false).await?;
         }
         return settle(&s, &b.pending.0, r, via).await;
@@ -807,7 +849,16 @@ async fn create_org(s: &ApiState, user: AuthUser, org_name: &str) -> Result<Sign
         },
     )
     .await?;
-    sign_in(tx, &tenant, &member, true, &profile).await
+    let via = Via::new(SignInMethod::Password);
+    events::publish(
+        &mut tx,
+        events::Event::MemberSignedUp {
+            member: member.clone(),
+            method: via.method,
+        },
+    )
+    .await?;
+    sign_in(tx, &tenant, &member, true, &profile, via).await
 }
 
 /// Always 202 for a step that exists; WorkOS sends the code again.
@@ -846,7 +897,7 @@ async fn mfa_verify(
     Input(b): Input<PendingCode>,
 ) -> Result<Response, ApiError> {
     let p = find_pending(&s, &b.pending.0, &["mfa"]).await?;
-    let via = via_password(&p.data);
+    let via = Via::of(&p.data);
     let (Some(token), Some(challenge), Some(factor)) = (
         p.workos_token,
         p.data["challenge"].as_str(),
@@ -887,8 +938,8 @@ async fn mfa_setup(
                 .ok_or_else(pending_expired)?
                 .to_owned();
             let tx = s.store.begin_untenanted().await?;
-            let via = via_password(&p.data);
-            (tx, user, p.workos_token, None, None, via)
+            let via = Via::of(&p.data);
+            (tx, user, p.workos_token, None, None, Some(via))
         }
         None => {
             let me = session::current(&s, &headers).await?;
@@ -900,17 +951,21 @@ async fn mfa_setup(
             .fetch_one(&mut *tx)
             .await?;
             let user = user.ok_or_else(ApiError::signed_out)?;
-            (tx, user, None, Some(me.member), Some(me.tenant), false)
+            (tx, user, None, Some(me.member), Some(me.tenant), None)
         }
     };
     let e = s.auth.enroll_auth_factor(&user).await?;
+    let mut data = json!({ "challenge": e.challenge, "member": member, "user": user });
+    if let Some(via) = via {
+        via.keep(&mut data);
+    }
     let challenge = session::create_pending(
         &mut tx,
         NewPending {
             kind: "mfa_enable",
             workos_token: token.as_deref(),
             email: None,
-            data: json!({ "challenge": e.challenge, "member": member, "user": user, "via": via.then_some("password") }),
+            data,
             tenant: tenant.as_ref(),
         },
         now,
@@ -945,7 +1000,11 @@ async fn mfa_enable(
             .auth
             .authenticate_with_totp(&token, challenge, &b.code.0)
             .await;
-        let via = via_password(&p.data);
+        // Recorded as a setting change once the sign-in it belongs to has a member.
+        let via = Via {
+            enabled_two_step: matches!(r, Ok(_) | Err(AuthError::Step(_))),
+            ..Via::of(&p.data)
+        };
         return settle(&s, &b.challenge.0, r, via).await;
     }
     let me = session::current(&s, &headers).await?;
@@ -977,6 +1036,14 @@ async fn mfa_enable(
     .bind(me.member.as_str())
     .execute(&mut *tx)
     .await?;
+    events::publish(
+        &mut tx,
+        events::Event::SettingChanged {
+            by: me.member.clone(),
+            setting: events::Setting::TwoStep,
+        },
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1007,7 +1074,11 @@ async fn choose_org(
         .auth
         .authenticate_with_organization_selection(&token, &org)
         .await;
-    settle(&s, &b.pending.0, r, via_password(&p.data)).await
+    let via = Via {
+        chose_org: true,
+        ..Via::of(&p.data)
+    };
+    settle(&s, &b.pending.0, r, via).await
 }
 
 async fn sso_start(
@@ -1078,7 +1149,7 @@ async fn sso_finish(s: &ApiState, headers: &HeaderMap, query: &str) -> Result<Si
         .await
         .map_err(|_| ApiError::forbidden())?;
     match s.auth.authenticate_with_code(&code).await {
-        Ok(a) => finish(s, a, false).await,
+        Ok(a) => finish(s, a, Via::new(SignInMethod::Sso)).await,
         Err(AuthError::Step(step)) => Err(step_error(&step)),
         Err(e) => Err(e.into()),
     }
@@ -1229,7 +1300,10 @@ async fn invite_accept(
     let inv = pending_invitation(&s, &token).await?;
     // The layer counted the token; another invitation for the same email must not mean new guesses.
     ratelimit::charge(&s, &ratelimit::email_key(&inv.email)).await?;
-    let via = b.password.is_some();
+    let via = Via::new(match b.password {
+        Some(_) => SignInMethod::Password,
+        None => SignInMethod::MagicCode,
+    });
     let r = match (b.password, b.name, b.code) {
         (Some(password), Some(name), None) => {
             match s.auth.create_user(&inv.email, &password.0, &name.0).await {
@@ -1360,7 +1434,7 @@ async fn sso_redirect(
 }
 
 /// Stores the step (with WorkOS's token) and tells the browser what comes next.
-async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, ApiError> {
+async fn next(s: &ApiState, step: Step, via: Via) -> Result<Response, ApiError> {
     let mut body = json!({ "status": "next" });
     let (next, kind, token, email, data) = match step {
         Step::Mfa { token, factor } => {
@@ -1415,10 +1489,8 @@ async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, 
         }
     };
     let mut data = data;
-    // Kept with the step, so whatever finishes it knows a password started this sign-in.
-    if via_password {
-        data["via"] = json!("password");
-    }
+    // Kept with the step, so whatever finishes it knows whether a password started this sign-in.
+    via.keep(&mut data);
     let pending = store_pending(s, kind, Some(&token), email.as_deref(), data).await?;
     body["next"] = json!(next);
     body["pending"] = json!(pending);
@@ -1426,14 +1498,14 @@ async fn next(s: &ApiState, step: Step, via_password: bool) -> Result<Response, 
 }
 
 /// WorkOS proved the person: map the org to its tenant, the user to a member, and sign in.
-async fn finish(s: &ApiState, a: Authenticated, via_password: bool) -> Result<SignedIn, ApiError> {
+async fn finish(s: &ApiState, a: Authenticated, via: Via) -> Result<SignedIn, ApiError> {
     // First, whatever happens next: this sign-in may have just verified the email in WorkOS.
     if let Some((row_user, neutralised)) = sign_up_row(s, Some(&a.user.id), &a.user.email).await? {
         if !neutralised && row_user.as_deref() == Some(a.user.id.as_str()) {
             neutralise(s, &a.user.id).await?;
         }
         // A password never signs in while our sign-up's password is unconfirmed.
-        if via_password {
+        if via.password() {
             return Err(AuthError::InvalidCredentials.into());
         }
     }
@@ -1448,8 +1520,8 @@ async fn finish(s: &ApiState, a: Authenticated, via_password: bool) -> Result<Si
     let tenant = tenant_for(s, &org).await?;
     let profile = profile(&a.user, &current.org_name, &memberships, mfa);
     let mut tx = s.store.begin(&tenant).await?;
-    let member = member_for(&mut tx, &a.user).await?;
-    sign_in(tx, &tenant, &member, is_admin, &profile).await
+    let member = member_for(&mut tx, &a.user, via.method).await?;
+    sign_in(tx, &tenant, &member, is_admin, &profile, via).await
 }
 
 /// The org's tenant, created on its first sign-in (orgs without directory sync still work).
@@ -1479,8 +1551,12 @@ fn profile(user: &AuthUser, org_name: &str, memberships: &[Membership], mfa: boo
 }
 
 /// The member this WorkOS user is in the transaction's tenant: already linked, else the one
-/// directory member with their verified email, else a new member (first sign-in).
-async fn member_for(tx: &mut Tx, user: &AuthUser) -> Result<MemberId, ApiError> {
+/// directory member with their verified email, else a new member (first sign-in: a sign-up).
+async fn member_for(
+    tx: &mut Tx,
+    user: &AuthUser,
+    method: SignInMethod,
+) -> Result<MemberId, ApiError> {
     if let Some(m) = store::member_for_workos_user(tx, &user.id).await? {
         return Ok(m);
     }
@@ -1495,6 +1571,14 @@ async fn member_for(tx: &mut Tx, user: &AuthUser) -> Result<MemberId, ApiError> 
             events::Event::MemberCreated {
                 member: id.clone(),
                 actor: events::Actor::System,
+            },
+        )
+        .await?;
+        events::publish(
+            tx,
+            events::Event::MemberSignedUp {
+                member: id.clone(),
+                method,
             },
         )
         .await?;
@@ -1528,6 +1612,7 @@ async fn sign_in(
     member: &MemberId,
     is_admin: bool,
     profile: &Value,
+    via: Via,
 ) -> Result<SignedIn, ApiError> {
     store::ensure_personal_agent(&mut tx, member).await?;
     sqlx::query(
@@ -1539,6 +1624,25 @@ async fn sign_in(
     .await?;
     let token =
         session::create(&mut tx, tenant, member, profile, OffsetDateTime::now_utc()).await?;
+    // The sign-in's first tenant-scoped transaction, so its earlier steps are recorded here.
+    if via.chose_org {
+        let e = events::Event::OrganizationChosen {
+            member: member.clone(),
+        };
+        events::publish(&mut tx, e).await?;
+    }
+    if via.enabled_two_step {
+        let e = events::Event::SettingChanged {
+            by: member.clone(),
+            setting: events::Setting::TwoStep,
+        };
+        events::publish(&mut tx, e).await?;
+    }
+    let e = events::Event::MemberSignedIn {
+        member: member.clone(),
+        method: via.method,
+    };
+    events::publish(&mut tx, e).await?;
     let me = me(&mut tx, tenant, member, is_admin, profile).await?;
     tx.commit().await?;
     Ok(SignedIn { token, me })

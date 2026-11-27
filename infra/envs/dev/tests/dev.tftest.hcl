@@ -620,7 +620,8 @@ run "each_consumer_has_a_fifo_queue_with_a_dead_letter_queue" {
     condition = toset(jsondecode(awscc_eventsv2_subscriber.consumer["posthog"].filter_configuration.filters[0].pattern)["aws:DetailType"]) == toset([
       "approval.requested.v1", "approval.decided.v1", "conversation.started.v1", "conversation.finished.v1",
       "grant.created.v1", "grant.revoked.v1", "member.created.v1", "member.updated.v1", "member.removed.v1",
-      "organization.created.v1",
+      "organization.created.v1", "member.signed_up.v1", "member.signed_in.v1", "organization.chosen.v1",
+      "setting.changed.v1",
     ]) && awscc_eventsv2_subscriber.consumer["posthog"].filter_configuration.filters[0].scope == "SYSTEM_METADATA"
     error_message = "posthog receives every core event type, matched on the trusted detail type"
   }

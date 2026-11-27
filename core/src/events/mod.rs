@@ -119,6 +119,33 @@ pub enum Decision {
     Denied,
 }
 
+/// How a person proved who they are; a later step (an emailed code, two-step) doesn't change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInMethod {
+    Password,
+    MagicCode,
+    Sso,
+}
+
+impl SignInMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SignInMethod::Password => "password",
+            SignInMethod::MagicCode => "magic_code",
+            SignInMethod::Sso => "sso",
+        }
+    }
+}
+
+/// Which setting changed; never its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Setting {
+    /// The member turned two-step (TOTP) on.
+    TwoStep,
+}
+
 /// Who caused a lifecycle change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", content = "id", rename_all = "lowercase")]
@@ -173,6 +200,32 @@ pub enum Event {
     },
     #[serde(rename = "organization.created.v1")]
     OrganizationCreated { actor: Actor },
+    /// A person joined by their own sign-up or first sign-in, not through the directory.
+    #[serde(rename = "member.signed_up.v1")]
+    MemberSignedUp {
+        #[schemars(with = "String")]
+        member: MemberId,
+        method: SignInMethod,
+    },
+    /// A session was created.
+    #[serde(rename = "member.signed_in.v1")]
+    MemberSignedIn {
+        #[schemars(with = "String")]
+        member: MemberId,
+        method: SignInMethod,
+    },
+    /// The member picked this organization (the envelope's tenant) from several.
+    #[serde(rename = "organization.chosen.v1")]
+    OrganizationChosen {
+        #[schemars(with = "String")]
+        member: MemberId,
+    },
+    #[serde(rename = "setting.changed.v1")]
+    SettingChanged {
+        #[schemars(with = "String")]
+        by: MemberId,
+        setting: Setting,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,6 +245,10 @@ impl Event {
             Event::MemberUpdated { .. } => "member.updated.v1",
             Event::MemberRemoved { .. } => "member.removed.v1",
             Event::OrganizationCreated { .. } => "organization.created.v1",
+            Event::MemberSignedUp { .. } => "member.signed_up.v1",
+            Event::MemberSignedIn { .. } => "member.signed_in.v1",
+            Event::OrganizationChosen { .. } => "organization.chosen.v1",
+            Event::SettingChanged { .. } => "setting.changed.v1",
         }
     }
 
@@ -317,7 +374,20 @@ pub(crate) fn samples() -> Vec<Event> {
             actor: Actor::System,
         },
         Event::OrganizationCreated {
-            actor: Actor::Member(m),
+            actor: Actor::Member(m.clone()),
+        },
+        Event::MemberSignedUp {
+            member: m.clone(),
+            method: SignInMethod::Password,
+        },
+        Event::MemberSignedIn {
+            member: m.clone(),
+            method: SignInMethod::MagicCode,
+        },
+        Event::OrganizationChosen { member: m.clone() },
+        Event::SettingChanged {
+            by: m,
+            setting: Setting::TwoStep,
         },
     ]
 }
@@ -330,7 +400,7 @@ mod tests {
     #[test]
     fn type_names_are_versioned() {
         let all = samples();
-        assert_eq!(all.len(), 10, "add every new variant to samples()");
+        assert_eq!(all.len(), 14, "add every new variant to samples()");
         for e in &all {
             let t = e.event_type();
             assert!(EventType::parse(t).is_ok(), "{t}");
@@ -379,6 +449,8 @@ mod tests {
             "actor",
             "kind",
             "id",
+            "method",
+            "setting",
         ];
         fn walk(v: &Value) {
             match v {

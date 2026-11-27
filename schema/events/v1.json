@@ -306,6 +306,117 @@
         "type",
         "data"
       ]
+    },
+    {
+      "description": "A person joined by their own sign-up or first sign-in, not through the directory.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "member.signed_up.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "method": {
+              "$ref": "#/$defs/SignInMethod"
+            }
+          },
+          "required": [
+            "member",
+            "method"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "A session was created.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "member.signed_in.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "method": {
+              "$ref": "#/$defs/SignInMethod"
+            }
+          },
+          "required": [
+            "member",
+            "method"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "The member picked this organization (the envelope's tenant) from several.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "organization.chosen.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "member"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "setting.changed.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string"
+            },
+            "setting": {
+              "$ref": "#/$defs/Setting"
+            }
+          },
+          "required": [
+            "by",
+            "setting"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
     }
   ],
   "$defs": {
@@ -358,6 +469,25 @@
           "required": [
             "kind"
           ]
+        }
+      ]
+    },
+    "SignInMethod": {
+      "description": "How a person proved who they are; a later step (an emailed code, two-step) doesn't change it.",
+      "type": "string",
+      "enum": [
+        "password",
+        "magic_code",
+        "sso"
+      ]
+    },
+    "Setting": {
+      "description": "Which setting changed; never its value.",
+      "oneOf": [
+        {
+          "description": "The member turned two-step (TOTP) on.",
+          "type": "string",
+          "const": "two_step"
         }
       ]
     }

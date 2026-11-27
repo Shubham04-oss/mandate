@@ -835,6 +835,7 @@ impl AuthProvider for Fake {
         org: &str,
     ) -> Result<Authenticated, AuthError> {
         self.call(format!("select-org {org}"));
+        self.forced()?;
         let u = self.user_of(token)?;
         if !u.memberships.iter().any(|m| m.active && m.org == org) {
             return Err(AuthError::NotFound);
@@ -1787,6 +1788,296 @@ async fn first_sign_in_records_member_created() {
     assert_eq!(lifecycle(&h.store, &tenant).await, created);
 }
 
+/// `(type, data)` of the tenant's sign-up, sign-in, org-choice and setting events, in publish order.
+async fn auth_events(store: &Store, t: &TenantId) -> Vec<(String, Value)> {
+    let mut tx = store.begin(t).await.unwrap();
+    let rows: Vec<(String, sqlx::types::Json<Value>)> = sqlx::query_as(
+        "select type, data from outbox where type in \
+         ('member.signed_up.v1', 'member.signed_in.v1', 'organization.chosen.v1', 'setting.changed.v1') \
+         order by seq",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    rows.into_iter().map(|(t, d)| (t, d.0)).collect()
+}
+
+fn signed_up(member: &str, method: &str) -> (String, Value) {
+    let data = json!({ "member": member, "method": method });
+    ("member.signed_up.v1".into(), data)
+}
+
+fn signed_in_as(member: &str, method: &str) -> (String, Value) {
+    let data = json!({ "member": member, "method": method });
+    ("member.signed_in.v1".into(), data)
+}
+
+#[tokio::test]
+#[ignore]
+async fn sign_up_records_signed_up_then_signed_in() {
+    let h = Harness::new().await;
+    let email = format!("new-{}@acme.test", Uuid::new_v4().simple());
+    let v = body_json(h.post("/v1/auth/sign-up", sign_up_body(&email)).await).await;
+    // Nothing is recorded before the email is verified: there is no tenant yet.
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": v["pending"], "code": GOOD_CODE }),
+        )
+        .await;
+    let me = body_json(r).await["me"].clone();
+    let member = me["person"]["id"].as_str().unwrap();
+    let tenant = TenantId::parse(me["org"]["id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        auth_events(&h.store, &tenant).await,
+        vec![
+            signed_up(member, "password"),
+            signed_in_as(member, "password")
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn first_sign_in_signs_up_once_and_every_sign_in_is_recorded() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let tenant = tenant_of(&u.memberships[0].org);
+    let member = signed_in_member(&h, &u).await;
+    let first = vec![
+        signed_up(&member, "password"),
+        signed_in_as(&member, "password"),
+    ];
+    assert_eq!(auth_events(&h.store, &tenant).await, first);
+    // A wrong password records nothing; the second sign-in is a sign-in only.
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": u.email, "password": "wrong horse" }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(auth_events(&h.store, &tenant).await, first);
+    signed_in_member(&h, &u).await;
+    let mut again = first;
+    again.push(signed_in_as(&member, "password"));
+    assert_eq!(auth_events(&h.store, &tenant).await, again);
+}
+
+/// Signs `u` in by password and returns their member id.
+async fn signed_in_member(h: &Harness, u: &FakeUser) -> String {
+    let r = h
+        .post(
+            "/v1/auth/password",
+            json!({ "email": u.email, "password": u.password }),
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    body_json(r).await["me"]["person"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_directory_member_signing_in_does_not_sign_up() {
+    let h = Harness::new().await;
+    let u = h.user("member");
+    let org = &u.memberships[0].org;
+    let tenant = h
+        .store
+        .ensure_tenant(org, &tenant_of(org))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut tx = h.store.begin(&tenant).await.unwrap();
+    sqlx::query(
+        "insert into members (tenant_id, id, email) values (current_setting('mandate.tenant'), 'dir-ann', $1)",
+    )
+    .bind(&u.email)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(signed_in_member(&h, &u).await, "dir-ann");
+    assert_eq!(
+        auth_events(&h.store, &tenant).await,
+        vec![signed_in_as("dir-ann", "password")]
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn sign_in_records_how_the_person_proved_who_they_are() {
+    let h = Harness::new().await;
+    // A magic code.
+    let u = h.user("member");
+    let r = h
+        .post(
+            "/v1/auth/code/verify",
+            json!({ "email": u.email, "code": GOOD_CODE }),
+        )
+        .await;
+    let member = body_json(r).await["me"]["person"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        auth_events(&h.store, &tenant_of(&u.memberships[0].org)).await,
+        vec![
+            signed_up(&member, "magic_code"),
+            signed_in_as(&member, "magic_code")
+        ]
+    );
+    // SSO.
+    let u = h.user("member");
+    let state = sso_state(&h, &u, "code_sso").await;
+    let r = h
+        .app
+        .clone()
+        .oneshot(callback(
+            &format!("code=code_sso&state={state}"),
+            Some(&state),
+        ))
+        .await
+        .unwrap();
+    assert!(session_cookie(&r).is_some());
+    let tenant = tenant_of(&u.memberships[0].org);
+    let methods: Vec<Value> = auth_events(&h.store, &tenant)
+        .await
+        .into_iter()
+        .map(|(_, d)| d["method"].clone())
+        .collect();
+    assert_eq!(methods, [json!("sso"), json!("sso")]);
+    // A password started it, and a step (the emailed code) finished it: still a password sign-in.
+    let u = h.user("member");
+    h.fake.update(&u.id, |u| u.verified = false);
+    let pending = pending_for(&h, &u, "verify_email").await;
+    let r = h
+        .post(
+            "/v1/auth/verify-email",
+            json!({ "pending": pending, "code": GOOD_CODE }),
+        )
+        .await;
+    assert_eq!(body_json(r).await["status"], "signed_in");
+    let methods: Vec<Value> = auth_events(&h.store, &tenant_of(&u.memberships[0].org))
+        .await
+        .into_iter()
+        .map(|(_, d)| d["method"].clone())
+        .collect();
+    assert_eq!(methods, [json!("password"), json!("password")]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn choosing_an_org_is_recorded_in_that_org_even_after_another_step() {
+    let h = Harness::new().await;
+    let two_orgs = |h: &Harness| {
+        let u = h.user("member");
+        let beta = OrgRef {
+            id: format!("org_{}", Uuid::new_v4().simple()),
+            name: "Beta".into(),
+        };
+        h.fake.orgs.lock().unwrap().push(beta.clone());
+        h.fake.update(&u.id, |u| {
+            u.memberships.push(Membership {
+                org: beta.id.clone(),
+                org_name: "Beta".into(),
+                role: "member".into(),
+                active: true,
+            })
+        });
+        (u, tenant_of(&beta.id))
+    };
+    // A magic code, then the org: signed in at once.
+    let (u, beta) = two_orgs(&h);
+    let v = body_json(
+        h.post(
+            "/v1/auth/code/verify",
+            json!({ "email": u.email, "code": GOOD_CODE }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(v["next"], "choose_org", "{v}");
+    let r = h
+        .post(
+            "/v1/auth/choose-org",
+            json!({ "pending": v["pending"], "org": beta }),
+        )
+        .await;
+    let member = body_json(r).await["me"]["person"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let chosen = (
+        "organization.chosen.v1".to_owned(),
+        json!({ "member": member }),
+    );
+    assert_eq!(
+        auth_events(&h.store, &beta).await,
+        vec![
+            signed_up(&member, "magic_code"),
+            chosen,
+            signed_in_as(&member, "magic_code")
+        ]
+    );
+    // The org the person didn't pick has no tenant and nothing recorded.
+    assert!(
+        h.store
+            .tenant_for_org(&u.memberships[0].org)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // A password, the org, then two-step: the choice is carried to the step that signs in.
+    let (u, beta) = two_orgs(&h);
+    let pending = pending_for(&h, &u, "choose_org").await;
+    h.fake.force(AuthError::Step(Step::Mfa {
+        token: Secret(format!("pat_{}", u.id)),
+        factor: format!("factor_{}", u.id),
+    }));
+    let v = body_json(
+        h.post(
+            "/v1/auth/choose-org",
+            json!({ "pending": pending, "org": beta }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(v["next"], "mfa", "{v}");
+    assert!(auth_events(&h.store, &beta).await.is_empty());
+    // WorkOS's token now carries the chosen org.
+    let first = u.memberships[0].org.clone();
+    h.fake.update(&u.id, |u| {
+        u.memberships.retain(|m| m.org != first);
+    });
+    let r = h
+        .post(
+            "/v1/auth/mfa/verify",
+            json!({ "pending": v["pending"], "code": GOOD_CODE }),
+        )
+        .await;
+    let member = body_json(r).await["me"]["person"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let chosen = (
+        "organization.chosen.v1".to_owned(),
+        json!({ "member": member }),
+    );
+    assert_eq!(
+        auth_events(&h.store, &beta).await,
+        vec![
+            signed_up(&member, "password"),
+            chosen,
+            signed_in_as(&member, "password")
+        ]
+    );
+}
+
 /// Signs `u` in by password and returns the session cookie.
 async fn signed_in(h: &Harness, u: &FakeUser) -> String {
     let r = h
@@ -1946,7 +2237,22 @@ async fn mfa_enable_with_valid_code_signs_in() {
         .await;
     assert_eq!(r.status(), StatusCode::OK);
     assert!(session_cookie(&r).is_some());
-    assert_eq!(body_json(r).await["me"]["mfa_enabled"], true);
+    let me = body_json(r).await["me"].clone();
+    assert_eq!(me["mfa_enabled"], true);
+    // Two-step turned on during sign-in is recorded once the sign-in has a member.
+    let member = me["person"]["id"].as_str().unwrap();
+    let two_step = |m: &str| {
+        let data = json!({ "by": m, "setting": "two_step" });
+        ("setting.changed.v1".to_owned(), data)
+    };
+    assert_eq!(
+        auth_events(&h.store, &tenant_of(&u.memberships[0].org)).await,
+        vec![
+            signed_up(member, "password"),
+            two_step(member),
+            signed_in_as(member, "password")
+        ]
+    );
 
     // Signed in: 204, and `me` now says two-step is on.
     let other = h.user("member");
@@ -1993,6 +2299,17 @@ async fn mfa_enable_with_valid_code_signs_in() {
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
     assert!(h.fake.has_totp(&other.id).await.unwrap());
     let tenant = tenant_of(&other.memberships[0].org);
+    // Once, by the member: the wrong code before it recorded nothing.
+    let events = auth_events(&h.store, &tenant).await;
+    let member = events[0].1["member"].as_str().unwrap();
+    assert_eq!(events.last(), Some(&two_step(member)));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.0 == "setting.changed.v1")
+            .count(),
+        1
+    );
     let mut tx = h.store.begin(&tenant).await.unwrap();
     let profile = session::profile(&mut tx, &cookie).await.unwrap().unwrap();
     assert_eq!(profile["mfa_enabled"], true);

@@ -1,7 +1,7 @@
 //! Sends the core's product events to PostHog (EU), so usage is counted where it happens rather
 //! than in the browser. Ids and enums only: every property below is built field by field, never
 //! by copying `data`, so a new field can't reach PostHog without being added here.
-use super::{Actor, Decision, Envelope, Event, Handler, HandlerError, Source};
+use super::{Actor, Decision, Envelope, Event, Handler, HandlerError, Setting, Source};
 use crate::store::Tx;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
@@ -101,6 +101,22 @@ fn capture(env: &Envelope, event: &Event) -> Value {
         }
         Event::OrganizationCreated { actor } => {
             ("organization_created", actor_member(actor, &mut props))
+        }
+        Event::MemberSignedUp { member, method } | Event::MemberSignedIn { member, method } => {
+            props.insert("method".into(), method.as_str().into());
+            let name = match event {
+                Event::MemberSignedUp { .. } => "signed_up",
+                _ => "signed_in",
+            };
+            (name, Some(member.as_str()))
+        }
+        Event::OrganizationChosen { member } => ("org_chosen", Some(member.as_str())),
+        Event::SettingChanged { by, setting } => {
+            let setting = match setting {
+                Setting::TwoStep => "two_step",
+            };
+            props.insert("setting".into(), setting.into());
+            ("settings_changed", Some(by.as_str()))
         }
     };
     props.insert(
@@ -234,6 +250,50 @@ mod tests {
         assert_eq!(c["distinct_id"], "organization:acme");
         assert_eq!(c["properties"]["$process_person_profile"], false);
         assert_eq!(c["properties"]["actor_kind"], "directory");
+    }
+
+    #[test]
+    fn auth_and_settings_events_are_the_members_own() {
+        use crate::events::SignInMethod;
+        let m = crate::ids::MemberId::parse("m1").unwrap();
+        let cases = [
+            (
+                Event::MemberSignedUp {
+                    member: m.clone(),
+                    method: SignInMethod::Sso,
+                },
+                "signed_up",
+                ("method", Some("sso")),
+            ),
+            (
+                Event::MemberSignedIn {
+                    member: m.clone(),
+                    method: SignInMethod::MagicCode,
+                },
+                "signed_in",
+                ("method", Some("magic_code")),
+            ),
+            (
+                Event::OrganizationChosen { member: m.clone() },
+                "org_chosen",
+                ("method", None),
+            ),
+            (
+                Event::SettingChanged {
+                    by: m.clone(),
+                    setting: Setting::TwoStep,
+                },
+                "settings_changed",
+                ("setting", Some("two_step")),
+            ),
+        ];
+        for (event, name, (prop, value)) in cases {
+            let c = capture(&env(&event), &event);
+            assert_eq!(c["event"], name);
+            assert_eq!(c["distinct_id"], "m1", "{name}");
+            assert!(c["properties"].get("$process_person_profile").is_none());
+            assert_eq!(c["properties"].get(prop).and_then(Value::as_str), value);
+        }
     }
 
     /// A fake PostHog answering `status`; returns its `/batch/` URL and the bodies it got.
