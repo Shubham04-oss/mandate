@@ -67,6 +67,8 @@ test("a streamed turn goes to the gateway's chat completions with only the gatew
   assert.equal(req.url, `${URL}/chat/completions`);
   assert.equal(req.headers.get("cf-aig-authorization"), "Bearer cf-token");
   assert.equal(req.headers.get("authorization"), null);
+  // Prompts and replies are never stored in the gateway's logs.
+  assert.equal(req.headers.get("cf-aig-collect-log-payload"), "false");
   assert.equal(req.body.model, "dynamic/route");
   assert.equal(req.body.stream, true);
   assert.deepEqual(req.body.stream_options, { include_usage: true });
