@@ -1,6 +1,6 @@
 // Checks the built emails in dist/ (npm test builds them first).
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const manifest: Record<string, { subject: string; placeholders: string[] }> = JSON.parse(
@@ -41,4 +41,19 @@ test("a one-time code is selectable in one tap", () => {
   for (const name of ["sign-in-code", "verify-email"]) {
     assert.match(read(`${name}.html`), /user-select:all[^>]*>\{\{code\}\}/);
   }
+});
+
+test("every picture an email uses is in the web app, which serves it", () => {
+  for (const name of Object.keys(manifest)) {
+    for (const file of [`${name}.html`, `${name}.light.html`]) {
+      const pictures = read(file).match(/\/email\/[\w-]+\.jpg/g) ?? [];
+      assert.ok(pictures.length > 0, `${file} uses no picture`);
+      for (const p of pictures)
+        assert.ok(existsSync(`../web/public${p}`), `${p} is not in web/public`);
+    }
+  }
+});
+
+test("the approval email never says what the agent wants to do", () => {
+  assert.ok(!manifest["approval-requested"].placeholders.includes("tool"));
 });

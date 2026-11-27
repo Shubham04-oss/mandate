@@ -53,7 +53,6 @@ const templates: Record<string, Template> = {
       email: "raya@acme.com",
       requester: "Priya Shah",
       agent: "Raya's agent",
-      tool: "Read a page on acme.atlassian.net",
       organization: "Acme",
       url: "https://app.oryxa.in/approvals",
       expiresIn: "1 hour",
@@ -85,7 +84,10 @@ async function plainText(el: React.ReactElement) {
 }
 
 const preview = process.argv.includes("--preview");
-const assets = preview ? "assets" : (process.env.EMAIL_ASSETS ?? "https://app.oryxa.in/email");
+// The pictures live in the web app (web/public/email), which serves them at app.oryxa.in/email.
+const assets = preview
+  ? "../../web/public/email"
+  : (process.env.EMAIL_ASSETS ?? "https://app.oryxa.in/email");
 const out = preview ? "preview" : "dist";
 await mkdir(out, { recursive: true });
 

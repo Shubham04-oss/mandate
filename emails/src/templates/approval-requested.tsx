@@ -7,7 +7,6 @@ export default function ApprovalRequested(p: {
   email: string;
   requester: string;
   agent: string;
-  tool: string;
   organization: string;
   url: string;
   expiresIn: string;
@@ -26,7 +25,10 @@ export default function ApprovalRequested(p: {
           Needs you
         </>
       }
-      feature={<GlassNote label={`${p.agent} wants to`} value={p.tool} expiresIn={p.expiresIn} />}
+      // Generic on purpose: what the agent wants to do shows only after sign-in (lock screens, previews).
+      feature={
+        <GlassNote label={`${p.agent} wants to`} value="Take an action" expiresIn={p.expiresIn} />
+      }
       caption={{
         title: "Why you're getting this",
         body: `You approve requests for ${p.agent} in ${p.organization}.`,
