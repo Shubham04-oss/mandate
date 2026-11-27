@@ -814,6 +814,14 @@ run "alarms_cover_every_dlq_and_service_with_no_default_subscriber" {
     error_message = "a service that reports nothing is down"
   }
   assert {
+    condition     = keys(aws_cloudwatch_metric_alarm.consumer_stuck) == ["agent-resume"]
+    error_message = "every consumer queue that is read has a stuck alarm; the unread posthog queue has none while telemetry is off"
+  }
+  assert {
+    condition     = alltrue([for a in aws_cloudwatch_metric_alarm.consumer_stuck : a.metric_name == "ApproximateAgeOfOldestMessage" && a.threshold == 900])
+    error_message = "a stuck consumer is one whose oldest message is over 15 minutes old"
+  }
+  assert {
     condition     = length(aws_sns_topic_subscription.alarm_email) == 0
     error_message = "no subscription is created unless alarm_email is set"
   }
@@ -887,6 +895,11 @@ run "the_collector_is_the_only_way_out_for_telemetry" {
   command = apply
   variables {
     telemetry_enabled = true
+  }
+
+  assert {
+    condition     = keys(aws_cloudwatch_metric_alarm.consumer_stuck) == ["agent-resume", "posthog"]
+    error_message = "with telemetry on, the posthog queue is read, so it gets a stuck alarm too"
   }
 
   assert {

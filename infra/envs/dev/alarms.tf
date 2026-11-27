@@ -31,6 +31,26 @@ resource "aws_cloudwatch_metric_alarm" "dlq" {
   ok_actions         = [aws_sns_topic.alarms.arn]
 }
 
+# A consumer that stopped reading: its oldest message is older than any retry would leave it. Only
+# the posthog queue may go unread on purpose (its consumer runs once telemetry is on).
+resource "aws_cloudwatch_metric_alarm" "consumer_stuck" {
+  for_each            = { for k, q in aws_sqs_queue.consumer : k => q if k != "posthog" || var.telemetry_enabled }
+  alarm_name          = "${local.name}-${each.key}-consumer-stuck"
+  alarm_description   = "The oldest message in ${each.value.name} is over 15 minutes old: its consumer is stuck or down"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateAgeOfOldestMessage"
+  dimensions          = { QueueName = each.value.name }
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 900
+  # An idle queue reports nothing, and an idle queue is healthy.
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
+}
+
 # No running task. Container Insights (RunningTaskCount) is off on the cluster, so this counts the
 # free AWS/ECS CPUUtilization datapoints: each running task reports one a minute.
 resource "aws_cloudwatch_metric_alarm" "service_down" {
