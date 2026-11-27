@@ -214,6 +214,7 @@ async fn serve() -> Result<()> {
             None
         }
     };
+    let workos_client = workos.as_ref().map(|(client, _)| client.clone());
     let sync = workos
         .as_ref()
         .map(|(client, _)| tokio::spawn(sync_loop(store.clone(), client.clone())));
@@ -232,7 +233,10 @@ async fn serve() -> Result<()> {
         .into_iter()
         .collect();
     consumers.extend(posthog()?);
-    let events = mandate::events::start(&store, &aws, consumers).await?;
+    let (email, feedback) = email(&store, &aws, workos_client)?.unzip();
+    consumers.extend(email);
+    let mut events = mandate::events::start(&store, &aws, consumers).await?;
+    events.extend(feedback.flatten());
     let mut app = router(state).route("/healthz", axum::routing::get(|| async { "ok" }));
     if let Some(web_api) = web_api {
         app = app.merge(web_api);
@@ -279,6 +283,53 @@ fn posthog_client() -> Result<Option<Posthog>> {
     };
     let host = std::env::var("POSTHOG_HOST").unwrap_or_else(|_| "https://eu.i.posthog.com".into());
     Ok(Some(Posthog::new(&host, key)?))
+}
+
+/// Email through SES and its bounce and complaint feedback; off unless
+/// `MANDATE_EMAIL_CONFIGURATION_SET` is set, and then it needs its templates, WorkOS (for
+/// organization names) and the web origin (for links).
+#[allow(clippy::type_complexity)]
+fn email(
+    store: &Store,
+    aws: &aws_config::SdkConfig,
+    workos: Option<workos::Client>,
+) -> Result<
+    Option<(
+        mandate::events::Consumer,
+        Option<tokio::task::JoinHandle<()>>,
+    )>,
+> {
+    use mandate::email::{Ses, WorkosOrgs, feedback, templates::Templates};
+    use mandate::events::email::{Email, TEMPLATES};
+    let Ok(configuration_set) = env("MANDATE_EMAIL_CONFIGURATION_SET") else {
+        tracing::info!("MANDATE_EMAIL_CONFIGURATION_SET not set: no email is sent");
+        return Ok(None);
+    };
+    let dir = std::env::var("MANDATE_EMAIL_TEMPLATES").unwrap_or_else(|_| "/app/emails".into());
+    let templates = Templates::load(Path::new(&dir), TEMPLATES)?;
+    let workos = workos.ok_or("email needs WORKOS_API_KEY and WORKOS_CLIENT_ID")?;
+    let handler = Email::new(
+        store.clone(),
+        Arc::new(templates),
+        Arc::new(Ses::new(aws, configuration_set)),
+        Arc::new(WorkosOrgs(workos)),
+        &env("MANDATE_WEB_ORIGIN")?,
+    );
+    let feedback = match env("MANDATE_EMAIL_FEEDBACK_QUEUE") {
+        Ok(queue) => Some(tokio::spawn(feedback::run(
+            store.clone(),
+            aws_sdk_sqs::Client::new(aws),
+            queue,
+        ))),
+        Err(_) => {
+            tracing::warn!("MANDATE_EMAIL_FEEDBACK_QUEUE not set: bounces are not suppressed");
+            None
+        }
+    };
+    Ok(Some((
+        mandate::events::consumer("email", handler),
+        feedback,
+    )))
 }
 
 /// The web app's API, and the agent conversations when eve is configured; off unless WorkOS

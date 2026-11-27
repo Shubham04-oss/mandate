@@ -417,6 +417,98 @@
         "type",
         "data"
       ]
+    },
+    {
+      "description": "SES accepted an email to the member; `cause` is the event that asked for it.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "email.sent.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "template": {
+              "$ref": "#/$defs/EmailTemplate"
+            },
+            "cause": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "member",
+            "template",
+            "cause"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "The member's address bounced for good; it is now suppressed.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "email.bounced.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "template": {
+              "$ref": "#/$defs/EmailTemplate"
+            }
+          },
+          "required": [
+            "member",
+            "template"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "The member marked an email as spam; their address is now suppressed.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "email.complained.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "template": {
+              "$ref": "#/$defs/EmailTemplate"
+            }
+          },
+          "required": [
+            "member",
+            "template"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
     }
   ],
   "$defs": {
@@ -489,6 +581,13 @@
           "type": "string",
           "const": "two_step"
         }
+      ]
+    },
+    "EmailTemplate": {
+      "description": "Which email went out; never its content or address.",
+      "type": "string",
+      "enum": [
+        "approval_requested"
       ]
     }
   }
