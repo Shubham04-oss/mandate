@@ -367,6 +367,49 @@ single task. The image is from Docker Hub and pinned by digest in `ecs.tf`; to u
 comment and the digest together. The image has no shell, so the task has no container health check:
 ECS replaces it if the collector exits.
 
+## Email (off until you turn it on)
+
+`email_enabled` (default `false`) lets the core send its own email through SES Mumbai: the `email`
+event queue and its dead-letter queue, the `mandate-dev` configuration set (TLS required), a rule on
+the default EventBridge bus that forwards SES bounces and complaints for that set to the
+`mandate-dev-email-feedback` queue (only that rule may write to it), and the core's permission to
+`ses:SendEmail` as `oryxa.in` through that set only. Today it sends one email: "approval waiting",
+to everyone who may decide a new approval.
+
+Before you turn it on: the `oryxa.in` identity must be verified in SES ap-south-1 with DKIM and the
+`mail.oryxa.in` MAIL FROM (done outside tofu), the account out of the SES sandbox, and the email
+pictures served at `https://app.oryxa.in/email/` (the web app's deploy). SES charges about $0.10 per
+1,000 emails.
+
+```sh
+# dev.tfvars: email_enabled = true
+tofu plan -var-file=dev.tfvars -out=dev.tfplan   # read it: configuration set, rule, queues, IAM
+tofu apply dev.tfplan
+gh workflow run deploy.yml --ref main            # rolls the core onto the new env
+aws logs tail /mandate-dev/core --follow         # "MANDATE_EMAIL_CONFIGURATION_SET not set" is gone
+```
+
+The image carries the templates (`emails/dist`, built in the core's Dockerfile) at `/app/emails`;
+the core refuses to start if a template needs a value it doesn't fill.
+
+To check it live, ask for an approval and read the email that arrives: from `oryxa.in`, DKIM and
+DMARC passing, not in spam. For a bounce, put `bounce@simulator.amazonses.com` on a test member and
+ask again: the address lands in `email_suppressions` and the outbox gets `email.bounced.v1`.
+
+**Retries and redrive.** The `email` queue allows 20 receives (about 20 minutes of an SES or WorkOS
+outage) before an event moves to `mandate-dev-email-dlq.fifo`, which alarms. Each email is claimed
+in `email_sends` before it is sent, so after an outage you can send the events back with
+`aws sqs start-message-move-task --source-arn <mandate-dev-email-dlq.fifo ARN>` without anyone
+getting the same email twice. A bounce or complaint that can't be applied moves to
+`mandate-dev-email-feedback-dlq` (also alarmed) after 5 receives; redrive it the same way.
+
+**Suppressions.** A permanent bounce or a complaint suppresses the address for every organization
+(`email_suppressions`, keyed by SHA-256 of the lowercased address). To lift one, delete its row as the
+migration role once the person confirms the address works.
+
+To turn email off, set the variable to `false`, apply, and run the deploy workflow again; events
+already queued for `email` are dropped with the queue.
+
 ## Known limits (dev)
 
 - No NAT gateway and no VPC endpoints: every task, the one-off `migrate` and `db-bootstrap`
