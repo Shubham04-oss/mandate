@@ -297,12 +297,26 @@ export const apiBaseUrl = (import.meta.env.VITE_MANDATE_API_URL ?? "")
 
 export type Method = "GET" | "POST" | "DELETE";
 
+/** A W3C `traceparent` with fresh random ids, sampled. */
+export function traceparent(): string {
+	const hex = (bytes: number) =>
+		Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) =>
+			b.toString(16).padStart(2, "0"),
+		).join("");
+	return `00-${hex(16)}-${hex(8)}-01`;
+}
+
 /** Builds the fetch options every call uses; exported for its test. */
 export function requestInit(method: Method, body?: unknown): RequestInit {
 	const headers: Record<string, string> = { Accept: "application/json" };
 	if (body !== undefined) headers["Content-Type"] = "application/json";
-	// CSRF guard the core checks on every state-changing request (4.1).
-	if (method !== "GET") headers["X-Mandate"] = "1";
+	if (method !== "GET") {
+		// CSRF guard the core checks on every state-changing request (4.1).
+		headers["X-Mandate"] = "1";
+		// A new trace per action, which the core links to (never joins). Not on GETs: a custom header
+		// would cost each read a CORS preflight, which these requests already pay.
+		headers.traceparent = traceparent();
+	}
 	return {
 		method,
 		credentials: "include",
