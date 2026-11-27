@@ -20,11 +20,30 @@ pub struct Mail {
     pub tags: Vec<(&'static str, String)>,
 }
 
+/// Never carries the message SES returned, only its error code: the message can echo the address.
 #[derive(Debug, thiserror::Error)]
 pub enum MailError {
-    /// Never carries the message SES returned: it can echo the address.
-    #[error("ses refused the send: {0}")]
-    Refused(String),
+    /// Worth sending again later: throttling, an outage, the network, or an account-wide problem
+    /// (sending paused) that the dead-letter alarm should surface.
+    #[error("send failed, will retry: {0}")]
+    Retryable(String),
+    /// SES will never take this email to this address; sending it again changes nothing.
+    #[error("ses rejected the email: {0}")]
+    Rejected(String),
+}
+
+impl MailError {
+    /// SES's error code to a kind. Only refusals about this one message or address are final, so
+    /// one bad address can't hold up the organization's queue; everything else retries.
+    pub fn from_ses_code(code: Option<&str>) -> MailError {
+        match code {
+            Some(c @ ("BadRequestException" | "MessageRejected")) => {
+                MailError::Rejected(c.to_owned())
+            }
+            Some(c) => MailError::Retryable(c.to_owned()),
+            None => MailError::Retryable("no error code (network or timeout)".to_owned()),
+        }
+    }
 }
 
 #[async_trait]
@@ -56,7 +75,7 @@ impl Mailer for Ses {
                 .data(data)
                 .charset("UTF-8")
                 .build()
-                .map_err(|e| MailError::Refused(e.to_string()))
+                .map_err(|e| MailError::Rejected(e.to_string()))
         };
         let message = Message::builder()
             .subject(content(&mail.subject)?)
@@ -72,7 +91,7 @@ impl Mailer for Ses {
             .iter()
             .map(|(k, v)| MessageTag::builder().name(*k).value(v).build())
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| MailError::Refused(e.to_string()))?;
+            .map_err(|e| MailError::Rejected(e.to_string()))?;
         self.client
             .send_email()
             .from_email_address(FROM)
@@ -84,7 +103,7 @@ impl Mailer for Ses {
             .send()
             .await
             .map(|_| ())
-            .map_err(|e| MailError::Refused(e.code().unwrap_or("unknown").to_owned()))
+            .map_err(|e| MailError::from_ses_code(e.code()))
     }
 }
 
@@ -104,7 +123,7 @@ impl OrgNames for WorkosOrgs {
             .get_organization(workos_org)
             .await
             .map(|o| o.name)
-            .map_err(|_| MailError::Refused("workos organization lookup failed".into()))
+            .map_err(|_| MailError::Retryable("workos organization lookup failed".into()))
     }
 }
 
@@ -140,6 +159,33 @@ mod tests {
             address_hash("priya@acme.com"),
             address_hash("raya@acme.com")
         );
+    }
+
+    #[test]
+    fn only_a_refusal_of_this_message_is_final() {
+        for c in ["BadRequestException", "MessageRejected"] {
+            assert!(
+                matches!(MailError::from_ses_code(Some(c)), MailError::Rejected(_)),
+                "{c}"
+            );
+        }
+        for c in [
+            "TooManyRequestsException",
+            "LimitExceededException",
+            "SendingPausedException",
+            "AccountSuspendedException",
+            "InternalFailure",
+            "NotFoundException",
+        ] {
+            assert!(
+                matches!(MailError::from_ses_code(Some(c)), MailError::Retryable(_)),
+                "{c}"
+            );
+        }
+        assert!(matches!(
+            MailError::from_ses_code(None),
+            MailError::Retryable(_)
+        ));
     }
 
     #[test]

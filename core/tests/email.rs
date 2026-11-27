@@ -20,20 +20,25 @@ use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Records what it sends; refuses the first `refuse` sends as SES would.
+/// Records what it sends; fails the first `refuse` sends as a throttled SES would, and rejects
+/// every send to an address in `reject` for good.
 #[derive(Default)]
 struct Outbox {
     sent: Mutex<Vec<Mail>>,
     refuse: Mutex<usize>,
+    reject: Mutex<Vec<String>>,
 }
 
 #[async_trait]
 impl Mailer for Outbox {
     async fn send(&self, mail: &Mail) -> Result<(), MailError> {
+        if self.reject.lock().unwrap().contains(&mail.to) {
+            return Err(MailError::Rejected("MessageRejected".into()));
+        }
         let mut refuse = self.refuse.lock().unwrap();
         if *refuse > 0 {
             *refuse -= 1;
-            return Err(MailError::Refused("Throttling".into()));
+            return Err(MailError::Retryable("TooManyRequestsException".into()));
         }
         self.sent.lock().unwrap().push(mail.clone());
         Ok(())
@@ -316,6 +321,26 @@ async fn a_refused_send_releases_its_claim_and_the_retry_sends() {
     assert!(r.mail.to().is_empty());
     assert_eq!(r.deliver(&raw).await, Outcome::Handled);
     assert_eq!(r.mail.to(), ["ann@example.com"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_rejected_address_doesnt_stop_the_others_or_retry() {
+    let s = app_store().await;
+    let t = org(&s).await;
+    let r = rig(s.clone());
+    // Bob asks the team bot, so Ann, Cy and Dee may all decide; Cy (in the middle) is rejected.
+    r.mail.reject.lock().unwrap().push("cy@example.com".into());
+    let id = ask(&s, &t, "eng-bot", "bob", json!({ "n": 1 })).await;
+    let raw = r.delivery(&t, id, "eng-bot");
+    assert_eq!(r.deliver(&raw).await, Outcome::Handled);
+    assert_eq!(r.mail.to(), ["ann@example.com", "dee@example.com"]);
+    // Handled, so not retried; and the rejected claim stays, so no later delivery tries Cy again.
+    assert_eq!(r.deliver(&raw).await, Outcome::Skipped);
+    admin_exec("delete from events_inbox where consumer = 'email'", &[]).await;
+    r.mail.reject.lock().unwrap().clear();
+    assert_eq!(r.deliver(&raw).await, Outcome::Handled);
+    assert_eq!(r.mail.to(), ["ann@example.com", "dee@example.com"]);
 }
 
 #[tokio::test]

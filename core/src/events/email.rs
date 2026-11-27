@@ -2,13 +2,14 @@
 //! everyone who may decide it, through the same rule the approve and deny endpoints use.
 //!
 //! Never twice: each email is claimed in `email_sends`, in its own committed transaction, before
-//! SES sees it. A redelivered event finds the claim and skips; a send SES refused releases its
-//! claim and the event retries; a crash between SES and our commit leaves the claim, so that one
-//! email is not retried. Addresses reach only SES, never an event, log or span.
+//! SES sees it. A redelivered event finds the claim and skips; a send that can succeed later
+//! (throttling, an outage) releases its claim and the event retries; a send SES rejects for good
+//! keeps its claim and the others go on; a crash between SES and our commit leaves the claim, so
+//! that one email is not retried. Addresses reach only SES, never an event, log or span.
 use super::{EmailTemplate, Envelope, Event, Handler, HandlerError, Source, publish};
 use crate::api::approvals;
 use crate::email::templates::Templates;
-use crate::email::{Mail, Mailer, OrgNames, address_hash, expires_in};
+use crate::email::{Mail, MailError, Mailer, OrgNames, address_hash, expires_in};
 use crate::store::{Store, StoreError, Tx};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -197,9 +198,18 @@ impl Email {
             "event.id" = %env.id,
             "email.template" = template.as_str()
         );
-        if let Err(e) = self.mailer.send(mail).instrument(span).await {
-            self.release(env, member).await?;
-            return Err(retry(e));
+        match self.mailer.send(mail).instrument(span).await {
+            Ok(()) => {}
+            // Final for this address: keep the claim and go on, so one bad address neither holds
+            // up the organization's queue nor costs the next decider their email.
+            Err(MailError::Rejected(code)) => {
+                tracing::warn!(event_id = %env.id, member_id = member.as_str(), %code, "email rejected");
+                return Ok(());
+            }
+            Err(e @ MailError::Retryable(_)) => {
+                self.release(env, member).await?;
+                return Err(retry(e));
+            }
         }
         if let Err(e) = self.record_sent(env, member, template).await {
             // Already sent; only the record and `email.sent.v1` are missing.

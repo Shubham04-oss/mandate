@@ -129,6 +129,9 @@ logs go to CloudWatch only, as before.
 - **Never twice:** each email is claimed in `email_sends` before it is sent. If the outcome of a send
   is lost (a crash between SES and the commit), that one email is not retried rather than risk a
   duplicate.
+- **One bad address can't hold up the rest:** an email SES rejects for good (`BadRequestException`,
+  `MessageRejected`) keeps its claim and is not retried, and the other deciders still get theirs;
+  only errors that can pass (throttling, outages) retry, since the queue is ordered per organization.
 
 ## Dev network (infra/envs/dev)
 
