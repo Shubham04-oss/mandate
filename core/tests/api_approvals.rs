@@ -233,14 +233,20 @@ async fn decision_publishes_approval_decided() {
     let t = org(&s).await;
     let id = ask(&s, &t, "ann-bot", "ann", json!({})).await;
     decide(&s, &t, id, "ann", Decision::Denied).await.unwrap();
-    // A losing decision publishes nothing.
+    // A losing decision publishes nothing; the ask itself published approval.requested.v1.
     assert!(decide(&s, &t, id, "ann", Decision::Approved).await.is_err());
     assert_eq!(
         outbox(&s, &t).await,
-        [(
-            "approval.decided.v1".to_owned(),
-            json!({ "approval": id, "decision": "denied", "by": "ann" })
-        )]
+        [
+            (
+                "approval.requested.v1".to_owned(),
+                json!({ "approval": id, "agent": "ann-bot" })
+            ),
+            (
+                "approval.decided.v1".to_owned(),
+                json!({ "approval": id, "decision": "denied", "by": "ann" })
+            )
+        ]
     );
 }
 

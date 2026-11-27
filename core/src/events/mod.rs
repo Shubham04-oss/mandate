@@ -1,6 +1,7 @@
 //! Core events: a versioned envelope, written to the outbox in the caller's transaction and
 //! signed when it is sent. `data` carries ids only, never text, arguments, emails or tokens.
 pub mod consume;
+pub mod email;
 pub mod posthog;
 pub mod publisher;
 pub mod run;
@@ -146,6 +147,28 @@ pub enum Setting {
     TwoStep,
 }
 
+/// Which email went out; never its content or address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailTemplate {
+    ApprovalRequested,
+}
+
+impl EmailTemplate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmailTemplate::ApprovalRequested => "approval_requested",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<EmailTemplate> {
+        match s {
+            "approval_requested" => Some(EmailTemplate::ApprovalRequested),
+            _ => None,
+        }
+    }
+}
+
 /// Who caused a lifecycle change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", content = "id", rename_all = "lowercase")]
@@ -226,6 +249,28 @@ pub enum Event {
         by: MemberId,
         setting: Setting,
     },
+    /// SES accepted an email to the member; `cause` is the event that asked for it.
+    #[serde(rename = "email.sent.v1")]
+    EmailSent {
+        #[schemars(with = "String")]
+        member: MemberId,
+        template: EmailTemplate,
+        cause: Uuid,
+    },
+    /// The member's address bounced for good; it is now suppressed.
+    #[serde(rename = "email.bounced.v1")]
+    EmailBounced {
+        #[schemars(with = "String")]
+        member: MemberId,
+        template: EmailTemplate,
+    },
+    /// The member marked an email as spam; their address is now suppressed.
+    #[serde(rename = "email.complained.v1")]
+    EmailComplained {
+        #[schemars(with = "String")]
+        member: MemberId,
+        template: EmailTemplate,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -249,6 +294,9 @@ impl Event {
             Event::MemberSignedIn { .. } => "member.signed_in.v1",
             Event::OrganizationChosen { .. } => "organization.chosen.v1",
             Event::SettingChanged { .. } => "setting.changed.v1",
+            Event::EmailSent { .. } => "email.sent.v1",
+            Event::EmailBounced { .. } => "email.bounced.v1",
+            Event::EmailComplained { .. } => "email.complained.v1",
         }
     }
 
@@ -386,8 +434,21 @@ pub(crate) fn samples() -> Vec<Event> {
         },
         Event::OrganizationChosen { member: m.clone() },
         Event::SettingChanged {
-            by: m,
+            by: m.clone(),
             setting: Setting::TwoStep,
+        },
+        Event::EmailSent {
+            member: m.clone(),
+            template: EmailTemplate::ApprovalRequested,
+            cause: u,
+        },
+        Event::EmailBounced {
+            member: m.clone(),
+            template: EmailTemplate::ApprovalRequested,
+        },
+        Event::EmailComplained {
+            member: m,
+            template: EmailTemplate::ApprovalRequested,
         },
     ]
 }
@@ -400,7 +461,7 @@ mod tests {
     #[test]
     fn type_names_are_versioned() {
         let all = samples();
-        assert_eq!(all.len(), 14, "add every new variant to samples()");
+        assert_eq!(all.len(), 17, "add every new variant to samples()");
         for e in &all {
             let t = e.event_type();
             assert!(EventType::parse(t).is_ok(), "{t}");
@@ -451,6 +512,9 @@ mod tests {
             "id",
             "method",
             "setting",
+            // email.*: which template (an enum) and the event that caused the send (an id).
+            "template",
+            "cause",
         ];
         fn walk(v: &Value) {
             match v {

@@ -93,6 +93,49 @@ const MAY_DECIDE: &str = concat!(
 pub(crate) const PENDING: &str =
     "a.approved_by is null and a.denied_by is null and a.used_at is null";
 
+/// A member who may decide an approval, and where to tell them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decider {
+    pub member: MemberId,
+    pub email: String,
+}
+
+/// The `decider!` rule as a set: the same text with each member in place of its `$2`, so who
+/// is emailed can never drift from who may decide. `$2` then binds `now`.
+static DECIDERS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "select m.id, m.email from approvals a \
+         join agents g on g.tenant_id = a.tenant_id and g.id = a.agent and not g.disabled \
+         join members m on m.tenant_id = a.tenant_id and {} \
+         where a.tenant_id = current_setting('mandate.tenant', true) and a.id = $1 \
+         and {PENDING} and a.expires_at > $2 and m.email is not null and m.email <> '' \
+         order by m.id",
+        decider!().replace("$2", "m.id")
+    )
+});
+
+/// Everyone who may decide this approval now and has an address; empty once it is decided,
+/// expired or unknown, or while its agent is disabled.
+pub async fn deciders(
+    tx: &mut Tx,
+    approval: Uuid,
+    now: OffsetDateTime,
+) -> Result<Vec<Decider>, StoreError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(DECIDERS.as_str()))
+        .bind(approval)
+        .bind(now)
+        .fetch_all(&mut **tx)
+        .await?;
+    rows.into_iter()
+        .map(|(m, email)| {
+            Ok(Decider {
+                member: MemberId::parse(&m)?,
+                email,
+            })
+        })
+        .collect()
+}
+
 /// Records `by`'s decision if the approval is still pending and `by` may decide it, and
 /// publishes `approval.decided.v1` in the same transaction. The UPDATE is the only arbiter: a
 /// concurrent decision waits on the row lock, then finds it decided.

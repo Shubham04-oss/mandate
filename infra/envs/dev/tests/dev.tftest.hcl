@@ -160,6 +160,35 @@ override_resource {
   target = aws_sqs_queue.dead_letter["posthog"]
   values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-posthog-dlq.fifo" }
 }
+override_resource {
+  target = aws_sqs_queue.consumer["email"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email.fifo", url = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-email.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.dead_letter["email"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email-dlq.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.email_feedback[0]
+  # A queue's id is its URL.
+  values = {
+    arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email-feedback"
+    url = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-email-feedback"
+    id  = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-email-feedback"
+  }
+}
+override_resource {
+  target = aws_sqs_queue.email_feedback_dead_letter[0]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email-feedback-dlq" }
+}
+override_resource {
+  target = aws_sesv2_configuration_set.main[0]
+  values = { arn = "arn:aws:ses:ap-south-1:000000000000:configuration-set/mandate-dev" }
+}
+override_resource {
+  target = aws_cloudwatch_event_rule.email_feedback[0]
+  values = { arn = "arn:aws:events:ap-south-1:000000000000:rule/mandate-dev-email-feedback" }
+}
 
 override_resource {
   target = aws_iam_role.execution["core"]
@@ -621,7 +650,7 @@ run "each_consumer_has_a_fifo_queue_with_a_dead_letter_queue" {
       "approval.requested.v1", "approval.decided.v1", "conversation.started.v1", "conversation.finished.v1",
       "grant.created.v1", "grant.revoked.v1", "member.created.v1", "member.updated.v1", "member.removed.v1",
       "organization.created.v1", "member.signed_up.v1", "member.signed_in.v1", "organization.chosen.v1",
-      "setting.changed.v1",
+      "setting.changed.v1", "email.sent.v1", "email.bounced.v1", "email.complained.v1",
     ]) && awscc_eventsv2_subscriber.consumer["posthog"].filter_configuration.filters[0].scope == "SYSTEM_METADATA"
     error_message = "posthog receives every core event type, matched on the trusted detail type"
   }
@@ -1107,5 +1136,128 @@ run "tail_sampling_keeps_errors_and_samples_the_rest" {
       jsonencode({ status_codes = ["ERROR"] }), jsonencode({ sampling_percentage = 25 }),
     ]
     error_message = "every error trace is kept, and the given percentage of the rest"
+  }
+}
+
+run "email_is_off_by_default_and_changes_nothing" {
+  command = apply
+
+  assert {
+    condition = (
+      length(aws_sesv2_configuration_set.main) == 0 && length(aws_sesv2_configuration_set_event_destination.feedback) == 0
+      && length(aws_cloudwatch_event_rule.email_feedback) == 0 && length(aws_cloudwatch_event_target.email_feedback) == 0
+      && length(aws_sqs_queue.email_feedback) == 0 && length(aws_sqs_queue.email_feedback_dead_letter) == 0
+      && length(aws_sqs_queue_policy.email_feedback) == 0 && length(aws_iam_role_policy.core_email) == 0
+      && length(aws_cloudwatch_metric_alarm.email_feedback_dlq) == 0
+      && !contains(keys(aws_sqs_queue.consumer), "email") && !contains(keys(awscc_eventsv2_subscriber.consumer), "email")
+    )
+    error_message = "with email_enabled false there is no configuration set, feedback route, email consumer or SES permission"
+  }
+  assert {
+    condition = !anytrue([
+      for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name == "MANDATE_QUEUE_EMAIL" || startswith(e.name, "MANDATE_EMAIL_")
+    ])
+    error_message = "no email env on the core while email is off"
+  }
+}
+
+run "the_core_sends_only_as_the_domain_through_its_configuration_set" {
+  command = apply
+  variables {
+    email_enabled = true
+  }
+
+  assert {
+    condition = (
+      keys(aws_sqs_queue.consumer) == ["agent-resume", "email", "posthog"]
+      && jsondecode(awscc_eventsv2_subscriber.consumer["email"].filter_configuration.filters[0].pattern) == { "aws:DetailType" = ["approval.requested.v1"] }
+      && jsondecode(aws_sqs_queue.consumer["email"].redrive_policy).maxReceiveCount == 20
+      && keys(aws_cloudwatch_metric_alarm.dlq) == ["agent-resume", "email", "posthog"]
+    )
+    error_message = "the email consumer takes approval.requested.v1, rides out about 20 minutes of SES outage, and its DLQ alarms"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name => e.value
+      if e.name == "MANDATE_QUEUE_EMAIL" || startswith(e.name, "MANDATE_EMAIL_")
+      } == {
+      MANDATE_QUEUE_EMAIL             = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-email.fifo"
+      MANDATE_EMAIL_CONFIGURATION_SET = "mandate-dev"
+      MANDATE_EMAIL_FEEDBACK_QUEUE    = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-email-feedback"
+    }
+    error_message = "the core gets the email queue, the configuration set and the feedback queue"
+  }
+  assert {
+    condition = (
+      aws_sesv2_configuration_set.main[0].configuration_set_name == "mandate-dev"
+      && aws_sesv2_configuration_set.main[0].delivery_options[0].tls_policy == "REQUIRE"
+      && aws_sesv2_configuration_set.main[0].reputation_options[0].reputation_metrics_enabled
+      && aws_sesv2_configuration_set.main[0].sending_options[0].sending_enabled
+    )
+    error_message = "the configuration set requires TLS, tracks reputation and sends"
+  }
+  assert {
+    condition = jsondecode(aws_iam_role_policy.core_email[0].policy).Statement == [
+      {
+        Effect   = "Allow"
+        Action   = "ses:SendEmail"
+        Resource = ["arn:aws:ses:ap-south-1:000000000000:identity/example.test", "arn:aws:ses:ap-south-1:000000000000:configuration-set/mandate-dev"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]
+        Resource = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email-feedback"
+      },
+    ]
+    error_message = "the core sends as the domain identity through its configuration set only, and reads the feedback queue"
+  }
+  assert {
+    condition     = contains(one([for st in jsondecode(aws_iam_role_policy.core_events.policy).Statement : st.Resource if contains(flatten([st.Action]), "sqs:ReceiveMessage")]), "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email.fifo")
+    error_message = "the core reads the email consumer queue like every other consumer"
+  }
+  assert {
+    condition = (
+      aws_sesv2_configuration_set_event_destination.feedback[0].configuration_set_name == "mandate-dev"
+      && aws_sesv2_configuration_set_event_destination.feedback[0].event_destination[0].enabled
+      && aws_sesv2_configuration_set_event_destination.feedback[0].event_destination[0].matching_event_types == toset(["BOUNCE", "COMPLAINT"])
+      && aws_sesv2_configuration_set_event_destination.feedback[0].event_destination[0].event_bridge_destination[0].event_bus_arn == "arn:aws:events:ap-south-1:000000000000:event-bus/default"
+    )
+    error_message = "bounces and complaints go to the default bus, the only one SES publishes to"
+  }
+  assert {
+    condition = (
+      aws_cloudwatch_event_rule.email_feedback[0].event_bus_name == "default"
+      && jsondecode(aws_cloudwatch_event_rule.email_feedback[0].event_pattern) == {
+        source        = ["aws.ses"]
+        "detail-type" = ["Email Bounced", "Email Complaint Received"]
+        detail        = { mail = { tags = { "ses:configuration-set" = ["mandate-dev"] } } }
+      }
+      && aws_cloudwatch_event_target.email_feedback[0].rule == aws_cloudwatch_event_rule.email_feedback[0].name
+      && aws_cloudwatch_event_target.email_feedback[0].arn == "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email-feedback"
+    )
+    error_message = "the rule takes this configuration set's bounces and complaints to the feedback queue"
+  }
+  assert {
+    condition = (
+      aws_sqs_queue_policy.email_feedback[0].queue_url == aws_sqs_queue.email_feedback[0].id
+      && jsondecode(aws_sqs_queue_policy.email_feedback[0].policy).Statement == [{
+        Effect    = "Allow"
+        Principal = { Service = "events.amazonaws.com" }
+        Action    = "sqs:SendMessage"
+        Resource  = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email-feedback"
+        Condition = { ArnEquals = { "aws:SourceArn" = "arn:aws:events:ap-south-1:000000000000:rule/mandate-dev-email-feedback" } }
+      }]
+    )
+    error_message = "only the feedback rule may send to the feedback queue"
+  }
+  assert {
+    condition = (
+      !endswith(aws_sqs_queue.email_feedback[0].name, ".fifo") && aws_sqs_queue.email_feedback[0].sqs_managed_sse_enabled
+      && aws_sqs_queue.email_feedback[0].visibility_timeout_seconds == 60
+      && jsondecode(aws_sqs_queue.email_feedback[0].redrive_policy) == { deadLetterTargetArn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email-feedback-dlq", maxReceiveCount = 5 }
+      && aws_sqs_queue.email_feedback_dead_letter[0].sqs_managed_sse_enabled && aws_sqs_queue.email_feedback_dead_letter[0].message_retention_seconds == 1209600
+      && aws_cloudwatch_metric_alarm.email_feedback_dlq[0].dimensions == tomap({ QueueName = "mandate-dev-email-feedback-dlq" })
+    )
+    error_message = "an encrypted standard feedback queue with its own two-week dead-letter queue, which alarms"
   }
 }

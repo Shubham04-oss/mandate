@@ -17,6 +17,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     touch core/src/main.rs core/src/lib.rs \
  && cargo build --release --locked -p mandate && cp target/release/mandate /mandate
 
+# The email templates, built to HTML and text with {{placeholders}} the core fills in (emails/README.md).
+# The same pinned image as eve's (agents/Dockerfile).
+FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4 AS emails
+WORKDIR /emails
+COPY emails/package.json emails/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY emails/tsconfig.json ./
+COPY emails/src src
+RUN npm run build
+
 FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS serve
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
@@ -25,6 +35,7 @@ RUN apt-get update \
  && install -d -o mandate -m 0700 /run/mandate
 COPY --from=build /mandate /usr/local/bin/mandate
 COPY policies /app/policies
+COPY --from=emails /emails/dist /app/emails
 # ECS injects secrets as env vars but the core reads keys from files: write each PEM to a 0600
 # file only this user can read, point the core at it, and drop the PEM from the environment.
 COPY --chmod=0755 <<'SH' /usr/local/bin/entrypoint

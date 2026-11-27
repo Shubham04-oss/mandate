@@ -1,5 +1,6 @@
 pub mod api;
 pub mod assertion;
+pub mod email;
 pub mod eve;
 pub mod events;
 pub mod exceptions;

@@ -52,6 +52,13 @@ locals {
   } : {}
   # The admin-only forced-error route on the core and eve (ORY-82); absent unless switched on.
   debug_environment = var.debug_routes ? { MANDATE_DEBUG_ROUTES = "1" } : {}
+  # The core's email (email.tf): the email consumer's queue, the configuration set it sends with, and
+  # the queue SES bounces and complaints arrive on.
+  email_environment = var.email_enabled ? {
+    MANDATE_QUEUE_EMAIL             = aws_sqs_queue.consumer["email"].url
+    MANDATE_EMAIL_CONFIGURATION_SET = aws_sesv2_configuration_set.main[0].configuration_set_name
+    MANDATE_EMAIL_FEEDBACK_QUEUE    = aws_sqs_queue.email_feedback[0].url
+  } : {}
   # Secret env names per task. The core entrypoint turns *_PEM values into 0600 files; eve reads
   # MANDATE_ASSERTION_PUBLIC_KEY as PEM text (lane D).
   secret_env = {
@@ -86,7 +93,7 @@ locals {
     }, local.otel_environment, var.telemetry_enabled ? {
     OTEL_SERVICE_NAME = "mandate-core"
     POSTHOG_HOST      = local.posthog_host
-  } : {}, local.debug_environment)
+  } : {}, local.debug_environment, local.email_environment)
   eve_environment = merge({
     RDS_CA_PEM             = local.rds_ca_pem
     PORT                   = "3000"
@@ -341,6 +348,8 @@ locals {
     "gen_ai.system", "gen_ai.provider.name", "gen_ai.operation.name", "gen_ai.request.model", "gen_ai.response.model",
     "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "gen_ai.response.finish_reasons", "gen_ai.tool.name",
     "tenant.id", "agent.id", "conversation.id",
+    # The core's email send span (core/src/events/email.rs): which event caused it and which template.
+    "event.id", "email.template",
   ]
   # RE2 (Go regexp, as tofu's regex()): any match in a kept value, log body or span name is masked.
   collector_blocked_values = [
