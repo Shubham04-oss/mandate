@@ -11,6 +11,9 @@ locals {
       "setting.changed.v1",
     ]
   }
+  # Receives before the dead-letter queue: PostHog is an outside service, so ride out about 50 minutes
+  # of outage (60 s visibility each) instead of 5.
+  receive_limits = { "posthog" = 50 }
 }
 
 resource "awscc_eventsv2_event_bus" "main" {
@@ -39,7 +42,7 @@ resource "aws_sqs_queue" "consumer" {
   visibility_timeout_seconds  = 60
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.dead_letter[each.key].arn
-    maxReceiveCount     = 5
+    maxReceiveCount     = lookup(local.receive_limits, each.key, 5)
   })
 }
 

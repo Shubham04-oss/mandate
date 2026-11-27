@@ -205,4 +205,6 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # PostHog's public project key; empty keeps browser analytics and /ingest off.
+          VITE_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
         run: npm run deploy

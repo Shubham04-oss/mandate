@@ -327,12 +327,18 @@ telemetry on, after you have approved the cost:
 
 ```sh
 put posthog-key "$POSTHOG_PROJECT_KEY"   # the EU project's token (phc_...), not a personal key (phx_...)
+gh variable set POSTHOG_PROJECT_KEY --env dev --body "$POSTHOG_PROJECT_KEY"   # the web build's (public key)
 # dev.tfvars: telemetry_enabled = true
 tofu plan -var-file=dev.tfvars -out=dev.tfplan   # read it: collector service, role, group, rules
 tofu apply dev.tfplan
 gh workflow run deploy.yml --ref main            # rolls the core and eve onto the new env
 aws logs tail /mandate-dev/collector --follow    # no export errors
 ```
+
+The `posthog` event queue allows 50 receives (about 50 minutes of a PostHog outage) before an event
+moves to its dead-letter queue. After an outage, send them back with
+`aws sqs start-message-move-task --source-arn <mandate-dev-posthog-dlq.fifo ARN>`; PostHog drops
+repeats by event uuid.
 
 The core also gets `POSTHOG_API_KEY` and `POSTHOG_HOST` for product events. To turn it off, set the
 variable to `false`, apply, and run the deploy workflow again. `telemetry_sample_percent` (default

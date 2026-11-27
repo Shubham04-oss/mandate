@@ -154,6 +154,8 @@ fn actor_member<'a>(actor: &'a Actor, props: &mut Map<String, Value>) -> Option<
 
 #[async_trait]
 impl Handler for Posthog {
+    // ponytail: the HTTP call runs inside the kit's inbox transaction, holding a pooled connection for
+    // up to TIMEOUT per event; fine at our volume, send before the transaction if it ever matters.
     async fn handle(&self, _: &mut Tx, env: &Envelope) -> Result<(), HandlerError> {
         self.send(env).await
     }

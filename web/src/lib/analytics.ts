@@ -87,8 +87,17 @@ export function track<E extends EventName>(
 ) {
 	const clean = cleanProps(event, props);
 	if (!clean) return;
-	void start(identity).then((ph) => ph?.capture(event, clean));
+	// After the first page view: child effects run before <Analytics />'s, and sending earlier
+	// would start PostHog anonymous and before route patterns are set.
+	void viewed
+		.then(() => start(identity))
+		.then((ph) => ph?.capture(event, clean));
 }
+
+let firstView: () => void = () => {};
+const viewed = new Promise<void>((resolve) => {
+	firstView = resolve;
+});
 
 // ── Scrubbing every outgoing event ───────────────────────────────────────────────────────────────
 
@@ -309,6 +318,7 @@ export async function pageView(pathname: string, who: Identity | null) {
 	const ph = await start(who);
 	if (!ph) return;
 	becomes(ph, who);
+	firstView();
 	if (pathname === lastPath) return;
 	lastPath = pathname;
 	ph.capture("$pageview");
