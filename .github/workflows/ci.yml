@@ -65,6 +65,9 @@ jobs:
 
   agents:
     runs-on: ubuntu-latest
+    # eve's CLI would otherwise send usage data to Vercel from CI.
+    env:
+      EVE_TELEMETRY_DISABLED: "1"
     defaults:
       run:
         working-directory: agents

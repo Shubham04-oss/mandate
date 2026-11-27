@@ -8,7 +8,11 @@ export function gatewayModel(url: string, token: string, model: string, fetchFn?
     name: "gateway",
     baseURL: url,
     // No apiKey, so no Authorization header: the gateway holds the provider keys (BYOK).
-    headers: { "cf-aig-authorization": `Bearer ${token}` },
+    headers: {
+      "cf-aig-authorization": `Bearer ${token}`,
+      // The gateway logs metadata only, never prompts or replies (customer content; owner's call).
+      "cf-aig-collect-log-payload": "false",
+    },
     // Streamed usage feeds eve's session limits and compaction.
     includeUsage: true,
     fetch: fetchFn,

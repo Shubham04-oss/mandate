@@ -2,6 +2,8 @@
 # Build from agents/: docker build -f agents/Dockerfile agents
 # eve needs Node 24 (agents/package.json engines).
 FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4 AS build
+# eve's CLI sends usage data to Vercel; off in the build and at run time (owner's call, ORY-67).
+ENV EVE_TELEMETRY_DISABLED=1
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -9,7 +11,7 @@ COPY . .
 RUN npm run build && npm prune --omit=dev
 
 FROM node:24-trixie-slim@sha256:4d00acb4bcc42c454c4eb801526f7ad7f772ea3bd4fd168c5cc2e384abcbb9d4
-ENV NODE_ENV=production PORT=3000
+ENV NODE_ENV=production PORT=3000 EVE_TELEMETRY_DISABLED=1
 WORKDIR /app
 COPY --from=build --chown=root:root /app /app
 # The image's unprivileged user; the app files stay root-owned and read-only to it.
