@@ -57,7 +57,7 @@ processors:
 
 exporters:
   # PostHog's OTLP endpoints are under /i/v1, not the default /v1, so each is set in full.
-  otlphttp/posthog:
+  otlp_http/posthog:
     traces_endpoint: ${posthog_host}/i/v1/traces
     logs_endpoint: ${posthog_host}/i/v1/logs
     headers:
@@ -68,8 +68,8 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, ${sample_percent < 100 ? "tail_sampling, " : ""}redaction, transform, batch]
-      exporters: [otlphttp/posthog]
+      exporters: [otlp_http/posthog]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, filter/warn, redaction, batch]
-      exporters: [otlphttp/posthog]
+      exporters: [otlp_http/posthog]

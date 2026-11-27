@@ -984,8 +984,8 @@ run "the_collector_config_lets_only_allowlisted_data_out" {
   }
   assert {
     condition = yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).service.pipelines == {
-      traces = { receivers = ["otlp"], processors = ["memory_limiter", "redaction", "transform", "batch"], exporters = ["otlphttp/posthog"] }
-      logs   = { receivers = ["otlp"], processors = ["memory_limiter", "filter/warn", "redaction", "batch"], exporters = ["otlphttp/posthog"] }
+      traces = { receivers = ["otlp"], processors = ["memory_limiter", "redaction", "transform", "batch"], exporters = ["otlp_http/posthog"] }
+      logs   = { receivers = ["otlp"], processors = ["memory_limiter", "filter/warn", "redaction", "batch"], exporters = ["otlp_http/posthog"] }
     }
     error_message = "every pipeline redacts before it exports; logs below WARN are dropped; no sampling at 100%"
   }
@@ -1047,7 +1047,7 @@ run "the_collector_config_lets_only_allowlisted_data_out" {
   }
   assert {
     condition = yamldecode(one([for e in jsondecode(aws_ecs_task_definition.collector[0].container_definitions)[0].environment : e.value if e.name == "OTELCOL_CONFIG"])).exporters == {
-      "otlphttp/posthog" = {
+      "otlp_http/posthog" = {
         traces_endpoint = "https://eu.i.posthog.com/i/v1/traces"
         logs_endpoint   = "https://eu.i.posthog.com/i/v1/logs"
         headers         = { Authorization = "Bearer $${env:POSTHOG_API_KEY}" }
