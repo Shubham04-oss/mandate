@@ -39,6 +39,7 @@ GitHub: `Shubham04-oss/mandate`.
 core/     the Rust binary: policy, grants, MCP tool server, brokering, guard, audit
 agents/   eve (TypeScript): conversations and channels; holds no authority
 web/      the web app (TypeScript, Cloudflare Worker)
+emails/   the email templates (React Email), built to HTML and text for the core to send
 policies/ Cedar policies and schema, proven in CI
 infra/    infrastructure as code (AWS, Cloudflare)
 docs/     design, security, deploy, decisions

@@ -9,6 +9,7 @@ import Invitation, * as invitation from "./templates/invitation.tsx";
 import ResetPassword, * as resetPassword from "./templates/reset-password.tsx";
 import SignInCode, * as signInCode from "./templates/sign-in-code.tsx";
 import VerifyEmail, * as verifyEmail from "./templates/verify-email.tsx";
+import { tidyText } from "./text.ts";
 import { type Field, FieldContext } from "./theme.ts";
 
 type Props = Record<string, string>;
@@ -80,11 +81,7 @@ async function plainText(el: React.ReactElement) {
       ],
     },
   });
-  return `${text
-    // "Choose a new password:" then the link alone on the next line, easy to tap or copy.
-    .replace(/ : (\S+)$/gm, ":\n$1")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim()}\n`;
+  return tidyText(text);
 }
 
 const preview = process.argv.includes("--preview");

@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsx src/build.tsx",
-    "check": "biome check . && tsc"
+    "preview": "tsx src/build.tsx --preview",
+    "check": "biome check . && tsc",
+    "test": "tsx src/build.tsx && node --test test/*.test.ts"
   },
   "engines": {
     "node": ">=24"
