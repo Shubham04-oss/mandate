@@ -50,6 +50,8 @@ locals {
     OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.${local.internal}:4318"
     OTEL_EXPORTER_OTLP_PROTOCOL = "http/protobuf"
   } : {}
+  # The admin-only forced-error route on the core and eve (ORY-82); absent unless switched on.
+  debug_environment = var.debug_routes ? { MANDATE_DEBUG_ROUTES = "1" } : {}
   # Secret env names per task. The core entrypoint turns *_PEM values into 0600 files; eve reads
   # MANDATE_ASSERTION_PUBLIC_KEY as PEM text (lane D).
   secret_env = {
@@ -62,7 +64,7 @@ locals {
     "eve/database-url"           = "WORKFLOW_POSTGRES_URL"
     "eve/ai-gateway-key"         = "MANDATE_AI_GATEWAY_KEY" # Cloudflare AI Gateway token (AI Gateway Run)
     "eve/assertion-public-key"   = "MANDATE_ASSERTION_PUBLIC_KEY"
-    "posthog-key"                = "POSTHOG_API_KEY" # the core's, only while telemetry is on (iam.tf)
+    "posthog-key"                = "POSTHOG_API_KEY" # the core's and eve's, only while telemetry is on (iam.tf)
   }
   core_environment = merge({
     RDS_CA_PEM         = local.rds_ca_pem
@@ -84,14 +86,17 @@ locals {
     }, local.otel_environment, var.telemetry_enabled ? {
     OTEL_SERVICE_NAME = "mandate-core"
     POSTHOG_HOST      = local.posthog_host
-  } : {})
+  } : {}, local.debug_environment)
   eve_environment = merge({
     RDS_CA_PEM             = local.rds_ca_pem
     PORT                   = "3000"
     MANDATE_CORE_MCP_URL   = "http://core.${local.internal}:8080/mcp"
     MANDATE_AI_GATEWAY_URL = var.ai_gateway_url
     MANDATE_MODEL_DEFAULT  = var.model_default
-  }, local.otel_environment, var.telemetry_enabled ? { OTEL_SERVICE_NAME = "eve" } : {})
+    }, local.otel_environment, var.telemetry_enabled ? {
+    OTEL_SERVICE_NAME = "eve"
+    POSTHOG_HOST      = local.posthog_host
+  } : {}, local.debug_environment)
 }
 
 locals {

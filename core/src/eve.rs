@@ -194,6 +194,14 @@ impl EveClient {
         self.post(assertion, &path, json!({})).await.map(drop)
     }
 
+    /// Asks eve to raise and report a test error; eve answers 5xx once it has.
+    #[tracing::instrument(name = "eve.debug_error", skip_all)]
+    pub async fn debug_error(&self, assertion: &str) -> Result<(), EveError> {
+        self.post(assertion, "/mandate/v1/debug/error", json!({}))
+            .await
+            .map(drop)
+    }
+
     /// Reads stored lines from `start` until eve ends the lease (the caller reconnects from its
     /// cursor) or the session ends.
     #[tracing::instrument(name = "eve.stream", skip_all)]

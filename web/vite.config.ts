@@ -46,6 +46,9 @@ const config = defineConfig(({ command, mode }) => {
 			assetsInlineLimit: (file: string) =>
 				/\.(woff2?|ttf|otf)$/.test(file) ? false : undefined,
 		},
+		// Browser maps without a sourceMappingURL: the deploy uploads them to PostHog for error
+		// tracking and deletes them before publishing, so the source is never served.
+		environments: { client: { build: { sourcemap: "hidden" } } },
 		plugins: [
 			stubPreviewsInBuild(),
 			devtools(),

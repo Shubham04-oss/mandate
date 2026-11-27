@@ -200,11 +200,38 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      - name: Build
+        env:
+          # PostHog's public project key; empty keeps browser analytics and /ingest off.
+          VITE_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+        run: npm run build:dev
+      # Marks each file with a chunk id and uploads its map, so a browser error shows the real file
+      # and line in PostHog. Before the deploy: the served files must be the marked ones.
+      - name: Upload source maps to PostHog
+        # A PostHog or CLI problem only costs readable stacks; the next step still drops the maps.
+        continue-on-error: true
+        env:
+          # A personal key scoped to error tracking write (+ organization read); unset skips this.
+          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
+          POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_PROJECT_ID }}
+          POSTHOG_CLI_HOST: https://eu.posthog.com
+        run: |
+          if [ -z "$POSTHOG_CLI_API_KEY" ] || [ -z "$POSTHOG_CLI_PROJECT_ID" ]; then
+            echo "::notice::no PostHog CLI key or project id; source maps not uploaded"
+            exit 0
+          fi
+          npx --yes @posthog/cli@0.20.0 sourcemap process --directory dist/client \
+            --release-name mandate-web --release-version "$TAG" --delete-after
+      # The maps hold the source: never published, whether or not the upload ran.
+      - name: Drop source maps
+        run: |
+          npm run drop-maps
+          if grep -rl sourceMappingURL dist/client --include='*.js'; then
+            echo "::error::browser code points at a source map"; exit 1
+          fi
       # A Workers-only token; Wrangler reads it and the account id from the environment.
-      - name: Build and deploy to app.oryxa.in
+      - name: Deploy to app.oryxa.in
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          # PostHog's public project key; empty keeps browser analytics and /ingest off.
-          VITE_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
-        run: npm run deploy
+        run: npx wrangler deploy --env dev

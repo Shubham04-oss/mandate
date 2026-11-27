@@ -17,6 +17,10 @@ pub enum PosthogError {
     Host(String),
     #[error("PostHog client: {0}")]
     Client(#[source] reqwest::Error),
+    #[error("posthog: {0}")]
+    Send(#[source] reqwest::Error),
+    #[error("posthog answered {0}")]
+    Status(reqwest::StatusCode),
 }
 
 pub struct Posthog {
@@ -38,7 +42,8 @@ impl Posthog {
         Self::at(batch, key)
     }
 
-    fn at(batch: Url, key: String) -> Result<Self, PosthogError> {
+    /// No scheme check: `new` is the way in; tests point this at a local fake.
+    pub(crate) fn at(batch: Url, key: String) -> Result<Self, PosthogError> {
         let http = reqwest::Client::builder()
             .timeout(TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
@@ -170,26 +175,30 @@ impl Posthog {
         let Ok(event) = Event::from_envelope(env) else {
             return Ok(());
         };
-        let body = json!({ "api_key": self.key, "batch": [capture(env, &event)] });
+        self.post(&[capture(env, &event)])
+            .await
+            .map_err(|e| HandlerError::Retry(e.to_string()))
+    }
+
+    /// Posts already-built PostHog events in one `/batch/` call.
+    pub(crate) async fn post(&self, batch: &[Value]) -> Result<(), PosthogError> {
+        let body = json!({ "api_key": self.key, "batch": batch });
         let res = self
             .http
             .post(self.batch.clone())
             .json(&body)
             .send()
             .await
-            .map_err(|e| HandlerError::Retry(format!("posthog: {}", e.without_url())))?;
+            .map_err(|e| PosthogError::Send(e.without_url()))?;
         if !res.status().is_success() {
-            return Err(HandlerError::Retry(format!(
-                "posthog answered {}",
-                res.status()
-            )));
+            return Err(PosthogError::Status(res.status()));
         }
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::events::{EventType, samples};
     use crate::ids::TenantId;
@@ -299,7 +308,9 @@ mod tests {
     }
 
     /// A fake PostHog answering `status`; returns its `/batch/` URL and the bodies it got.
-    async fn fake(status: http::StatusCode) -> (Url, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    pub(crate) async fn fake(
+        status: http::StatusCode,
+    ) -> (Url, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
         use axum::{Json, Router, routing::post};
         let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = got.clone();

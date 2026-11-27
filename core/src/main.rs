@@ -5,6 +5,7 @@ use mandate::api::conversations::{self, Conversations, Resume};
 use mandate::api::{self, ApiState, auth::WorkosAuth};
 use mandate::assertion::{Assertion, TTL_SECS, sign};
 use mandate::eve::EveClient;
+use mandate::events::posthog::Posthog;
 use mandate::guard::{BedrockGuard, Guard, Unconfigured};
 use mandate::identity::{Workos, sync_directory};
 use mandate::ids::{AgentId, MemberId, SpaceId, TenantId};
@@ -57,8 +58,17 @@ enum Cmd {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cmd = Cli::parse().cmd;
-    // Only the server exports spans; the one-off commands just log.
-    let telemetry = match mandate::telemetry::init(matches!(cmd, Cmd::Serve)) {
+    let server = matches!(cmd, Cmd::Serve);
+    // Only the server exports spans and reports errors; the one-off commands just log.
+    let exceptions = match server.then(posthog_client).transpose() {
+        Ok(client) => client.flatten().map(mandate::exceptions::start),
+        Err(e) => {
+            eprintln!("mandate: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (exceptions, reports) = exceptions.unzip();
+    let telemetry = match mandate::telemetry::init(server, exceptions) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("mandate: {e}");
@@ -83,6 +93,10 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     };
+    // After the last error is logged, so a failed start is reported too.
+    if let Some(reports) = reports {
+        reports.flush().await;
+    }
     // The exporter's client blocks; flushing off the runtime's threads keeps it from panicking.
     let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
     code
@@ -251,13 +265,20 @@ async fn serve() -> Result<()> {
 
 /// Product events to PostHog; off unless `POSTHOG_API_KEY` is set.
 fn posthog() -> Result<Option<mandate::events::Consumer>> {
-    let Ok(key) = env("POSTHOG_API_KEY") else {
+    let Some(handler) = posthog_client()? else {
         tracing::info!("POSTHOG_API_KEY not set: product events stay in the core");
         return Ok(None);
     };
-    let host = std::env::var("POSTHOG_HOST").unwrap_or_else(|_| "https://eu.i.posthog.com".into());
-    let handler = mandate::events::posthog::Posthog::new(&host, key)?;
     Ok(Some(mandate::events::consumer("posthog", handler)))
+}
+
+/// A PostHog client when `POSTHOG_API_KEY` is set; `POSTHOG_HOST` defaults to the EU region.
+fn posthog_client() -> Result<Option<Posthog>> {
+    let Ok(key) = env("POSTHOG_API_KEY") else {
+        return Ok(None);
+    };
+    let host = std::env::var("POSTHOG_HOST").unwrap_or_else(|_| "https://eu.i.posthog.com".into());
+    Ok(Some(Posthog::new(&host, key)?))
 }
 
 /// The web app's API, and the agent conversations when eve is configured; off unless WorkOS
@@ -288,11 +309,32 @@ fn web_api(
         sso_redirect_uri: format!("{}/v1/auth/sso/callback", api_origin.trim_end_matches('/')),
         trust_cf_ip: std::env::var("MANDATE_TRUST_CF_IP").as_deref() == Ok("1"),
         catalog: state.catalog.clone(),
+        debug_routes: std::env::var("MANDATE_DEBUG_ROUTES").as_deref() == Ok("1"),
     });
     let mut web = api::router(api_state.clone());
+    let conv = agent_conversations(state, &api_state, aws)?;
+    if let Some(conv) = &conv {
+        web = web.merge(api::with_routes(
+            conversations::routes(conv.clone()),
+            api_state.clone(),
+        ));
+    }
+    web = web.merge(api::with_routes(
+        api::debug::routes(&api_state, conv.clone()),
+        api_state,
+    ));
+    Ok(Some((web, conv)))
+}
+
+/// The agent conversations; off unless `MANDATE_EVE_URL` is set.
+fn agent_conversations(
+    state: &Arc<AppState>,
+    api_state: &Arc<ApiState>,
+    aws: &aws_config::SdkConfig,
+) -> Result<Option<Arc<Conversations>>> {
     let Ok(url) = env("MANDATE_EVE_URL") else {
         tracing::warn!("MANDATE_EVE_URL not set: /v1/conversations is off");
-        return Ok(Some((web, None)));
+        return Ok(None);
     };
     let eve = EveClient::new(url::Url::parse(&url).map_err(|e| format!("MANDATE_EVE_URL: {e}"))?)?;
     let guard: Arc<dyn Guard> = match (
@@ -307,18 +349,13 @@ fn web_api(
             Arc::new(Unconfigured)
         }
     };
-    let conv = Conversations::new(
+    Ok(Some(Conversations::new(
         state.clone(),
         api_state.clone(),
         eve,
         guard,
         Duration::from_secs(1),
-    );
-    web = web.merge(api::with_routes(
-        conversations::routes(conv.clone()),
-        api_state,
-    ));
-    Ok(Some((web, Some(conv))))
+    )))
 }
 
 async fn sync_loop(store: Store, client: workos::Client) {

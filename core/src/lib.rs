@@ -2,6 +2,7 @@ pub mod api;
 pub mod assertion;
 pub mod eve;
 pub mod events;
+pub mod exceptions;
 pub mod gate;
 pub mod guard;
 pub mod identity;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiError, readResponse, requestInit } from "./index.ts";
+import { ApiError, readResponse, requestInit, traceparent } from "./index.ts";
 
 describe("requestInit", () => {
 	it("always sends credentials and asks for JSON", () => {
@@ -12,6 +12,15 @@ describe("requestInit", () => {
 	it("marks state-changing requests with X-Mandate and only those", () => {
 		expect(requestInit("POST").headers).toMatchObject({ "X-Mandate": "1" });
 		expect(requestInit("GET").headers).not.toHaveProperty("X-Mandate");
+	});
+
+	it("starts a new trace on each state-changing request, and only those", () => {
+		const header = (m: "GET" | "POST" | "DELETE") =>
+			(requestInit(m).headers as Record<string, string>).traceparent;
+		expect(header("POST")).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+		expect(header("DELETE")).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+		expect(header("POST")).not.toBe(header("POST"));
+		expect(header("GET")).toBeUndefined();
 	});
 
 	it("sends a body as JSON", () => {
@@ -80,5 +89,20 @@ describe("readResponse", () => {
 			res(401, '{"error":{"code":"forbidden","message":"x"}}'),
 		).catch((e: ApiError) => e);
 		expect((err as ApiError).signedOut).toBe(true);
+	});
+});
+
+describe("traceparent", () => {
+	it("is a valid W3C header with fresh ids", () => {
+		const seen = new Set<string>();
+		for (let i = 0; i < 50; i++) {
+			const [version, trace, span, flags] = traceparent().split("-");
+			expect([version, flags]).toEqual(["00", "01"]);
+			// All-zero ids are invalid; 50 draws of 128 random bits never repeat.
+			expect(trace).not.toMatch(/^0+$/);
+			expect(span).not.toMatch(/^0+$/);
+			seen.add(trace);
+		}
+		expect(seen.size).toBe(50);
 	});
 });

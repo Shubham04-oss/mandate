@@ -274,6 +274,13 @@ export function config(who: Identity | null): Partial<PostHogConfig> {
 	};
 }
 
+/** Throws an uncaught error from app code on the next tick; it only reaches this page's own analytics. */
+export function forceTestError() {
+	setTimeout(() => {
+		throw new Error("forced test error");
+	});
+}
+
 let client: Promise<PostHog | null> | null = null;
 /** Who PostHog is sending as now; null while signed out. */
 let identity: Identity | null = null;
@@ -290,6 +297,8 @@ function start(who: Identity | null): Promise<PostHog | null> {
 	])
 		.then(([{ default: posthog }]) => {
 			posthog.init(posthogKey, config(who));
+			// From the browser console, to check error tracking and source maps end to end (ORY-82).
+			Object.assign(window, { __mandateTestError: forceTestError });
 			identity = who;
 			if (who) posthog.group("organization", who.org);
 			return posthog;

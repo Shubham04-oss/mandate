@@ -1,6 +1,7 @@
 // Startup check: eve reads its config lazily, so a bad deploy would only fail on the first request.
 // Run before the server (Dockerfile CMD): `node agent/lib/env.ts` exits non-zero on any problem.
 import { loadPublicKey } from "#lib/assertion.ts";
+import { posthogConfig } from "#lib/posthog.ts";
 
 const URLS = ["MANDATE_AI_GATEWAY_URL", "MANDATE_CORE_MCP_URL"];
 const REQUIRED = ["MANDATE_AI_GATEWAY_KEY", "MANDATE_MODEL_DEFAULT"];
@@ -17,6 +18,10 @@ export function envProblems(env: NodeJS.ProcessEnv): string[] {
   const otlp = env.OTEL_EXPORTER_OTLP_ENDPOINT;
   if (otlp && !(URL.canParse(otlp) && /^https?:$/.test(new URL(otlp).protocol))) {
     problems.push("OTEL_EXPORTER_OTLP_ENDPOINT is not an http(s) URL");
+  }
+  // Optional too: with a key, a bad host would silently drop every error and model call.
+  if (env.POSTHOG_API_KEY && posthogConfig(env) === null) {
+    problems.push("POSTHOG_HOST is not an https URL");
   }
   if (!env.MANDATE_ASSERTION_PUBLIC_KEY) problems.push("MANDATE_ASSERTION_PUBLIC_KEY is not set");
   else {

@@ -1,6 +1,7 @@
 //! Logs and traces. Every request gets one span named by its route pattern, and every log line
 //! inside it carries the span's `trace_id`. All logs go to stderr (CloudWatch); spans, and warn and
-//! error logs, also go over OTLP to the collector when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+//! error logs, also go over OTLP to the collector when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; errors
+//! and panics also go to PostHog error tracking when `exceptions` is given (`crate::exceptions`).
 //! Ids only: no bodies, headers, raw paths or text.
 use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
@@ -52,7 +53,10 @@ impl Telemetry {
 
 /// JSON logs on stderr (so `dev-assert` stdout carries the token and nothing else), plus trace
 /// ids; with `export` and an endpoint configured, spans and warn+ logs also go to the collector.
-pub fn init(export: bool) -> Result<Telemetry, TelemetryError> {
+pub fn init(
+    export: bool,
+    exceptions: Option<crate::exceptions::ExceptionLayer>,
+) -> Result<Telemetry, TelemetryError> {
     let export = export && std::env::var_os(ENDPOINT).is_some();
     let traces = tracer_provider(export)?;
     let logs = export.then(logger_provider).transpose()?;
@@ -65,6 +69,7 @@ pub fn init(export: bool) -> Result<Telemetry, TelemetryError> {
         )
         .with(span_layer(traces.tracer(SERVICE)))
         .with(logs.as_ref().map(log_layer))
+        .with(exceptions)
         .try_init()
         .map_err(|_| TelemetryError::Installed)?;
     Ok(Telemetry { traces, logs })
@@ -77,7 +82,7 @@ fn resource() -> Resource {
 
 /// Spans only: a log line would otherwise ride along as a span event, info text included. Warn and
 /// error leave as logs (`log_layer`), joined to the trace by id.
-fn span_layer<S>(tracer: opentelemetry_sdk::trace::Tracer) -> impl Layer<S> + use<S>
+pub(crate) fn span_layer<S>(tracer: opentelemetry_sdk::trace::Tracer) -> impl Layer<S> + use<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {

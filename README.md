@@ -66,6 +66,7 @@ not built yet.
 | `MANDATE_READ_HOSTS` | serve | Comma-separated hosts a page read may reach without approval |
 | `WORKOS_API_KEY`, `WORKOS_CLIENT_ID` | serve | WorkOS; without them `/v1/assertions` answers 503 and directory sync is off |
 | `MANDATE_WEB_ORIGIN`, `MANDATE_API_ORIGIN` | serve | The web app's origin (the only one CORS and CSRF accept) and this API's public origin (for the SSO callback); with WorkOS set, they turn on the web API under `/v1` |
+| `MANDATE_DEBUG_ROUTES` | serve | `1` mounts the admin-only `POST /v1/debug/error`, which forces a test error in the core or eve to check error tracking (off by default; infra `debug_routes`) |
 | `MANDATE_TRUST_CF_IP` | serve | `1` only behind Cloudflare: sign-in rate limits key on its `CF-Connecting-IP` when the peer is loopback (the tunnel sidecar); otherwise the peer address |
 | `MANDATE_BIND` | serve | Listen address (default `127.0.0.1:8080`) |
 | `MANDATE_POLICY_DIR` | serve | Cedar policies (default `policies`) |
