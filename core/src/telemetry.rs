@@ -19,7 +19,7 @@ use tracing::field::Empty;
 use tracing::{Instrument, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::layer::{Identity, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
@@ -69,7 +69,12 @@ pub fn init(
         )
         .with(span_layer(traces.tracer(SERVICE)))
         .with(logs.as_ref().map(log_layer))
-        .with(exceptions)
+        // Never an Option: tracing-subscriber's Option<Layer> drops on_register_dispatch, and
+        // without the dispatch the layer can't read a span's trace id.
+        .with(match exceptions {
+            Some(layer) => layer.boxed(),
+            None => Identity::new().boxed(),
+        })
         .try_init()
         .map_err(|_| TelemetryError::Installed)?;
     Ok(Telemetry { traces, logs })
