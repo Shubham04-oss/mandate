@@ -116,6 +116,23 @@ fn capture(env: &Envelope, event: &Event) -> Value {
             (name, Some(member.as_str()))
         }
         Event::OrganizationChosen { member } => ("org_chosen", Some(member.as_str())),
+        Event::EmailSent {
+            member,
+            template,
+            cause,
+        } => {
+            props.insert("template".into(), template.as_str().into());
+            props.insert("cause_event_id".into(), id(cause));
+            ("email_sent", Some(member.as_str()))
+        }
+        Event::EmailBounced { member, template } | Event::EmailComplained { member, template } => {
+            props.insert("template".into(), template.as_str().into());
+            let name = match event {
+                Event::EmailBounced { .. } => "email_bounced",
+                _ => "email_complained",
+            };
+            (name, Some(member.as_str()))
+        }
         Event::SettingChanged { by, setting } => {
             let setting = match setting {
                 Setting::TwoStep => "two_step",

@@ -56,9 +56,14 @@ Every type the core publishes. A test fails if one is missing here or listed her
 | `member.signed_in.v1` | `member`, `method` | every new session (`api::auth`) | `posthog` |
 | `organization.chosen.v1` | `member` | the organization picker (`api::auth`) | `posthog` |
 | `setting.changed.v1` | `by`, `setting` | turning two-step on (`api::auth`) | `posthog` |
+| `email.sent.v1` | `member`, `template`, `cause` | the `email` subscriber, once SES accepts an email (`cause` is the event that asked for it) | `posthog` |
+| `email.bounced.v1` | `member`, `template` | the SES feedback reader, on a permanent bounce | `posthog` |
+| `email.complained.v1` | `member`, `template` | the SES feedback reader, on a complaint | `posthog` |
 
 `member.*` and `organization.created.v1` are also written to `lifecycle_log` in the same
-transaction. Subscribers and the types they take are `local.consumers` in
+transaction. `email.bounced.v1` and `email.complained.v1` come from outside (SES, through
+the feedback queue only its EventBridge rule may write to) and are published by the core after it
+suppresses the address, as rule 8 of ORY-70 asks of outside sources. Subscribers and the types they take are `local.consumers` in
 `infra/envs/dev/events.tf`; the `email` subscriber exists only while `email_enabled` is on.
 
 ## Adding an event or a subscriber

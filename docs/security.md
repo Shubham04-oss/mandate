@@ -109,6 +109,30 @@ logs go to CloudWatch only, as before.
   core keeps every span and the collector samples, so no caller decides what is sampled.
 - **AI Gateway metadata** (`cf-aig-metadata`) carries ids only: tenant, agent, conversation, trace.
 
+## Email (ORY-81)
+
+- **Who gets it:** "approval waiting" goes to exactly the members who may decide the approval, by
+  the same rule (`decider!` in `api/approvals.rs`) the approve and deny endpoints enforce; a test
+  checks one against the other. Never another organization's members, never for a disabled agent or
+  a decided or expired approval.
+- **What it may contain:** the recipient's address, who asked, the agent's name, the organization's
+  name, when it expires, and a link to `/approvals` in the app. Never what the agent wants to do
+  (the tool or its arguments): that shows only after sign-in, so a lock screen or preview pane reveals
+  nothing (owner's call). Names come from people, so the core HTML-escapes them in the HTML part and
+  strips CR and LF from the subject and text part.
+- **What leaves the core with it:** SES message tags carry ids only (tenant, member, event, template)
+  and come back on bounces and complaints. Addresses never reach an event, a log, a span or PostHog;
+  the feedback reader hashes them on arrival.
+- **Feedback can't be forged from inside the account:** only the EventBridge rule for our
+  configuration set may write to the feedback queue. A permanent bounce or a complaint suppresses the
+  address for every organization; a transient bounce changes nothing.
+- **Never twice:** each email is claimed in `email_sends` before it is sent. If the outcome of a send
+  is lost (a crash between SES and the commit), that one email is not retried rather than risk a
+  duplicate.
+- **One bad address can't hold up the rest:** an email SES rejects for good (`BadRequestException`,
+  `MessageRejected`) keeps its claim and is not retried, and the other deciders still get theirs;
+  only errors that can pass (throttling, outages) retry, since the queue is ordered per organization.
+
 ## Dev network (infra/envs/dev)
 
 - The public API reaches the core only through a Cloudflare Tunnel: `cloudflared` beside the core

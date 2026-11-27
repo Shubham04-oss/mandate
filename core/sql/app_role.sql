@@ -50,6 +50,11 @@ grant select, insert on lifecycle_log to :"role";
 -- RLS-free consumer bookkeeping: the core only records; `on conflict do nothing` needs no SELECT.
 grant insert on events_inbox, events_quarantine to :"role";
 grant usage on sequence events_quarantine_id_seq to :"role";
+-- Email (RLS forced on sends): a claim is released (deleted) only when SES refused the send.
+grant select, insert, delete on email_sends to :"role";
+grant update (sent_at) on email_sends to :"role";
+-- Suppressions are only ever added; an address comes off the list by hand.
+grant select, insert on email_suppressions to :"role";
 
 -- Conversations (RLS forced). The core moves only a conversation's state, eve session and cursor;
 -- relayed events, approval links and calls are append-only.

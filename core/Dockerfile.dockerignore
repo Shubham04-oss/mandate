@@ -7,3 +7,7 @@
 !core/migrations
 !core/sql
 !policies
+!emails/package.json
+!emails/package-lock.json
+!emails/tsconfig.json
+!emails/src

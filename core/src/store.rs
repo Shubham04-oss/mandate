@@ -475,7 +475,8 @@ pub async fn consume_approval(
 }
 
 /// Reuses this member's unexpired pending approval for the same call instead of piling up rows.
-/// `args` are stored for the approver to see; `args_hash` must be their hash.
+/// `args` are stored for the approver to see; `args_hash` must be their hash. A new approval
+/// publishes `approval.requested.v1` in the same transaction; a reused one publishes nothing.
 pub async fn request_approval(
     tx: &mut Tx,
     agent: &AgentId,
@@ -515,6 +516,14 @@ pub async fn request_approval(
     .bind(member.as_str())
     .bind(now + APPROVAL_TTL)
     .execute(&mut **tx)
+    .await?;
+    crate::events::publish(
+        tx,
+        crate::events::Event::ApprovalRequested {
+            approval: id,
+            agent: agent.clone(),
+        },
+    )
     .await?;
     Ok(id)
 }

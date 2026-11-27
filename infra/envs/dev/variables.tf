@@ -129,6 +129,14 @@ variable "debug_routes" {
   default = false
 }
 
+# The core's own email through SES (email.tf): the email consumer, the configuration set, the bounce
+# and complaint queue, and the core's env and IAM to send. The domain identity is verified outside
+# tofu; the owner turns this on once it is (docs/deploy.md, Email).
+variable "email_enabled" {
+  type    = bool
+  default = false
+}
+
 # Percent of traces without an error that the collector keeps; traces with an error are always kept.
 # ponytail: tail sampling decides per trace, so every span must reach the same collector: below 100
 # the collector must stay a single task (no load-balancing exporter tier in front of it).

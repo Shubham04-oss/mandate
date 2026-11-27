@@ -351,6 +351,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-sesv2"
+version = "1.149.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d6c3db49c925ae4d9b59554de73d8f97fa66b683bd5417f6a261b8d5455fed0"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sqs"
 version = "1.119.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2453,6 +2478,7 @@ dependencies = [
  "aws-sdk-bedrockagentcore",
  "aws-sdk-bedrockruntime",
  "aws-sdk-eventbridgev2",
+ "aws-sdk-sesv2",
  "aws-sdk-sqs",
  "aws-sigv4",
  "axum",

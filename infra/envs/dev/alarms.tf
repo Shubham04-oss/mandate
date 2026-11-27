@@ -31,6 +31,25 @@ resource "aws_cloudwatch_metric_alarm" "dlq" {
   ok_actions         = [aws_sns_topic.alarms.arn]
 }
 
+# The same for SES bounces and complaints the core gave up on (email.tf).
+resource "aws_cloudwatch_metric_alarm" "email_feedback_dlq" {
+  count               = var.email_enabled ? 1 : 0
+  alarm_name          = "${local.name}-email-feedback-dlq-not-empty"
+  alarm_description   = "Messages in ${aws_sqs_queue.email_feedback_dead_letter[0].name}: the core is failing bounce or complaint notices"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions          = { QueueName = aws_sqs_queue.email_feedback_dead_letter[0].name }
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
+  # SQS stops reporting for an idle queue; an idle DLQ is the healthy state.
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
+}
+
 # A consumer that stopped reading: its oldest message is older than any retry would leave it. Only
 # the posthog queue may go unread on purpose (its consumer runs once telemetry is on).
 resource "aws_cloudwatch_metric_alarm" "consumer_stuck" {
