@@ -1,23 +1,15 @@
-import {
-  Body,
-  Button,
-  Container,
-  Head,
-  Html,
-  Img,
-  Link,
-  Preview,
-  Text,
-} from "@react-email/components";
+import { Body, Button, Container, Head, Html, Link, Preview, Text } from "@react-email/components";
 import type { CSSProperties, ReactNode } from "react";
-import { brand, font, type Scene, useField } from "./theme.ts";
+import { brand, FieldContext, fields, font, type Scene, useField } from "./theme.ts";
 
 const SUPPORT = "support@oryxa.in";
 
 /**
- * One picture behind the top of the email, faded into the page on every side (the fade is baked
- * into the JPG), with everything set straight on it: no panels, no cards. Where a mail app drops
- * background images (Outlook on Windows), the same words sit on the plain page colour.
+ * One picture per email, no panels or cards. On night it sits behind the top of the email and
+ * fades into the page on every side (baked into the JPG), with the words set straight on it. On
+ * light it is shown as it is, as a rounded frame holding the wordmark and the email's one key
+ * detail on glass, since a night sky cannot fade into a light page cleanly. Where a mail app drops
+ * background images (Outlook on Windows), the same words sit on a plain colour.
  */
 export function Layout(props: {
   assets: string;
@@ -25,6 +17,8 @@ export function Layout(props: {
   scene: Scene;
   /** Who the email went to, shown in the footer. */
   to: string;
+  /** The key detail set on glass inside the picture on light; night shows it in the flow instead. */
+  feature: ReactNode;
   children: ReactNode;
 }) {
   const f = useField();
@@ -64,31 +58,22 @@ export function Layout(props: {
                     padding: "36px 32px 44px",
                   }}
                 >
-                  <Wordmark color={f.wordmark} />
                   {f.overlay ? (
-                    // Leaves the sky clear before the words begin where the picture fades.
-                    <div
-                      style={{
-                        height: f.pictureClear,
-                        lineHeight: `${f.pictureClear}px`,
-                        fontSize: 1,
-                      }}
-                    >
-                      &nbsp;
-                    </div>
+                    <>
+                      <Wordmark color={f.wordmark} />
+                      {/* Leaves the sky clear before the words begin where the picture fades. */}
+                      <div
+                        style={{
+                          height: f.pictureClear,
+                          lineHeight: `${f.pictureClear}px`,
+                          fontSize: 1,
+                        }}
+                      >
+                        &nbsp;
+                      </div>
+                    </>
                   ) : (
-                    <Img
-                      src={picture}
-                      width="536"
-                      alt=""
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        height: "auto",
-                        margin: "28px 0 8px",
-                        borderRadius: 22,
-                      }}
-                    />
+                    <Frame picture={picture}>{props.feature}</Frame>
                   )}
                   {props.children}
                   <div
@@ -116,6 +101,69 @@ export function Layout(props: {
         </Container>
       </Body>
     </Html>
+  );
+}
+
+/** The picture as it is, rounded, holding the wordmark and night-coloured glass over it. */
+function Frame({ picture, children }: { picture: string; children: ReactNode }) {
+  // On the rounded cell itself, so no square corner of colour shows behind the radius.
+  const legacy = { background: picture, bgcolor: brand.space } as Record<string, string>;
+  return (
+    <table
+      width="100%"
+      cellPadding={0}
+      cellSpacing={0}
+      role="presentation"
+      style={{ marginBottom: 36 }}
+    >
+      <tbody>
+        <tr>
+          <td
+            {...legacy}
+            style={{
+              overflow: "hidden",
+              backgroundColor: brand.space,
+              backgroundImage: `url(${picture})`,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+              borderRadius: 24,
+              padding: "26px 24px 24px",
+            }}
+          >
+            <Wordmark color={fields.night.wordmark} />
+            <div style={{ height: 104, lineHeight: "104px", fontSize: 1 }}>&nbsp;</div>
+            <FieldContext.Provider value="picture">{children}</FieldContext.Provider>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  );
+}
+
+/** Shown only on night, where the feature sits in the flow rather than in the picture. */
+export function NightOnly({ children }: { children: ReactNode }) {
+  return useField().overlay ? children : null;
+}
+
+/** A small label over one strong line, on glass. */
+export function GlassNote({ label, value }: { label: ReactNode; value: ReactNode }) {
+  const f = useField();
+  return (
+    <div style={{ ...glass(f), margin: "28px 0 0", padding: "14px 18px" }}>
+      <Text style={{ margin: 0, fontSize: 13, lineHeight: "18px", color: f.ink2 }}>{label}</Text>
+      <Text
+        style={{
+          margin: "3px 0 0",
+          fontSize: 20,
+          lineHeight: "26px",
+          fontWeight: 600,
+          letterSpacing: "-0.015em",
+          color: f.headline,
+        }}
+      >
+        {value}
+      </Text>
+    </div>
   );
 }
 

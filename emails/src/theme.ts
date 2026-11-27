@@ -8,28 +8,38 @@ export const brand = {
   ember: "#d98e62",
 } as const;
 
-export type Field = "night" | "light";
+export type Field = "night" | "light" | "picture";
 
 /** Each email renders on both fields; everything that differs between them lives here. */
+const night = {
+  page: brand.space,
+  wordmark: "#eef0fa",
+  headline: "#ffffff",
+  ink2: "#aeb4d0",
+  ink3: "#8f96b8",
+  strong: "#eef0fa",
+  link: "#a3b2f5",
+  glass: "rgba(255,255,255,0.07)",
+  glassEdge: "rgba(255,255,255,0.14)",
+  hairline: "rgba(255,255,255,0.1)",
+  buttonFill: "#ffffff",
+  buttonLabel: brand.navy,
+  pictureSuffix: "",
+  // The night picture sits behind the words: 4:3, faded by its last fifth, words over its foot.
+  overlay: true,
+  pictureClear: 196,
+};
+
+// Glass set inside a picture: smoky rather than white, so it reads over bright ground and dark sky.
+const picture = {
+  ...night,
+  glass: "rgba(4,5,15,0.42)",
+  glassEdge: "rgba(255,255,255,0.22)",
+};
+
 export const fields = {
-  night: {
-    page: brand.space,
-    wordmark: "#eef0fa",
-    headline: "#ffffff",
-    ink2: "#aeb4d0",
-    ink3: "#8f96b8",
-    strong: "#eef0fa",
-    link: "#a3b2f5",
-    glass: "rgba(255,255,255,0.07)",
-    glassEdge: "rgba(255,255,255,0.14)",
-    hairline: "rgba(255,255,255,0.1)",
-    buttonFill: "#ffffff",
-    buttonLabel: brand.navy,
-    pictureSuffix: "",
-    // The night picture sits behind the words: 4:3, faded by its last fifth, words over its foot.
-    overlay: true,
-    pictureClear: 196,
-  },
+  night,
+  picture,
   light: {
     page: brand.moonlight,
     wordmark: brand.navy,

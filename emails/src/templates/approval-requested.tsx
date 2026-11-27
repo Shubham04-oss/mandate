@@ -1,4 +1,14 @@
-import { Action, Headline, Layout, Ledger, Meta, NeedsYou, Para } from "../layout.tsx";
+import {
+  Action,
+  GlassNote,
+  Headline,
+  Layout,
+  Ledger,
+  Meta,
+  NeedsYou,
+  NightOnly,
+  Para,
+} from "../layout.tsx";
 
 export const subject = "{{agent}} is waiting for your yes";
 
@@ -18,8 +28,16 @@ export default function ApprovalRequested(p: {
       preview={`${p.agent} is waiting for your decision.`}
       scene="moon-dawn-v2"
       to={p.email}
+      feature={
+        <>
+          <NeedsYou />
+          <GlassNote label={`${p.agent} wants to`} value={p.tool} />
+        </>
+      }
     >
-      <NeedsYou />
+      <NightOnly>
+        <NeedsYou />
+      </NightOnly>
       <Headline>{p.agent} is waiting for your yes</Headline>
       <Para>
         {p.requester} asked {p.agent} to do something that needs your approval. Nothing happens

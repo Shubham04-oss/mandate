@@ -1,4 +1,4 @@
-import { Action, Headline, Layout, Meta, Para } from "../layout.tsx";
+import { Action, GlassNote, Headline, Layout, Meta, Para } from "../layout.tsx";
 
 export const subject = "Reset your oryxa password";
 
@@ -14,6 +14,7 @@ export default function ResetPassword(p: {
       preview="Choose a new password for your account."
       scene="sky-veil-v2"
       to={p.email}
+      feature={<GlassNote label="Password reset for" value={p.email} />}
     >
       <Headline>Reset your password</Headline>
       <Para>
