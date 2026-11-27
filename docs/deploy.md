@@ -310,6 +310,37 @@ peer, so eve cannot forge it. cloudflared starts only once the core's health che
   tunnel (new id, new token, the CNAME follows) and the secret value; then run the deploy workflow
   (step 9) so the core restarts with the new token. The API is down between the apply and the roll.
 
+## Telemetry (off until you approve it)
+
+`telemetry_enabled` (default `false`) runs one OpenTelemetry Collector (`collector` service,
+0.25 vCPU / 512 MB on Spot, about $10/month with its public IP and logs) and points the core and
+eve at it (`OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.mandate-dev.internal:4318`). It is the only
+path telemetry takes to PostHog EU: it admits the core and eve only, keeps allowlisted attribute keys
+(ids, routes, codes, error types), masks emails, tokens, keys, long hex/base64, 6-digit codes and IPs,
+drops exception messages, stack traces and span status text, and forwards logs at WARN and above.
+CloudWatch still gets every log line. The config is `infra/envs/dev/collector/config.yaml.tftpl`; the
+allowlist and patterns are in `ecs.tf`, and the tests check both.
+
+Without the switch, a normal apply still creates the empty `mandate-dev/posthog-key` secret and the
+`posthog` event queue (the core's product-events consumer runs only once it has the key). To turn
+telemetry on, after you have approved the cost:
+
+```sh
+put posthog-key "$POSTHOG_PROJECT_KEY"   # the EU project's token (phc_...), not a personal key (phx_...)
+# dev.tfvars: telemetry_enabled = true
+tofu plan -var-file=dev.tfvars -out=dev.tfplan   # read it: collector service, role, group, rules
+tofu apply dev.tfplan
+gh workflow run deploy.yml --ref main            # rolls the core and eve onto the new env
+aws logs tail /mandate-dev/collector --follow    # no export errors
+```
+
+The core also gets `POSTHOG_API_KEY` and `POSTHOG_HOST` for product events. To turn it off, set the
+variable to `false`, apply, and run the deploy workflow again. `telemetry_sample_percent` (default
+100) keeps every error trace and that percentage of the rest; below 100 the collector must stay a
+single task. The image is from Docker Hub and pinned by digest in `ecs.tf`; to upgrade, change the tag
+comment and the digest together. The image has no shell, so the task has no container health check:
+ECS replaces it if the collector exits.
+
 ## Known limits (dev)
 
 - No NAT gateway and no VPC endpoints: every task, the one-off `migrate` and `db-bootstrap`

@@ -1,0 +1,75 @@
+# OpenTelemetry Collector config, rendered by ecs.tf into OTELCOL_CONFIG (--config=env:OTELCOL_CONFIG).
+# The one place telemetry leaves the VPC: only allowlisted attribute keys pass, and values matching
+# a blocked pattern are masked, before anything is exported to PostHog.
+receivers:
+  otlp:
+    protocols:
+      # OTLP/HTTP only: no gRPC listener.
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Fixed numbers, not percentages: a Fargate container may not see the task's limit as its cgroup's.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+%{ if sample_percent < 100 ~}
+  # Every trace with an error, and sample_percent of the rest (policies are ORed).
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: the-rest
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: ${sample_percent}
+%{ endif ~}
+  # Backstop: the services send only warn and error logs; anything below WARN (or with no
+  # severity) is dropped here. CloudWatch keeps every log line.
+  filter/warn:
+    error_mode: propagate
+    log_conditions:
+      - log.severity_number < SEVERITY_NUMBER_WARN
+  # Resource, scope, span, span event and log attributes: keys not listed are removed, so
+  # exception.message and exception.stacktrace on exception events never leave (exception.type does).
+  # Log bodies: a text body is masked with blocked_values; a map body loses unlisted keys too.
+  redaction:
+    allow_all_keys: false
+    allowed_keys: ${jsonencode(allowed_keys)}
+    # 32-hex trace ids would match the long-hex rule; they are kept unchecked.
+    ignored_keys: [trace_id, span_id]
+    blocked_values: ${jsonencode(blocked_values)}
+    # Counts only: the names of removed keys could hint at what they held.
+    summary: info
+  # What redaction does not touch: a span's status message is usually the error's text, so it goes
+  # (error.type stays); span and event names (an event's name is its log message) are masked like
+  # values. propagate: a failing statement drops the batch instead of sending it unscrubbed.
+  transform:
+    error_mode: propagate
+    trace_statements:
+      - statements: ${jsonencode(span_statements)}
+      - statements: ${jsonencode(span_event_statements)}
+  batch: {}
+
+exporters:
+  # PostHog's OTLP endpoints are under /i/v1, not the default /v1, so each is set in full.
+  otlphttp/posthog:
+    traces_endpoint: ${posthog_host}/i/v1/traces
+    logs_endpoint: ${posthog_host}/i/v1/logs
+    headers:
+      Authorization: Bearer $${env:POSTHOG_API_KEY}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, ${sample_percent < 100 ? "tail_sampling, " : ""}redaction, transform, batch]
+      exporters: [otlphttp/posthog]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/warn, redaction, batch]
+      exporters: [otlphttp/posthog]

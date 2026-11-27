@@ -3,6 +3,12 @@
 locals {
   consumers = {
     "agent-resume" = ["approval.decided.v1"]
+    # Ids-only product events to PostHog's /batch. Always here, so the core starts whenever the key appears.
+    "posthog" = [
+      "approval.requested.v1", "approval.decided.v1", "conversation.started.v1", "conversation.finished.v1",
+      "grant.created.v1", "grant.revoked.v1", "member.created.v1", "member.updated.v1", "member.removed.v1",
+      "organization.created.v1",
+    ]
   }
 }
 

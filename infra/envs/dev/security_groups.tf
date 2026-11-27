@@ -105,3 +105,45 @@ resource "aws_vpc_security_group_ingress_rule" "db" {
   from_port                    = 5432
   to_port                      = 5432
 }
+
+# The telemetry collector: the core and eve in on OTLP/HTTP; HTTPS (PostHog, AWS APIs) out, nothing else.
+resource "aws_security_group" "collector" {
+  count       = var.telemetry_enabled ? 1 : 0
+  name        = "${local.name}-collector"
+  description = "The OTel collector: the core and eve in (OTLP/HTTP); HTTPS out"
+  vpc_id      = aws_vpc.main.id
+}
+
+locals {
+  # The services that send telemetry, and so reach the collector.
+  telemetry_senders = var.telemetry_enabled ? { core = aws_security_group.core.id, eve = aws_security_group.eve.id } : {}
+}
+
+resource "aws_vpc_security_group_ingress_rule" "collector" {
+  for_each                     = local.telemetry_senders
+  security_group_id            = aws_security_group.collector[0].id
+  referenced_security_group_id = each.value
+  ip_protocol                  = "tcp"
+  from_port                    = 4318
+  to_port                      = 4318
+}
+
+resource "aws_vpc_security_group_egress_rule" "to_collector" {
+  for_each                     = local.telemetry_senders
+  security_group_id            = each.value
+  referenced_security_group_id = aws_security_group.collector[0].id
+  ip_protocol                  = "tcp"
+  from_port                    = 4318
+  to_port                      = 4318
+}
+
+# Like the tasks' https rule: the public IP stands in for a NAT gateway (Docker Hub, logs, Secrets
+# Manager, PostHog). Not in task_security_groups, so the collector gets no database rules.
+resource "aws_vpc_security_group_egress_rule" "collector_https" {
+  count             = var.telemetry_enabled ? 1 : 0
+  security_group_id = aws_security_group.collector[0].id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+}

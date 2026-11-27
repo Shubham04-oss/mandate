@@ -114,3 +114,22 @@ variable "alarm_email" {
   type    = string
   default = null
 }
+
+# The OpenTelemetry collector (ecs.tf) and the OTEL/PostHog env on the core and eve. Put a value in
+# the posthog-key secret before turning it on (docs/deploy.md, Telemetry).
+variable "telemetry_enabled" {
+  type    = bool
+  default = false
+}
+
+# Percent of traces without an error that the collector keeps; traces with an error are always kept.
+# ponytail: tail sampling decides per trace, so every span must reach the same collector: below 100
+# the collector must stay a single task (no load-balancing exporter tier in front of it).
+variable "telemetry_sample_percent" {
+  type    = number
+  default = 100
+  validation {
+    condition     = var.telemetry_sample_percent > 0 && var.telemetry_sample_percent <= 100
+    error_message = "telemetry_sample_percent is a percentage above 0 and at most 100"
+  }
+}
