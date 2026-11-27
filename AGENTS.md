@@ -48,6 +48,12 @@ docs/     design, security, deploy, decisions
 
 - **The core decides; eve never does.** Do not add access logic, credential handling or tenant
   selection to `agents/` or `web/`.
+- **Event-driven (ORY-70).** A state change publishes its event in the same transaction
+  (`events::publish`); everything that follows (notifications, email, analytics, Slack…) is its own
+  subscriber on the EventBridge bus with its own queue and DLQ, idempotent by event id. Never call
+  another feature directly after a state change. Security consequences (revoking access, consuming
+  an approval, audit) stay in the transaction, never in a subscriber. Events carry ids only and
+  change additively.
 - **Smallest change that fully solves the task.** No speculative abstractions. Match surrounding code.
 - **Rust:** `thiserror` in libraries; no `unwrap`/`expect` outside tests and `main`; validated id
   types instead of raw strings; `cargo fmt`, `cargo clippy -- -D warnings`, `cargo deny check` pass.
