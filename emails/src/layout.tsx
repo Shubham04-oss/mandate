@@ -1,13 +1,23 @@
-import { Body, Button, Container, Head, Html, Link, Preview, Text } from "@react-email/components";
+import {
+  Body,
+  Button,
+  Container,
+  Head,
+  Html,
+  Img,
+  Link,
+  Preview,
+  Text,
+} from "@react-email/components";
 import type { CSSProperties, ReactNode } from "react";
-import { color, font, type Scene } from "./theme.ts";
+import { brand, font, type Scene, useField } from "./theme.ts";
 
 const SUPPORT = "support@oryxa.in";
 
 /**
- * One picture behind the top of the email, faded into the night page (the fade is baked into the
- * JPG), with everything set straight on it: no panels, no cards. Where a mail app drops
- * background images (Outlook on Windows), the same words sit on plain night.
+ * One picture behind the top of the email, faded into the page on every side (the fade is baked
+ * into the JPG), with everything set straight on it: no panels, no cards. Where a mail app drops
+ * background images (Outlook on Windows), the same words sit on the plain page colour.
  */
 export function Layout(props: {
   assets: string;
@@ -17,45 +27,83 @@ export function Layout(props: {
   to: string;
   children: ReactNode;
 }) {
-  const picture = `${props.assets}/${props.scene}.jpg`;
+  const f = useField();
+  const picture = `${props.assets}/${props.scene}${f.pictureSuffix}.jpg`;
   // The legacy `background` attribute reaches the mail apps that ignore the CSS one.
-  const legacy = { background: picture, bgcolor: color.space } as Record<string, string>;
+  const legacy = (
+    f.overlay ? { background: picture, bgcolor: f.page } : { bgcolor: f.page }
+  ) as Record<string, string>;
+  const scheme = f.page === brand.space ? "dark" : "light";
+  const footer: CSSProperties = { margin: 0, fontSize: 13, lineHeight: "19px", color: f.ink3 };
   return (
     <Html lang="en">
       <Head>
-        {/* Declared so mail apps keep these colours instead of inverting them in dark mode. */}
-        <meta name="color-scheme" content="dark" />
-        <meta name="supported-color-schemes" content="dark" />
+        {/* Declared so mail apps keep these colours instead of inverting them. */}
+        <meta name="color-scheme" content={scheme} />
+        <meta name="supported-color-schemes" content={scheme} />
         <link
           rel="stylesheet"
           href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
         />
       </Head>
       <Preview>{props.preview}</Preview>
-      <Body style={body}>
-        <Container style={container}>
+      <Body style={{ margin: 0, backgroundColor: f.page, fontFamily: font }}>
+        <Container style={{ maxWidth: 600, padding: "16px 0 32px" }}>
           <table width="100%" cellPadding={0} cellSpacing={0} role="presentation" {...legacy}>
             <tbody>
               <tr>
                 <td
                   style={{
-                    backgroundColor: color.space,
-                    backgroundImage: `url(${picture})`,
-                    backgroundSize: "100% auto",
-                    backgroundPosition: "top center",
-                    backgroundRepeat: "no-repeat",
+                    backgroundColor: f.page,
+                    ...(f.overlay && {
+                      backgroundImage: `url(${picture})`,
+                      backgroundSize: "100% auto",
+                      backgroundPosition: "top center",
+                      backgroundRepeat: "no-repeat",
+                    }),
                     padding: "36px 32px 44px",
                   }}
                 >
-                  <Wordmark />
-                  {/* Leaves the sky clear before the words begin where the picture fades. */}
-                  <div style={{ height: 196, lineHeight: "196px", fontSize: 1 }}>&nbsp;</div>
+                  <Wordmark color={f.wordmark} />
+                  {f.overlay ? (
+                    // Leaves the sky clear before the words begin where the picture fades.
+                    <div
+                      style={{
+                        height: f.pictureClear,
+                        lineHeight: `${f.pictureClear}px`,
+                        fontSize: 1,
+                      }}
+                    >
+                      &nbsp;
+                    </div>
+                  ) : (
+                    <Img
+                      src={picture}
+                      width="536"
+                      alt=""
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        height: "auto",
+                        margin: "28px 0 8px",
+                        borderRadius: 22,
+                      }}
+                    />
+                  )}
                   {props.children}
-                  <div style={rule} />
-                  <Wordmark small />
+                  <div
+                    style={{
+                      height: 1,
+                      lineHeight: "1px",
+                      fontSize: 1,
+                      margin: "44px 0 28px",
+                      backgroundColor: f.hairline,
+                    }}
+                  />
+                  <Wordmark color={f.strong} small />
                   <Text style={{ ...footer, marginTop: 12 }}>
                     Sent to {props.to}. Questions? Write to{" "}
-                    <Link href={`mailto:${SUPPORT}`} style={{ color: color.nightInk2 }}>
+                    <Link href={`mailto:${SUPPORT}`} style={{ color: f.ink2 }}>
                       {SUPPORT}
                     </Link>
                     .
@@ -71,10 +119,19 @@ export function Layout(props: {
   );
 }
 
-function Wordmark({ small = false }: { small?: boolean }) {
+function Wordmark({ color, small = false }: { color: string; small?: boolean }) {
   const size = small ? 17 : 22;
   return (
-    <Text style={{ ...wordmark, fontSize: size, lineHeight: `${size}px` }}>
+    <Text
+      style={{
+        margin: 0,
+        fontSize: size,
+        lineHeight: `${size}px`,
+        fontWeight: 700,
+        letterSpacing: "-0.055em",
+        color,
+      }}
+    >
       oryxa
       <span style={dot} />
     </Text>
@@ -82,39 +139,87 @@ function Wordmark({ small = false }: { small?: boolean }) {
 }
 
 export function Headline({ children }: { children: ReactNode }) {
-  return <Text style={headline}>{children}</Text>;
+  const f = useField();
+  return (
+    <Text
+      style={{
+        margin: 0,
+        fontSize: 32,
+        lineHeight: "36px",
+        fontWeight: 600,
+        letterSpacing: "-0.025em",
+        color: f.headline,
+      }}
+    >
+      {children}
+    </Text>
+  );
 }
 
 export function Para({ children }: { children: ReactNode }) {
-  return <Text style={para}>{children}</Text>;
+  const f = useField();
+  return (
+    <Text style={{ margin: "14px 0 0", fontSize: 16, lineHeight: "25px", color: f.ink2 }}>
+      {children}
+    </Text>
+  );
 }
 
 export function Meta({ children }: { children: ReactNode }) {
-  return <Text style={meta}>{children}</Text>;
+  const f = useField();
+  return <Text style={meta(f.ink3)}>{children}</Text>;
 }
 
 /** A one-time code on a strip of glass, large and spaced for reading off one screen into another. */
 export function Code({ value }: { value: string }) {
+  const f = useField();
   return (
-    <div style={{ ...glass, margin: "28px 0 0", padding: "20px 24px" }}>
-      <Text style={code}>{value}</Text>
+    <div style={{ ...glass(f), margin: "28px 0 0", padding: "20px 24px" }}>
+      <Text
+        style={{
+          margin: 0,
+          fontSize: 32,
+          lineHeight: "36px",
+          fontWeight: 600,
+          letterSpacing: "0.3em",
+          fontVariantNumeric: "tabular-nums",
+          color: f.headline,
+        }}
+      >
+        {value}
+      </Text>
     </div>
   );
 }
 
 /** The one action, with its link spelled out under it for mail apps that drop buttons. */
 export function Action({ href, children }: { href: string; children: ReactNode }) {
+  const f = useField();
   return (
     <>
       <div style={{ margin: "30px 0 0" }}>
-        <Button href={href} style={button}>
+        <Button
+          href={href}
+          style={{
+            display: "inline-block",
+            backgroundColor: f.buttonFill,
+            color: f.buttonLabel,
+            borderRadius: 9999,
+            padding: "13px 22px",
+            fontSize: 15,
+            lineHeight: "15px",
+            fontWeight: 600,
+            letterSpacing: "-0.01em",
+            textDecoration: "none",
+          }}
+        >
           {children}&nbsp;&nbsp;→
         </Button>
       </div>
-      <Text style={{ ...meta, marginTop: 22 }}>
+      <Text style={{ ...meta(f.ink3), marginTop: 22 }}>
         Or paste this link into your browser:
         <br />
-        <Link href={href} style={{ color: color.periwinkle, wordBreak: "break-all" }}>
+        <Link href={href} style={{ color: f.link, wordBreak: "break-all" }}>
           {href}
         </Link>
       </Text>
@@ -124,6 +229,14 @@ export function Action({ href, children }: { href: string; children: ReactNode }
 
 /** Label and value rows split by faint hairlines, straight on the page. */
 export function Ledger({ rows }: { rows: [string, ReactNode][] }) {
+  const f = useField();
+  const cell: CSSProperties = {
+    padding: "12px 0",
+    borderTop: `1px solid ${f.hairline}`,
+    fontSize: 14,
+    lineHeight: "20px",
+    verticalAlign: "top",
+  };
   return (
     <table
       width="100%"
@@ -135,8 +248,8 @@ export function Ledger({ rows }: { rows: [string, ReactNode][] }) {
       <tbody>
         {rows.map(([label, value]) => (
           <tr key={label}>
-            <td style={{ ...ledgerCell, color: color.nightInk3, width: 112 }}>{label}</td>
-            <td style={{ ...ledgerCell, color: color.nightInk, fontWeight: 500 }}>{value}</td>
+            <td style={{ ...cell, color: f.ink3, width: 112 }}>{label}</td>
+            <td style={{ ...cell, color: f.strong, fontWeight: 500 }}>{value}</td>
           </tr>
         ))}
       </tbody>
@@ -146,110 +259,44 @@ export function Ledger({ rows }: { rows: [string, ReactNode][] }) {
 
 /** A glass status pill; the gold ember dot appears only for what needs the person. */
 export function NeedsYou() {
+  const f = useField();
   return (
-    <Text style={pill}>
+    <Text
+      style={{
+        ...glass(f),
+        display: "inline-block",
+        margin: "0 0 18px",
+        padding: "5px 12px",
+        borderRadius: 9999,
+        fontSize: 12,
+        lineHeight: "16px",
+        fontWeight: 500,
+        color: f.strong,
+      }}
+    >
       <span style={{ ...dot, width: 7, height: 7, borderRadius: 4, margin: "0 7px 1px 0" }} />
       Needs you
     </Text>
   );
 }
 
-const body: CSSProperties = {
-  margin: 0,
-  backgroundColor: color.space,
-  fontFamily: font,
-  WebkitFontSmoothing: "antialiased",
-};
-const container: CSSProperties = { maxWidth: 600, padding: "16px 0 32px" };
-// White at low alpha over the picture or the night reads as glass; mail apps cannot blur.
-const glass: CSSProperties = {
-  backgroundColor: "rgba(255,255,255,0.07)",
-  border: "1px solid rgba(255,255,255,0.14)",
+// Translucent fill with a fine edge reads as glass over the picture; mail apps cannot blur.
+const glass = (f: { glass: string; glassEdge: string }): CSSProperties => ({
+  backgroundColor: f.glass,
+  border: `1px solid ${f.glassEdge}`,
   borderRadius: 18,
-};
-const wordmark: CSSProperties = {
-  margin: 0,
-  fontWeight: 700,
-  letterSpacing: "-0.055em",
-  color: color.nightInk,
-};
+});
+const meta = (color: string): CSSProperties => ({
+  margin: "24px 0 0",
+  fontSize: 14,
+  lineHeight: "21px",
+  color,
+});
 const dot: CSSProperties = {
   display: "inline-block",
   width: "0.2em",
   height: "0.2em",
   marginLeft: "0.1em",
   borderRadius: "0.14em",
-  backgroundColor: color.ember,
-};
-const headline: CSSProperties = {
-  margin: 0,
-  fontSize: 32,
-  lineHeight: "36px",
-  fontWeight: 600,
-  letterSpacing: "-0.025em",
-  color: "#ffffff",
-};
-const para: CSSProperties = {
-  margin: "14px 0 0",
-  fontSize: 16,
-  lineHeight: "25px",
-  color: color.nightInk2,
-};
-const meta: CSSProperties = {
-  margin: "24px 0 0",
-  fontSize: 14,
-  lineHeight: "21px",
-  color: color.nightInk3,
-};
-const code: CSSProperties = {
-  margin: 0,
-  fontSize: 32,
-  lineHeight: "36px",
-  fontWeight: 600,
-  letterSpacing: "0.3em",
-  fontVariantNumeric: "tabular-nums",
-  color: "#ffffff",
-};
-const button: CSSProperties = {
-  display: "inline-block",
-  backgroundColor: "#ffffff",
-  color: color.navy,
-  borderRadius: 9999,
-  padding: "13px 22px",
-  fontSize: 15,
-  lineHeight: "15px",
-  fontWeight: 600,
-  letterSpacing: "-0.01em",
-  textDecoration: "none",
-};
-const ledgerCell: CSSProperties = {
-  padding: "12px 0",
-  borderTop: "1px solid rgba(255,255,255,0.1)",
-  fontSize: 14,
-  lineHeight: "20px",
-  verticalAlign: "top",
-};
-const pill: CSSProperties = {
-  ...glass,
-  display: "inline-block",
-  margin: "0 0 18px",
-  padding: "5px 12px",
-  borderRadius: 9999,
-  fontSize: 12,
-  lineHeight: "16px",
-  fontWeight: 500,
-  color: color.nightInk,
-};
-const rule: CSSProperties = {
-  height: 1,
-  lineHeight: "1px",
-  fontSize: 1,
-  margin: "44px 0 28px",
-  backgroundColor: "rgba(255,255,255,0.1)",
-};
-const footer: CSSProperties = {
-  margin: 0,
-  fontSize: 13,
-  lineHeight: "19px",
-  color: color.nightInk3,
+  backgroundColor: brand.ember,
 };

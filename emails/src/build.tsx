@@ -1,5 +1,5 @@
-// Renders each template to dist/<name>.html and .txt with {{placeholders}} the core fills in, and
-// with --preview, to preview/<name>.html filled with sample values instead.
+// Renders each template to dist/<name>.html (night), <name>.light.html and <name>.txt with
+// {{placeholders}} the core fills in, and with --preview, to preview/ filled with sample values.
 import { mkdir, writeFile } from "node:fs/promises";
 import { render } from "@react-email/components";
 import type { ComponentType } from "react";
@@ -8,6 +8,7 @@ import Invitation, * as invitation from "./templates/invitation.tsx";
 import ResetPassword, * as resetPassword from "./templates/reset-password.tsx";
 import SignInCode, * as signInCode from "./templates/sign-in-code.tsx";
 import VerifyEmail, * as verifyEmail from "./templates/verify-email.tsx";
+import { type Field, FieldContext } from "./theme.ts";
 
 type Props = Record<string, string>;
 type Template = { subject: string; component: ComponentType<Props>; sample: Props };
@@ -76,10 +77,18 @@ for (const [name, t] of Object.entries(templates)) {
   const props: Props = preview
     ? t.sample
     : Object.fromEntries(keys.map((k) => [k, `{{${snake(k)}}}`]));
-  const el = <t.component assets={assets} {...props} />;
   const subject = preview ? fill(t.subject, t.sample) : t.subject;
-  await writeFile(`${out}/${name}.html`, await render(el));
-  await writeFile(`${out}/${name}.txt`, await render(el, { plainText: true }));
+  for (const field of ["night", "light"] as Field[]) {
+    const el = (
+      <FieldContext.Provider value={field}>
+        <t.component assets={assets} {...props} />
+      </FieldContext.Provider>
+    );
+    const html = field === "night" ? `${name}.html` : `${name}.light.html`;
+    await writeFile(`${out}/${html}`, await render(el));
+    if (field === "night")
+      await writeFile(`${out}/${name}.txt`, await render(el, { plainText: true }));
+  }
   manifest[name] = { subject, placeholders: keys.map(snake) };
 }
 await writeFile(`${out}/manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
