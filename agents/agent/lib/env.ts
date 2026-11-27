@@ -13,6 +13,11 @@ export function envProblems(env: NodeJS.ProcessEnv): string[] {
     else if (!URL.canParse(env[name])) problems.push(`${name} is not a valid URL`);
   }
   for (const name of REQUIRED) if (!env[name]) problems.push(`${name} is not set`);
+  // Optional (tracing is off without it), but a typo should not silently drop every span.
+  const otlp = env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  if (otlp && !(URL.canParse(otlp) && /^https?:$/.test(new URL(otlp).protocol))) {
+    problems.push("OTEL_EXPORTER_OTLP_ENDPOINT is not an http(s) URL");
+  }
   if (!env.MANDATE_ASSERTION_PUBLIC_KEY) problems.push("MANDATE_ASSERTION_PUBLIC_KEY is not set");
   else {
     try {
