@@ -77,15 +77,21 @@ function SignInCode({
   return (
     <Html lang="en">
       <Head>
+        <title>Your sign-in code</title>
+        {/* Stops iOS turning the code, dates and addresses into blue links. */}
+        <meta name="format-detection" content="telephone=no,date=no,address=no,email=no,url=no" />
         <meta name="color-scheme" content={l.scheme} />
         <meta name="supported-color-schemes" content={l.scheme} />
         <link
           rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+          // One variable file covers 400 to 700, instead of four separate weights.
+          href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400..700&display=swap"
         />
         {/* On phones the dark picture is shorter, so the code moves up to stay on it. */}
         <style>
-          {"@media (max-width:480px){.pic-gap{height:20px!important;line-height:20px!important}}"}
+          {"@media (max-width:480px){.pic-gap{height:20px!important;line-height:20px!important}}" +
+            // Links iOS still detects take the surrounding colour instead of default blue.
+            "a[x-apple-data-detectors]{color:inherit!important;text-decoration:none!important}"}
         </style>
       </Head>
       <Preview>Enter it on the sign-in page to continue.</Preview>
@@ -93,7 +99,9 @@ function SignInCode({
         <Container style={{ maxWidth: 600, padding: "52px 32px 40px" }}>
           <Wordmark size={22} color={l.strong} />
 
-          <Text style={{ ...headline, color: l.headline }}>Your sign-in code is ready.</Text>
+          <Text role="heading" aria-level={1} style={{ ...headline, color: l.headline }}>
+            Your sign-in code is ready.
+          </Text>
           <Text style={{ ...sub, color: l.ink2 }}>
             Enter it on the sign-in page to continue as{" "}
             <span style={{ color: l.strong }}>{email}</span>.
@@ -118,6 +126,7 @@ function SignInCode({
                     ...l.figure,
                   }}
                 >
+                  <div data-vml="open" />
                   <Text style={chip}>Sign-in code</Text>
                   <div
                     className={l.scheme === "dark" ? "pic-gap" : undefined}
@@ -126,12 +135,16 @@ function SignInCode({
                     &nbsp;
                   </div>
                   <div style={glass}>
-                    <Text style={codeStyle}>{code}</Text>
+                    {/* One tap selects the whole code, ready to copy. */}
+                    <Text style={codeStyle}>
+                      <span style={{ userSelect: "all", WebkitUserSelect: "all" }}>{code}</span>
+                    </Text>
                     <Text style={expires}>
                       <span style={waiting} />
                       Expires in {expiresIn}
                     </Text>
                   </div>
+                  <div data-vml="close" />
                 </td>
               </tr>
             </tbody>
@@ -232,10 +245,40 @@ const nebulaLine: CSSProperties = {
 };
 const foot: CSSProperties = { margin: 0, fontSize: 13, lineHeight: "19px" };
 
+// Outlook on Windows ignores CSS backgrounds; a VML shape behind the figure gives it the picture
+// too. React cannot write conditional comments, so markers are swapped after rendering.
+function vml(html: string, picture: string, rounded: boolean) {
+  const shape = rounded ? 'v:roundrect arcsize="9%"' : "v:rect";
+  const tag = rounded ? "v:roundrect" : "v:rect";
+  const open = `<!--[if gte mso 9]><${shape} xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:536px;mso-fit-shape-to-text:true"><v:fill type="frame" src="${picture}" color="${brand.space}"/><v:textbox inset="0,0,0,0"><![endif]-->`;
+  const close = `<!--[if gte mso 9]></v:textbox></${tag}><![endif]-->`;
+  return (
+    html
+      .replace('<div data-vml="open"></div>', open)
+      .replace('<div data-vml="close"></div>', close)
+      .replace(/<!--\/?\$-->|<!--\/?(html|head|body)-->/g, "")
+      // Namespaces for the VML, and 96 DPI so Outlook does not rescale pictures on large displays.
+      .replace(
+        "<html ",
+        '<html xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" ',
+      )
+      .replace(
+        "</head>",
+        "<!--[if mso]><xml><o:OfficeDocumentSettings><o:AllowPNG/><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]--></head>",
+      )
+  );
+}
+
 await mkdir("preview", { recursive: true });
 for (const [name, l] of Object.entries(looks)) {
   await writeFile(
     `preview/prototype-picture-${name}.html`,
-    await render(<SignInCode l={l} email="priya@acme.com" code="482913" expiresIn="10 minutes" />),
+    vml(
+      await render(
+        <SignInCode l={l} email="priya@acme.com" code="482913" expiresIn="10 minutes" />,
+      ),
+      l.picture,
+      name === "light",
+    ),
   );
 }
