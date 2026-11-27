@@ -1,8 +1,9 @@
 import type { CaptureResult } from "posthog-js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	cleanProps,
 	config,
+	forceTestError,
 	lengthBucket,
 	scrubEvent,
 	waitedMs,
@@ -260,5 +261,17 @@ describe("the PostHog config", () => {
 			distinctID: "user_01",
 			isIdentifiedID: true,
 		});
+	});
+});
+
+describe("the forced test error", () => {
+	it("throws an uncaught Error on the next tick, not in the caller", () => {
+		vi.useFakeTimers();
+		try {
+			expect(() => forceTestError()).not.toThrow();
+			expect(() => vi.runAllTimers()).toThrow(new Error("forced test error"));
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

@@ -137,6 +137,11 @@ describe("what posthog-js sends", () => {
 			expect(body).not.toContain("SECRET");
 			expect(body).not.toContain("idp.example.com");
 		}
+		// The console hook for the live error-tracking check is there once PostHog runs.
+		expect(
+			typeof (globalThis as { __mandateTestError?: unknown })
+				.__mandateTestError,
+		).toBe("function");
 		// No script was added to the page: nothing loads from PostHog's CDN.
 		expect(created).not.toContain("script");
 

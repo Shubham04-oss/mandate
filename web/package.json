@@ -13,7 +13,9 @@
     "format": "biome format",
     "lint": "biome lint",
     "check": "biome check",
-    "deploy": "CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.oryxa.in npm run build && wrangler deploy --env dev",
+    "build:dev": "CLOUDFLARE_ENV=dev VITE_MANDATE_API_URL=https://api.oryxa.in npm run build",
+    "drop-maps": "find dist/client -name '*.map' -delete",
+    "deploy": "npm run build:dev && npm run drop-maps && wrangler deploy --env dev",
     "test": "vitest run",
     "test:dist": "vitest run --config vitest.dist.config.ts"
   },
