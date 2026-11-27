@@ -63,7 +63,7 @@ pub fn init(export: bool) -> Result<Telemetry, TelemetryError> {
                 .json()
                 .with_writer(std::io::stderr),
         )
-        .with(tracing_opentelemetry::layer().with_tracer(traces.tracer(SERVICE)))
+        .with(span_layer(traces.tracer(SERVICE)))
         .with(logs.as_ref().map(log_layer))
         .try_init()
         .map_err(|_| TelemetryError::Installed)?;
@@ -73,6 +73,17 @@ pub fn init(export: bool) -> Result<Telemetry, TelemetryError> {
 fn resource() -> Resource {
     let service = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| SERVICE.into());
     Resource::builder().with_service_name(service).build()
+}
+
+/// Spans only: a log line would otherwise ride along as a span event, info text included. Warn and
+/// error leave as logs (`log_layer`), joined to the trace by id.
+fn span_layer<S>(tracer: opentelemetry_sdk::trace::Tracer) -> impl Layer<S> + use<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| meta.is_span()))
 }
 
 /// Warn and error only: info stays in CloudWatch, where it is free (owner's call, ORY-61).
@@ -198,13 +209,14 @@ mod tests {
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
-        let subscriber = Registry::default()
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let subscriber = Registry::default().with(span_layer(provider.tracer("test")));
         let app = Router::new()
             .route(
                 "/v1/things/{id}",
                 get(|| async {
                     record_tenant("acme");
+                    tracing::info!("routine ann@example.com");
+                    tracing::warn!("odd");
                     "ok"
                 }),
             )
@@ -248,6 +260,8 @@ mod tests {
             Some("200")
         );
         assert_eq!(attr(span, "tenant.id").as_deref(), Some("acme"));
+        // Log lines are not span events: info stays in CloudWatch, warn+ goes out as a log.
+        assert!(span.events.is_empty(), "{:?}", span.events);
         let all = format!("{span:?}");
         assert!(!all.contains("secret-id-123") && !all.contains("999999"));
         // The log field and the exported span agree on the trace.
@@ -305,7 +319,7 @@ mod tests {
             .build();
         let traces = SdkTracerProvider::builder().build();
         let subscriber = Registry::default()
-            .with(tracing_opentelemetry::layer().with_tracer(traces.tracer("test")))
+            .with(span_layer(traces.tracer("test")))
             .with(log_layer(&logs));
         let trace = with_default(subscriber, || {
             let span = tracing::info_span!("request");
@@ -330,8 +344,7 @@ mod tests {
     #[test]
     fn inject_writes_the_current_spans_traceparent() {
         let provider = SdkTracerProvider::builder().build();
-        let subscriber = Registry::default()
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let subscriber = Registry::default().with(span_layer(provider.tracer("test")));
         with_default(subscriber, || {
             let span = tracing::info_span!("outer");
             let _g = span.enter();
