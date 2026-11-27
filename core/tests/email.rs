@@ -16,7 +16,6 @@ use mandate::events::{EmailTemplate, Envelope, Event, EventType, Source, consume
 use mandate::ids::{AgentId, MemberId, TenantId};
 use mandate::store::Store;
 use serde_json::json;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -25,17 +24,15 @@ use uuid::Uuid;
 #[derive(Default)]
 struct Outbox {
     sent: Mutex<Vec<Mail>>,
-    refuse: AtomicUsize,
+    refuse: Mutex<usize>,
 }
 
 #[async_trait]
 impl Mailer for Outbox {
     async fn send(&self, mail: &Mail) -> Result<(), MailError> {
-        if self
-            .refuse
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
+        let mut refuse = self.refuse.lock().unwrap();
+        if *refuse > 0 {
+            *refuse -= 1;
             return Err(MailError::Refused("Throttling".into()));
         }
         self.sent.lock().unwrap().push(mail.clone());
@@ -312,7 +309,7 @@ async fn a_refused_send_releases_its_claim_and_the_retry_sends() {
     let s = app_store().await;
     let t = org(&s).await;
     let r = rig(s.clone());
-    r.mail.refuse.store(1, Ordering::SeqCst);
+    *r.mail.refuse.lock().unwrap() = 1;
     let id = ask(&s, &t, "ann-bot", "bob", json!({ "n": 1 })).await;
     let raw = r.delivery(&t, id, "ann-bot");
     assert_eq!(r.deliver(&raw).await, Outcome::Failed);
