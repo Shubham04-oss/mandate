@@ -77,18 +77,34 @@ Everything is off until the owner adds the PostHog key and sets `telemetry_enabl
 logs go to CloudWatch only, as before.
 
 - **What leaves:** spans (route pattern, method, status, tenant id, trace id, timings), warn and
-  error logs, product events, and in the browser page views by route pattern, exceptions and
-  Web Vitals. All of it goes to PostHog (EU). Info logs stay in CloudWatch.
+  error logs, product events, errors (`$exception`: type, file and line or stack frames, trace id,
+  never the message), model calls (`$ai_generation`: model, provider, token counts, latency,
+  outcome, tenant, agent and member ids), and in the browser page views by route pattern,
+  exceptions and Web Vitals. All of it goes to PostHog (EU). Info logs stay in CloudWatch.
 - **What never leaves:** emails, names, message text, prompts, model inputs and outputs, tool
   arguments, codes, tokens, raw URLs and IP addresses. The core builds every PostHog property field
   by field from typed ids and enums; spans are named by route pattern, never the raw path; the
   web app's `/ingest` proxy forwards no cookies or client IP.
 - **One funnel:** the core and eve send OTLP only to the collector, which drops attributes not on
   its allowlist and redacts anything shaped like an email, code or token before export. That is a
-  backstop, not the control: each sender keeps to ids at the source. Cloudflare sources (AI Gateway
+  backstop, not the control: each sender keeps to ids at the source. PostHog's product events,
+  error tracking and LLM analytics don't take OTLP, so the core (product events, errors) and eve
+  (errors, model calls) post those to PostHog directly with the write-only project key, the same
+  one the browser ships (owner's call, ORY-82). They build every property from ids, enums, counts
+  and code locations, and tests prove a planted email or token never leaves.
+- **Error text never leaves.** A core error is reported from its callsite only (module, file,
+  line); a panic from its location, never its payload. eve keeps an error's name and stack frames
+  (function, file, line) and drops the message; a name or frame that isn't code-shaped is replaced
+  or left out.
+- **Source maps** for the browser build go to PostHog at deploy and are deleted before the Worker is
+  published, so the source is never served; the code doesn't reference them.
+- **The forced test error** (`POST /v1/debug/error`) exists only with `MANDATE_DEBUG_ROUTES=1`,
+  needs a signed-in admin, and its eve half needs the core's assertion; the assertion it mints names
+  no real agent, so it grants no tool access. Cloudflare sources (AI Gateway
   logs, Worker traces) can't reach the private collector and go straight to PostHog, so AI Gateway
   logs must keep prompt and response bodies off.
-- **Trace context is not trust.** A browser's `traceparent` is recorded as a link on a new trace,
+- **Trace context is not trust.** The web app starts a new trace on each state-changing call; a
+  browser's `traceparent` is recorded as a link on a new trace,
   never as the parent; only eve's calls to `/mcp` over the private network may parent a span. The
   core keeps every span and the collector samples, so no caller decides what is sampled.
 - **AI Gateway metadata** (`cf-aig-metadata`) carries ids only: tenant, agent, conversation, trace.

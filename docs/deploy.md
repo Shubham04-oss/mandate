@@ -340,7 +340,27 @@ moves to its dead-letter queue. After an outage, send them back with
 `aws sqs start-message-move-task --source-arn <mandate-dev-posthog-dlq.fifo ARN>`; PostHog drops
 repeats by event uuid.
 
-The core also gets `POSTHOG_API_KEY` and `POSTHOG_HOST` for product events. To turn it off, set the
+The core and eve also get `POSTHOG_API_KEY` and `POSTHOG_HOST`: the core for product events and
+errors, eve for errors and model calls (`$ai_generation`; PostHog prices them from model and
+tokens). eve's ECS health probe (`/eve/v1/health`) is not traced.
+
+**Browser source maps.** The `web` deploy job uploads them to PostHog with `@posthog/cli` and
+deletes them before publishing. It needs, in the `dev` environment, the secret
+`POSTHOG_CLI_API_KEY` (a personal API key with *error tracking write* and *organization read*) and
+the variable `POSTHOG_PROJECT_ID` (`367889`); without them the deploy skips the upload and still
+deletes the maps.
+
+**Checking error tracking.** Set `debug_routes = true`, apply (`aws_ecs_task_definition.core` and
+`.eve`), and run the deploy workflow. Signed in as an admin, from the browser console on the app:
+
+```js
+fetch("https://api.oryxa.in/v1/debug/error", { method: "POST", credentials: "include",
+  headers: { "X-Mandate": "1", "Content-Type": "application/json" }, body: '{"service":"core"}' })
+// then {"service":"eve"}; and window.__mandateTestError() for the browser
+```
+
+Each shows up in PostHog's Error tracking with a `trace_id` and no message text. Set it back to
+`false` and apply when done. To turn it off, set the
 variable to `false`, apply, and run the deploy workflow again. `telemetry_sample_percent` (default
 100) keeps every error trace and that percentage of the rest; below 100 the collector must stay a
 single task. The image is from Docker Hub and pinned by digest in `ecs.tf`; to upgrade, change the tag
