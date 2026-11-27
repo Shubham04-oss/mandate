@@ -17,10 +17,18 @@ const good = {
   MANDATE_ASSERTION_PUBLIC_KEY: ed25519,
 };
 
+const posthogOn = { POSTHOG_API_KEY: "phc_test", POSTHOG_HOST: "https://eu.i.posthog.com" };
+
 test("a complete environment passes", () => {
   assert.deepEqual(envProblems(good), []);
   const otlp = "http://collector.observability:4318";
   assert.deepEqual(envProblems({ ...good, OTEL_EXPORTER_OTLP_ENDPOINT: otlp }), []);
+  assert.deepEqual(envProblems({ ...good, ...posthogOn }), []);
+  // A host without a key is just off; a key without a host is a mistake.
+  assert.deepEqual(envProblems({ ...good, POSTHOG_HOST: "http://eu.i.posthog.com" }), []);
+  assert.deepEqual(envProblems({ ...good, POSTHOG_API_KEY: "phc_test" }), [
+    "POSTHOG_HOST is not an https URL",
+  ]);
 });
 
 test("each missing variable is named", () => {
@@ -34,6 +42,7 @@ test("bad URLs and keys are named without echoing the value", () => {
     ["MANDATE_AI_GATEWAY_URL", "not a url", "is not a valid URL"],
     ["OTEL_EXPORTER_OTLP_ENDPOINT", "collector:4318", "is not an http(s) URL"],
     ["OTEL_EXPORTER_OTLP_ENDPOINT", "not a url", "is not an http(s) URL"],
+    ["POSTHOG_HOST", "http://eu.i.posthog.com", "is not an https URL"],
     [
       "MANDATE_ASSERTION_PUBLIC_KEY",
       "-----BEGIN PUBLIC KEY-----\nsecretish\n",
@@ -42,7 +51,7 @@ test("bad URLs and keys are named without echoing the value", () => {
     ["MANDATE_ASSERTION_PUBLIC_KEY", x25519, "is not an Ed25519"],
     ["MANDATE_ASSERTION_PUBLIC_KEY", "/no/such/key.pem", "is not an Ed25519"],
   ] as const) {
-    const [p, ...rest] = envProblems({ ...good, [name]: value });
+    const [p, ...rest] = envProblems({ ...good, ...posthogOn, [name]: value });
     assert.equal(rest.length, 0);
     assert.ok(p?.startsWith(`${name} ${msg}`), p);
     assert.ok(!p?.includes(value), p);

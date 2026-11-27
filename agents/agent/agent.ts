@@ -3,6 +3,7 @@ import { defineDynamic } from "eve/models";
 import { assertionOf, tokenOf } from "#lib/caller.ts";
 import { approvalFor, listTools } from "#lib/core.ts";
 import { gatewayModel, withMetadata } from "#lib/model.ts";
+import { rememberCaller } from "#lib/posthog.ts";
 
 function env(name: string): string {
   const v = process.env[name];
@@ -16,6 +17,8 @@ export default defineAgent({
   model: defineDynamic(({ session }) => {
     const caller = assertionOf(session.auth.current);
     const ids = { tenant: caller?.tenant, agent: caller?.agent, session: session.id };
+    // Model-call events carry only the session id; this is where its caller's ids are known.
+    rememberCaller(session.id, caller ?? {});
     return {
       model: gatewayModel(
         env("MANDATE_AI_GATEWAY_URL"),

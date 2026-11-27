@@ -11,6 +11,7 @@ import {
   collector,
   forwardWarnings,
   hasTraceparent,
+  ignoreRequest,
   logExport,
   scrubAttribute,
   skipHealthChecks,
@@ -248,4 +249,18 @@ test("a request that already carries traceparent gets no second one", () => {
   assert.equal(hasTraceparent({ headers: ["x-note", "traceparent", "accept", "*/*"] }), false);
   assert.equal(hasTraceparent({ headers: "x-traceparent: 1\r\n" }), false);
   assert.equal(hasTraceparent({ headers: [] }), false);
+});
+
+test("PostHog's own posts get no client span; other requests keep the traceparent rule", () => {
+  const ignore = ignoreRequest({
+    POSTHOG_API_KEY: "phc_test",
+    POSTHOG_HOST: "https://eu.i.posthog.com",
+  });
+  const tp = ["traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"];
+  assert.equal(ignore({ origin: "https://eu.i.posthog.com", headers: [] }), true);
+  assert.equal(ignore({ origin: "http://core.internal:8080", headers: [] }), false);
+  assert.equal(ignore({ origin: "https://gateway.example", headers: tp }), true);
+  assert.equal(ignore({ origin: "https://eu.i.posthog.com.evil", headers: [] }), false);
+  // PostHog off: nothing is ignored for being PostHog.
+  assert.equal(ignoreRequest({})({ origin: "https://eu.i.posthog.com", headers: [] }), false);
 });

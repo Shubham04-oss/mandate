@@ -15,6 +15,7 @@ import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs";
 import { defineInstrumentation, disableInstrumentation } from "eve/instrumentation";
 import { otel, otelIntegration, type SpanAttributeDecision } from "eve/instrumentation/otel";
+import { posthogConfig } from "./posthog.ts";
 
 export function telemetryEnabled(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.OTEL_EXPORTER_OTLP_ENDPOINT);
@@ -36,10 +37,20 @@ export function tracing(env: NodeJS.ProcessEnv) {
     // Only traceparent crosses the wire: eve's baggage (conversation id) stays in-process.
     propagators: ["tracecontext"],
     sampler: skipHealthChecks,
-    // fetch (the core's MCP server) gets a client span and sends traceparent; model calls already
-    // carry eve's, and a second one would make the header invalid.
-    instrumentations: [new UndiciInstrumentation({ ignoreRequestHook: hasTraceparent })],
+    // fetch (the core's MCP server) gets a client span and sends traceparent.
+    instrumentations: [new UndiciInstrumentation({ ignoreRequestHook: ignoreRequest(env) })],
   });
+}
+
+/**
+ * Model calls already carry eve's traceparent, and a second one would make the header invalid.
+ * PostHog's own posts are telemetry, not work: a span for each would be noise.
+ */
+export function ignoreRequest(env: NodeJS.ProcessEnv) {
+  const config = posthogConfig(env);
+  const posthogOrigin = config ? new URL(config.batchUrl).origin : undefined;
+  return (request: { origin: string; headers: string | (string | string[])[] }) =>
+    request.origin === posthogOrigin || hasTraceparent(request);
 }
 
 // OpenTelemetry's SamplingDecision, without pulling in sdk-trace-base for two numbers.
