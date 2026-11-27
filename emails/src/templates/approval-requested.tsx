@@ -1,14 +1,4 @@
-import {
-  Action,
-  GlassNote,
-  Headline,
-  Layout,
-  Ledger,
-  Meta,
-  NeedsYou,
-  NightOnly,
-  Para,
-} from "../layout.tsx";
+import { Action, Ember, GlassNote, Layout, Ledger } from "../layout.tsx";
 
 export const subject = "{{agent}} is waiting for your yes";
 
@@ -25,36 +15,32 @@ export default function ApprovalRequested(p: {
   return (
     <Layout
       assets={p.assets}
-      preview={`${p.agent} is waiting for your decision.`}
+      title={`${p.agent} is waiting for your yes`}
+      preview={`${p.requester} asked ${p.agent} to do something that needs your approval.`}
       scene="moon-dawn-v2"
-      to={p.email}
-      feature={
+      headline={`${p.agent} is waiting for your yes.`}
+      sub={`${p.requester} asked ${p.agent} to do something that needs your approval. Nothing happens until you decide.`}
+      chip={
         <>
-          <NeedsYou />
-          <GlassNote label={`${p.agent} wants to`} value={p.tool} />
+          <Ember />
+          Needs you
         </>
       }
+      feature={<GlassNote label={`${p.agent} wants to`} value={p.tool} expiresIn={p.expiresIn} />}
+      caption={{
+        title: "Why you're getting this",
+        body: `You approve requests for ${p.agent} in ${p.organization}.`,
+      }}
+      to={p.email}
     >
-      <NightOnly>
-        <NeedsYou />
-      </NightOnly>
-      <Headline>{p.agent} is waiting for your yes</Headline>
-      <Para>
-        {p.requester} asked {p.agent} to do something that needs your approval. Nothing happens
-        until you decide.
-      </Para>
       <Ledger
         rows={[
           ["Asked by", p.requester],
           ["Agent", p.agent],
-          ["Wants to", p.tool],
-          ["Expires in", p.expiresIn],
+          ["Organization", p.organization],
         ]}
       />
       <Action href={p.url}>Review the request</Action>
-      <Meta>
-        You're getting this because you approve requests for {p.agent} in {p.organization}.
-      </Meta>
     </Layout>
   );
 }

@@ -1,138 +1,153 @@
 import { Body, Button, Container, Head, Html, Link, Preview, Text } from "@react-email/components";
 import type { CSSProperties, ReactNode } from "react";
-import { brand, FieldContext, fields, font, type Scene, useField } from "./theme.ts";
+import { brand, font, nebula, type Scene, useField } from "./theme.ts";
 
 const SUPPORT = "support@oryxa.in";
 
+/** Legacy HTML attributes some mail apps still read where they ignore CSS. */
+const attrs = (a: Record<string, string>) => a as Record<string, string>;
+
 /**
- * One picture per email, no panels or cards. On night it sits behind the top of the email and
- * fades into the page on every side (baked into the JPG), with the words set straight on it. On
- * light it is shown as it is, as a rounded frame holding the wordmark and the email's one key
- * detail on glass, since a night sky cannot fade into a light page cleanly. Where a mail app drops
- * background images (Outlook on Windows), the same words sit on a plain colour.
+ * Wordmark, a split header (one idea, one sentence), one figure (the picture with the email's
+ * key detail on glass over it), the action, a caption, then a nebula hairline and the footer.
+ * Dark lets the picture dissolve into the night; light shows it as a rounded window.
  */
 export function Layout(props: {
   assets: string;
+  /** The document title, for screen readers and the browser tab of "view online". */
+  title: string;
   preview: string;
   scene: Scene;
+  headline: ReactNode;
+  sub: ReactNode;
+  /** The small glass label at the top of the figure. */
+  chip: ReactNode;
+  /** The glass panel at the foot of the figure. */
+  feature: ReactNode;
+  caption: { title: ReactNode; body: ReactNode };
   /** Who the email went to, shown in the footer. */
   to: string;
-  /** The key detail set on glass inside the picture on light; night shows it in the flow instead. */
-  feature: ReactNode;
-  children: ReactNode;
+  /** What follows the figure: the action, details. */
+  children?: ReactNode;
 }) {
   const f = useField();
-  const picture = `${props.assets}/${props.scene}${f.pictureSuffix}.jpg`;
-  // The legacy `background` attribute reaches the mail apps that ignore the CSS one.
-  const legacy = (
-    f.overlay ? { background: picture, bgcolor: f.page } : { bgcolor: f.page }
-  ) as Record<string, string>;
-  const scheme = f.page === brand.space ? "dark" : "light";
-  const footer: CSSProperties = { margin: 0, fontSize: 13, lineHeight: "19px", color: f.ink3 };
+  const picture = `${props.assets}/${props.scene}-${f.name === "dark" ? "night" : "light"}.jpg`;
   return (
     <Html lang="en">
       <Head>
+        <title>{props.title}</title>
+        {/* Stops iOS turning codes, dates and addresses into blue links. */}
+        <meta name="format-detection" content="telephone=no,date=no,address=no,email=no,url=no" />
         {/* Declared so mail apps keep these colours instead of inverting them. */}
-        <meta name="color-scheme" content={scheme} />
-        <meta name="supported-color-schemes" content={scheme} />
+        <meta name="color-scheme" content={f.scheme} />
+        <meta name="supported-color-schemes" content={f.scheme} />
+        {/* One variable file covers 400 to 700; apps without web fonts use the system sans. */}
         <link
           rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400..700&display=swap"
         />
+        <style>
+          {
+            // On phones the dark picture is shorter, so the glass moves up to stay on it.
+            "@media (max-width:480px){.fig-gap{height:20px!important;line-height:20px!important}}" +
+              // Links iOS still detects take the surrounding colour instead of default blue.
+              "a[x-apple-data-detectors]{color:inherit!important;text-decoration:none!important}"
+          }
+        </style>
       </Head>
       <Preview>{props.preview}</Preview>
       <Body style={{ margin: 0, backgroundColor: f.page, fontFamily: font }}>
-        <Container style={{ maxWidth: 600, padding: "16px 0 32px" }}>
-          <table width="100%" cellPadding={0} cellSpacing={0} role="presentation" {...legacy}>
-            <tbody>
-              <tr>
-                <td
-                  style={{
-                    backgroundColor: f.page,
-                    ...(f.overlay && {
-                      backgroundImage: `url(${picture})`,
-                      backgroundSize: "100% auto",
-                      backgroundPosition: "top center",
-                      backgroundRepeat: "no-repeat",
-                    }),
-                    padding: "36px 32px 44px",
-                  }}
-                >
-                  {f.overlay ? (
-                    <>
-                      <Wordmark color={f.wordmark} />
-                      {/* Leaves the sky clear before the words begin where the picture fades. */}
-                      <div
-                        style={{
-                          height: f.pictureClear,
-                          lineHeight: `${f.pictureClear}px`,
-                          fontSize: 1,
-                        }}
-                      >
-                        &nbsp;
-                      </div>
-                    </>
-                  ) : (
-                    <Frame picture={picture}>{props.feature}</Frame>
-                  )}
+        {/* Gmail drops <body> styles, so the page colour also lives on a full-width wrapper. */}
+        <table
+          width="100%"
+          cellPadding={0}
+          cellSpacing={0}
+          role="presentation"
+          {...attrs({ bgcolor: f.page })}
+          style={{ backgroundColor: f.page, fontFamily: font }}
+        >
+          <tbody>
+            <tr>
+              <td>
+                <Container style={{ maxWidth: 600, padding: "52px 32px 40px" }}>
+                  <Wordmark size={22} color={f.strong} />
+                  <Text role="heading" aria-level={1} style={{ ...headline, color: f.headline }}>
+                    {props.headline}
+                  </Text>
+                  <Text style={{ ...sub, color: f.ink2 }}>{props.sub}</Text>
+
+                  <Figure picture={picture} chip={props.chip}>
+                    {props.feature}
+                  </Figure>
+
                   {props.children}
-                  <div
-                    style={{
-                      height: 1,
-                      lineHeight: "1px",
-                      fontSize: 1,
-                      margin: "44px 0 28px",
-                      backgroundColor: f.hairline,
-                    }}
-                  />
-                  <Wordmark color={f.strong} small />
-                  <Text style={{ ...footer, marginTop: 12 }}>
+
+                  <Text style={{ ...caption, color: f.strong }}>{props.caption.title}</Text>
+                  <Text style={{ ...sub, marginTop: 6, color: f.ink2 }}>{props.caption.body}</Text>
+
+                  <div style={nebulaLine} />
+                  <Wordmark size={17} color={f.strong} />
+                  <Text style={{ ...foot, marginTop: 12, color: f.ink3 }}>
                     Sent to {props.to}. Questions? Write to{" "}
                     <Link href={`mailto:${SUPPORT}`} style={{ color: f.ink2 }}>
                       {SUPPORT}
                     </Link>
                     .
                   </Text>
-                  <Text style={{ ...footer, marginTop: 4 }}>Oryxa AI Private Limited</Text>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </Container>
+                  <Text style={{ ...foot, marginTop: 4, color: f.ink3 }}>
+                    Oryxa AI Private Limited
+                  </Text>
+                </Container>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </Body>
     </Html>
   );
 }
 
-/** The picture as it is, rounded, holding the wordmark and night-coloured glass over it. */
-function Frame({ picture, children }: { picture: string; children: ReactNode }) {
-  // On the rounded cell itself, so no square corner of colour shows behind the radius.
-  const legacy = { background: picture, bgcolor: brand.space } as Record<string, string>;
+/** The picture with glass over it. The VML markers become Outlook's background in the build. */
+function Figure({
+  picture,
+  chip,
+  children,
+}: {
+  picture: string;
+  chip: ReactNode;
+  children: ReactNode;
+}) {
+  const f = useField();
   return (
     <table
       width="100%"
       cellPadding={0}
       cellSpacing={0}
       role="presentation"
-      style={{ marginBottom: 36 }}
+      style={{ marginTop: 36 }}
     >
       <tbody>
         <tr>
           <td
-            {...legacy}
+            {...attrs({ background: picture, bgcolor: brand.space })}
             style={{
-              overflow: "hidden",
               backgroundColor: brand.space,
               backgroundImage: `url(${picture})`,
-              backgroundSize: "cover",
-              backgroundPosition: "center",
-              borderRadius: 24,
-              padding: "26px 24px 24px",
+              backgroundRepeat: "no-repeat",
+              ...f.figure,
             }}
           >
-            <Wordmark color={fields.night.wordmark} />
-            <div style={{ height: 104, lineHeight: "104px", fontSize: 1 }}>&nbsp;</div>
-            <FieldContext.Provider value="picture">{children}</FieldContext.Provider>
+            <div data-vml-open={picture} data-vml-rounded={String(f.rounded)} />
+            <Text style={chipStyle}>{chip}</Text>
+            <div
+              data-skip-in-text="true"
+              className={f.rounded ? undefined : "fig-gap"}
+              style={{ height: 96, lineHeight: "96px", fontSize: 1 }}
+            >
+              &nbsp;
+            </div>
+            <div style={glass}>{children}</div>
+            <div data-vml-close={String(f.rounded)} />
           </td>
         </tr>
       </tbody>
@@ -140,35 +155,7 @@ function Frame({ picture, children }: { picture: string; children: ReactNode }) 
   );
 }
 
-/** Shown only on night, where the feature sits in the flow rather than in the picture. */
-export function NightOnly({ children }: { children: ReactNode }) {
-  return useField().overlay ? children : null;
-}
-
-/** A small label over one strong line, on glass. */
-export function GlassNote({ label, value }: { label: ReactNode; value: ReactNode }) {
-  const f = useField();
-  return (
-    <div style={{ ...glass(f), margin: "28px 0 0", padding: "14px 18px" }}>
-      <Text style={{ margin: 0, fontSize: 13, lineHeight: "18px", color: f.ink2 }}>{label}</Text>
-      <Text
-        style={{
-          margin: "3px 0 0",
-          fontSize: 20,
-          lineHeight: "26px",
-          fontWeight: 600,
-          letterSpacing: "-0.015em",
-          color: f.headline,
-        }}
-      >
-        {value}
-      </Text>
-    </div>
-  );
-}
-
-function Wordmark({ color, small = false }: { color: string; small?: boolean }) {
-  const size = small ? 17 : 22;
+function Wordmark({ size, color }: { size: number; color: string }) {
   return (
     <Text
       style={{
@@ -186,66 +173,74 @@ function Wordmark({ color, small = false }: { color: string; small?: boolean }) 
   );
 }
 
-export function Headline({ children }: { children: ReactNode }) {
-  const f = useField();
+/** The gold ember dot: only for the wordmark and for what needs the person. */
+export function Ember() {
+  return <span style={{ ...dot, width: 7, height: 7, borderRadius: 4, margin: "0 7px 1px 0" }} />;
+}
+
+/** A one-time code. One tap selects all of it, so it copies cleanly. */
+export function GlassCode({ code, expiresIn }: { code: string; expiresIn: string }) {
   return (
-    <Text
-      style={{
-        margin: 0,
-        fontSize: 32,
-        lineHeight: "36px",
-        fontWeight: 600,
-        letterSpacing: "-0.025em",
-        color: f.headline,
-      }}
-    >
-      {children}
-    </Text>
+    <>
+      <Text style={codeStyle}>
+        <span style={{ userSelect: "all", WebkitUserSelect: "all" }}>{code}</span>
+      </Text>
+      <Expires in={expiresIn} />
+    </>
   );
 }
 
-export function Para({ children }: { children: ReactNode }) {
-  const f = useField();
+/** A small label over one strong line, and when it expires. */
+export function GlassNote({
+  label,
+  value,
+  expiresIn,
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  expiresIn: string;
+}) {
   return (
-    <Text style={{ margin: "14px 0 0", fontSize: 16, lineHeight: "25px", color: f.ink2 }}>
-      {children}
-    </Text>
-  );
-}
-
-export function Meta({ children }: { children: ReactNode }) {
-  const f = useField();
-  return <Text style={meta(f.ink3)}>{children}</Text>;
-}
-
-/** A one-time code on a strip of glass, large and spaced for reading off one screen into another. */
-export function Code({ value }: { value: string }) {
-  const f = useField();
-  return (
-    <div style={{ ...glass(f), margin: "28px 0 0", padding: "20px 24px" }}>
+    <>
+      <Text
+        style={{ margin: 0, fontSize: 13, lineHeight: "18px", color: "rgba(255,255,255,0.72)" }}
+      >
+        {label}
+      </Text>
       <Text
         style={{
-          margin: 0,
-          fontSize: 32,
-          lineHeight: "36px",
+          margin: "4px 0 0",
+          fontSize: 21,
+          lineHeight: "27px",
           fontWeight: 600,
-          letterSpacing: "0.3em",
-          fontVariantNumeric: "tabular-nums",
-          color: f.headline,
+          letterSpacing: "-0.015em",
+          color: "#ffffff",
+          wordBreak: "break-word",
         }}
       >
         {value}
       </Text>
-    </div>
+      <Expires in={expiresIn} />
+    </>
   );
 }
 
-/** The one action, with its link spelled out under it for mail apps that drop buttons. */
+function Expires(props: { in: string }) {
+  return (
+    <Text style={expires}>
+      {/* The waiting dot: the ember stays for the wordmark and Needs you only. */}
+      <span style={waiting} />
+      Expires in {props.in}
+    </Text>
+  );
+}
+
+/** The one action, with its full link written under it for apps that drop buttons. */
 export function Action({ href, children }: { href: string; children: ReactNode }) {
   const f = useField();
   return (
     <>
-      <div style={{ margin: "30px 0 0" }}>
+      <div style={{ margin: "32px 0 0" }}>
         <Button
           href={href}
           style={{
@@ -253,7 +248,7 @@ export function Action({ href, children }: { href: string; children: ReactNode }
             backgroundColor: f.buttonFill,
             color: f.buttonLabel,
             borderRadius: 9999,
-            padding: "13px 22px",
+            padding: "14px 24px",
             fontSize: 15,
             lineHeight: "15px",
             fontWeight: 600,
@@ -261,13 +256,21 @@ export function Action({ href, children }: { href: string; children: ReactNode }
             textDecoration: "none",
           }}
         >
-          {children}&nbsp;&nbsp;→
+          {children}
+          <span data-skip-in-text="true">&nbsp;&nbsp;→</span>
         </Button>
       </div>
-      <Text style={{ ...meta(f.ink3), marginTop: 22 }}>
-        Or paste this link into your browser:
+      {/* Plain text already gives the link with the button's words, so this stays out of it. */}
+      <Text
+        data-skip-in-text="true"
+        style={{ margin: "20px 0 0", fontSize: 13, lineHeight: "20px", color: f.ink3 }}
+      >
+        Button not working? Paste this link into your browser:
         <br />
-        <Link href={href} style={{ color: f.link, wordBreak: "break-all" }}>
+        <Link
+          href={href}
+          style={{ color: f.link, textDecoration: "underline", wordBreak: "break-all" }}
+        >
           {href}
         </Link>
       </Text>
@@ -291,7 +294,8 @@ export function Ledger({ rows }: { rows: [string, ReactNode][] }) {
       cellPadding={0}
       cellSpacing={0}
       role="presentation"
-      style={{ margin: "26px 0 0" }}
+      className="ledger"
+      style={{ margin: "32px 0 0" }}
     >
       <tbody>
         {rows.map(([label, value]) => (
@@ -305,41 +309,6 @@ export function Ledger({ rows }: { rows: [string, ReactNode][] }) {
   );
 }
 
-/** A glass status pill; the gold ember dot appears only for what needs the person. */
-export function NeedsYou() {
-  const f = useField();
-  return (
-    <Text
-      style={{
-        ...glass(f),
-        display: "inline-block",
-        margin: "0 0 18px",
-        padding: "5px 12px",
-        borderRadius: 9999,
-        fontSize: 12,
-        lineHeight: "16px",
-        fontWeight: 500,
-        color: f.strong,
-      }}
-    >
-      <span style={{ ...dot, width: 7, height: 7, borderRadius: 4, margin: "0 7px 1px 0" }} />
-      Needs you
-    </Text>
-  );
-}
-
-// Translucent fill with a fine edge reads as glass over the picture; mail apps cannot blur.
-const glass = (f: { glass: string; glassEdge: string }): CSSProperties => ({
-  backgroundColor: f.glass,
-  border: `1px solid ${f.glassEdge}`,
-  borderRadius: 18,
-});
-const meta = (color: string): CSSProperties => ({
-  margin: "24px 0 0",
-  fontSize: 14,
-  lineHeight: "21px",
-  color,
-});
 const dot: CSSProperties = {
   display: "inline-block",
   width: "0.2em",
@@ -348,3 +317,70 @@ const dot: CSSProperties = {
   borderRadius: "0.14em",
   backgroundColor: brand.ember,
 };
+const waiting: CSSProperties = {
+  display: "inline-block",
+  width: 7,
+  height: 7,
+  borderRadius: 4,
+  margin: "0 8px 1px 0",
+  backgroundColor: brand.periwinkle,
+};
+const headline: CSSProperties = {
+  margin: "56px 0 0",
+  fontSize: 40,
+  lineHeight: "42px",
+  fontWeight: 600,
+  letterSpacing: "-0.03em",
+};
+const sub: CSSProperties = { margin: "18px 0 0", fontSize: 17, lineHeight: "27px" };
+// Smoky glass reads over both bright ground and dark sky; mail apps cannot blur.
+const glass: CSSProperties = {
+  backgroundColor: "rgba(4,5,15,0.42)",
+  border: "1px solid rgba(255,255,255,0.22)",
+  borderRadius: 18,
+  padding: "20px 24px",
+};
+const chipStyle: CSSProperties = {
+  ...glass,
+  display: "inline-block",
+  margin: 0,
+  padding: "5px 12px",
+  borderRadius: 9999,
+  fontSize: 12,
+  lineHeight: "16px",
+  fontWeight: 500,
+  color: "#eef0fa",
+};
+const codeStyle: CSSProperties = {
+  margin: 0,
+  fontSize: 38,
+  lineHeight: "42px",
+  fontWeight: 600,
+  letterSpacing: "0.32em",
+  fontVariantNumeric: "tabular-nums",
+  color: "#ffffff",
+};
+const expires: CSSProperties = {
+  margin: "10px 0 0",
+  fontSize: 13,
+  lineHeight: "18px",
+  fontWeight: 500,
+  color: "rgba(255,255,255,0.78)",
+};
+const caption: CSSProperties = {
+  margin: "40px 0 0",
+  fontSize: 20,
+  lineHeight: "26px",
+  fontWeight: 600,
+  letterSpacing: "-0.015em",
+};
+// The nebula's gas colours together, never one alone, as a drawn accent.
+const nebulaLine: CSSProperties = {
+  height: 2,
+  lineHeight: "2px",
+  fontSize: 1,
+  margin: "48px 0 28px",
+  backgroundColor: nebula.rose,
+  backgroundImage: `linear-gradient(90deg, ${nebula.amber} 0%, ${nebula.rose} 50%, ${nebula.violet} 100%)`,
+};
+const foot: CSSProperties = { margin: 0, fontSize: 13, lineHeight: "19px" };

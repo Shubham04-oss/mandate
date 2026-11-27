@@ -1,8 +1,9 @@
-// Renders each template to dist/<name>.html (night), <name>.light.html and <name>.txt with
+// Renders each template to dist/<name>.html (dark), <name>.light.html and <name>.txt with
 // {{placeholders}} the core fills in, and with --preview, to preview/ filled with sample values.
 import { mkdir, writeFile } from "node:fs/promises";
 import { render } from "@react-email/components";
 import type { ComponentType } from "react";
+import { forOutlook } from "./outlook.ts";
 import ApprovalRequested, * as approvalRequested from "./templates/approval-requested.tsx";
 import Invitation, * as invitation from "./templates/invitation.tsx";
 import ResetPassword, * as resetPassword from "./templates/reset-password.tsx";
@@ -66,6 +67,26 @@ const fill = (s: string, props: Props) =>
     (_, k: string) => props[k.replace(/_(\w)/g, (_m, c) => c.toUpperCase())] ?? "",
   );
 
+// The plain-text part: no picture or decoration, and the code or link on a line of its own.
+async function plainText(el: React.ReactElement) {
+  const text = await render(el, {
+    plainText: true,
+    htmlToTextOptions: {
+      selectors: [
+        { selector: "img", format: "skip" },
+        { selector: "a", options: { hideLinkHrefIfSameAsText: true, linkBrackets: [" : ", ""] } },
+        // The details keep their label and value side by side.
+        { selector: "table.ledger", format: "dataTable" },
+      ],
+    },
+  });
+  return `${text
+    // "Choose a new password:" then the link alone on the next line, easy to tap or copy.
+    .replace(/ : (\S+)$/gm, ":\n$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()}\n`;
+}
+
 const preview = process.argv.includes("--preview");
 const assets = preview ? "assets" : (process.env.EMAIL_ASSETS ?? "https://app.oryxa.in/email");
 const out = preview ? "preview" : "dist";
@@ -78,16 +99,16 @@ for (const [name, t] of Object.entries(templates)) {
     ? t.sample
     : Object.fromEntries(keys.map((k) => [k, `{{${snake(k)}}}`]));
   const subject = preview ? fill(t.subject, t.sample) : t.subject;
-  for (const field of ["night", "light"] as Field[]) {
+  for (const field of ["dark", "light"] as Field[]) {
     const el = (
       <FieldContext.Provider value={field}>
         <t.component assets={assets} {...props} />
       </FieldContext.Provider>
     );
-    const html = field === "night" ? `${name}.html` : `${name}.light.html`;
-    await writeFile(`${out}/${html}`, await render(el));
-    if (field === "night")
-      await writeFile(`${out}/${name}.txt`, await render(el, { plainText: true }));
+    const html = field === "dark" ? `${name}.html` : `${name}.light.html`;
+    await writeFile(`${out}/${html}`, forOutlook(await render(el)));
+    // Both fields carry the same words, so one plain-text part serves either.
+    if (field === "dark") await writeFile(`${out}/${name}.txt`, await plainText(el));
   }
   manifest[name] = { subject, placeholders: keys.map(snake) };
 }

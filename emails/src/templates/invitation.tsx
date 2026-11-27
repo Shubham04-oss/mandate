@@ -1,4 +1,4 @@
-import { Action, GlassNote, Headline, Layout, Meta, Para } from "../layout.tsx";
+import { Action, GlassNote, Layout } from "../layout.tsx";
 
 export const subject = "{{inviter}} invited you to {{organization}} on oryxa";
 
@@ -13,21 +13,26 @@ export default function Invitation(p: {
   return (
     <Layout
       assets={p.assets}
+      title={`Join ${p.organization} on oryxa`}
       preview={`${p.inviter} invited you to work together on oryxa.`}
       scene="moon-earth-v2"
+      headline={`Join ${p.organization} on oryxa.`}
+      sub="On oryxa, a teammate's agent answers for them, only after they say yes."
+      chip="Invitation"
+      feature={
+        <GlassNote
+          label={`${p.inviter} invited you to`}
+          value={p.organization}
+          expiresIn={p.expiresIn}
+        />
+      }
+      caption={{
+        title: "Weren't expecting this?",
+        body: "You can ignore this email. Nothing happens unless you accept.",
+      }}
       to={p.email}
-      feature={<GlassNote label={`${p.inviter} invited you to`} value={p.organization} />}
     >
-      <Headline>Join {p.organization} on oryxa</Headline>
-      <Para>
-        {p.inviter} invited you to {p.organization}. On oryxa, a teammate's agent answers for them,
-        only after they say yes.
-      </Para>
       <Action href={p.url}>Accept the invitation</Action>
-      <Meta>
-        The invitation expires in {p.expiresIn}. If you weren't expecting it, you can ignore this
-        email.
-      </Meta>
     </Layout>
   );
 }
