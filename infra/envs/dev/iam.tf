@@ -2,11 +2,12 @@ data "aws_caller_identity" "current" {}
 
 locals {
   # Which secrets each task's execution role injects; eve and migrate never see the core's.
-  # The core also gets the PostHog key, for product events, only while telemetry is on.
+  # The core (product events, errors) and eve (errors, model calls) also get the PostHog project
+  # key, only while telemetry is on. It is write-only and the browser ships it too (ORY-82).
   task_secrets = {
     for task in ["core", "eve", "migrate"] : task => {
       for k, s in aws_secretsmanager_secret.this : k => s.arn
-      if startswith(k, "${task}/") || (task == "core" && k == "posthog-key" && var.telemetry_enabled)
+      if startswith(k, "${task}/") || (task != "migrate" && k == "posthog-key" && var.telemetry_enabled)
     }
   }
 }

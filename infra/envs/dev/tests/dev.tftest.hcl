@@ -344,7 +344,7 @@ run "secrets_are_containers_under_the_cmk" {
       "core/assertion-private-key", "core/event-signing-key", "core/event-public-key",
       "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key", "posthog-key",
     ])
-    error_message = "one secret per value a task needs, named by who reads it (posthog-key: the collector and the core)"
+    error_message = "one secret per value a task needs, named by who reads it (posthog-key: the collector, the core and eve)"
   }
   assert {
     condition     = aws_kms_key.main.enable_key_rotation
@@ -852,10 +852,34 @@ run "telemetry_is_off_by_default_and_changes_nothing" {
     error_message = "the PostHog key reaches no task while telemetry is off"
   }
   assert {
-    condition = !contains(flatten([
-      for st in jsondecode(aws_iam_role_policy.execution["core"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
-    ]), aws_secretsmanager_secret.this["posthog-key"].arn)
-    error_message = "the core's execution role cannot read the PostHog key while telemetry is off"
+    condition = !anytrue([for t in ["core", "eve", "migrate"] : contains(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution[t].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ]), aws_secretsmanager_secret.this["posthog-key"].arn)])
+    error_message = "no execution role can read the PostHog key while telemetry is off"
+  }
+  assert {
+    condition = !anytrue([for td in [aws_ecs_task_definition.core, aws_ecs_task_definition.eve] : anytrue([
+      for e in jsondecode(td.container_definitions)[0].environment : e.name == "MANDATE_DEBUG_ROUTES"
+    ])])
+    error_message = "the forced-error routes are off unless debug_routes is set"
+  }
+}
+
+run "debug_routes_switches_on_the_forced_error_route_for_the_core_and_eve" {
+  command = apply
+  variables {
+    debug_routes = true
+  }
+
+  assert {
+    condition = alltrue([for td in [aws_ecs_task_definition.core, aws_ecs_task_definition.eve] : contains(
+      jsondecode(td.container_definitions)[0].environment, { name = "MANDATE_DEBUG_ROUTES", value = "1" }
+    )])
+    error_message = "debug_routes sets MANDATE_DEBUG_ROUTES=1 on the core and eve"
+  }
+  assert {
+    condition     = !contains(jsondecode(aws_ecs_task_definition.migrate.container_definitions)[0].environment, { name = "MANDATE_DEBUG_ROUTES", value = "1" })
+    error_message = "the migrate task never mounts routes"
   }
 }
 
@@ -940,10 +964,19 @@ run "the_collector_is_the_only_way_out_for_telemetry" {
     error_message = "the core gets the PostHog key for product events"
   }
   assert {
-    condition = !contains([for s in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].secrets : s.valueFrom], aws_secretsmanager_secret.this["posthog-key"].arn) && !contains(flatten([
-      for st in jsondecode(aws_iam_role_policy.execution["eve"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    condition = (
+      contains(jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].secrets, { name = "POSTHOG_API_KEY", valueFrom = aws_secretsmanager_secret.this["posthog-key"].arn })
+      && contains(flatten([
+        for st in jsondecode(aws_iam_role_policy.execution["eve"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+      ]), aws_secretsmanager_secret.this["posthog-key"].arn)
+    )
+    error_message = "eve gets the PostHog key for its errors and model calls (ORY-82)"
+  }
+  assert {
+    condition = !contains(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["migrate"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
     ]), aws_secretsmanager_secret.this["posthog-key"].arn)
-    error_message = "eve never sees the PostHog key"
+    error_message = "the migrate task never sees the PostHog key"
   }
   assert {
     condition = {
@@ -963,8 +996,9 @@ run "the_collector_is_the_only_way_out_for_telemetry" {
       OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.mandate-dev.internal:4318"
       OTEL_EXPORTER_OTLP_PROTOCOL = "http/protobuf"
       OTEL_SERVICE_NAME           = "eve"
+      POSTHOG_HOST                = "https://eu.i.posthog.com"
     }
-    error_message = "eve exports to the collector as eve, and has no PostHog env"
+    error_message = "eve exports to the collector as eve and sends its errors and model calls to PostHog EU"
   }
 }
 

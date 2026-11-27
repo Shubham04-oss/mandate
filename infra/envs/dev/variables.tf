@@ -122,6 +122,13 @@ variable "telemetry_enabled" {
   default = false
 }
 
+# Mounts the core's admin-only POST /v1/debug/error (and eve's), which forces a test error to check
+# error tracking end to end. Off unless you are checking it (docs/deploy.md, Telemetry).
+variable "debug_routes" {
+  type    = bool
+  default = false
+}
+
 # Percent of traces without an error that the collector keeps; traces with an error are always kept.
 # ponytail: tail sampling decides per trace, so every span must reach the same collector: below 100
 # the collector must stay a single task (no load-balancing exporter tier in front of it).
