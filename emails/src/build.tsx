@@ -1,0 +1,85 @@
+// Renders each template to dist/<name>.html and .txt with {{placeholders}} the core fills in, and
+// with --preview, to preview/<name>.html filled with sample values instead.
+import { mkdir, writeFile } from "node:fs/promises";
+import { render } from "@react-email/components";
+import type { ComponentType } from "react";
+import ApprovalRequested, * as approvalRequested from "./templates/approval-requested.tsx";
+import Invitation, * as invitation from "./templates/invitation.tsx";
+import ResetPassword, * as resetPassword from "./templates/reset-password.tsx";
+import SignInCode, * as signInCode from "./templates/sign-in-code.tsx";
+import VerifyEmail, * as verifyEmail from "./templates/verify-email.tsx";
+
+type Props = Record<string, string>;
+type Template = { subject: string; component: ComponentType<Props>; sample: Props };
+
+const templates: Record<string, Template> = {
+  "sign-in-code": {
+    subject: signInCode.subject,
+    component: SignInCode as ComponentType<Props>,
+    sample: { email: "priya@acme.com", code: "482913", expiresIn: "10 minutes" },
+  },
+  "verify-email": {
+    subject: verifyEmail.subject,
+    component: VerifyEmail as ComponentType<Props>,
+    sample: { email: "priya@acme.com", code: "730418", expiresIn: "24 hours" },
+  },
+  "reset-password": {
+    subject: resetPassword.subject,
+    component: ResetPassword as ComponentType<Props>,
+    sample: {
+      email: "priya@acme.com",
+      url: "https://app.oryxa.in/reset-password?token=sample",
+      expiresIn: "15 minutes",
+    },
+  },
+  invitation: {
+    subject: invitation.subject,
+    component: Invitation as ComponentType<Props>,
+    sample: {
+      email: "raya@acme.com",
+      inviter: "Priya Shah",
+      organization: "Acme",
+      url: "https://app.oryxa.in/invite?token=sample",
+      expiresIn: "7 days",
+    },
+  },
+  "approval-requested": {
+    subject: approvalRequested.subject,
+    component: ApprovalRequested as ComponentType<Props>,
+    sample: {
+      email: "raya@acme.com",
+      requester: "Priya Shah",
+      agent: "Raya's agent",
+      tool: "Read a page on acme.atlassian.net",
+      organization: "Acme",
+      url: "https://app.oryxa.in/approvals",
+      expiresIn: "1 hour",
+    },
+  },
+};
+
+const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+const fill = (s: string, props: Props) =>
+  s.replace(
+    /\{\{(\w+)\}\}/g,
+    (_, k: string) => props[k.replace(/_(\w)/g, (_m, c) => c.toUpperCase())] ?? "",
+  );
+
+const preview = process.argv.includes("--preview");
+const assets = preview ? "assets" : (process.env.EMAIL_ASSETS ?? "https://app.oryxa.in/email");
+const out = preview ? "preview" : "dist";
+await mkdir(out, { recursive: true });
+
+const manifest: Record<string, { subject: string; placeholders: string[] }> = {};
+for (const [name, t] of Object.entries(templates)) {
+  const keys = Object.keys(t.sample);
+  const props: Props = preview
+    ? t.sample
+    : Object.fromEntries(keys.map((k) => [k, `{{${snake(k)}}}`]));
+  const el = <t.component assets={assets} {...props} />;
+  const subject = preview ? fill(t.subject, t.sample) : t.subject;
+  await writeFile(`${out}/${name}.html`, await render(el));
+  await writeFile(`${out}/${name}.txt`, await render(el, { plainText: true }));
+  manifest[name] = { subject, placeholders: keys.map(snake) };
+}
+await writeFile(`${out}/manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);

@@ -1,0 +1,26 @@
+{
+  "name": "mandate-emails",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsx src/build.tsx",
+    "check": "biome check . && tsc"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@react-email/components": "1.0.12",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.5",
+    "@types/node": "24.19.4",
+    "@types/react": "19.3.3",
+    "@types/react-dom": "19.3.0",
+    "tsx": "4.23.15",
+    "typescript": "6.0.2"
+  }
+}
