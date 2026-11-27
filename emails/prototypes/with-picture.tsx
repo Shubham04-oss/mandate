@@ -96,73 +96,93 @@ function SignInCode({
       </Head>
       <Preview>Enter it on the sign-in page to continue.</Preview>
       <Body style={{ margin: 0, backgroundColor: l.page, fontFamily: font }}>
-        <Container style={{ maxWidth: 600, padding: "52px 32px 40px" }}>
-          <Wordmark size={22} color={l.strong} />
+        {/* Gmail drops <body> styles, so the page colour also lives on a full-width wrapper. */}
+        <table
+          width="100%"
+          cellPadding={0}
+          cellSpacing={0}
+          role="presentation"
+          {...({ bgcolor: l.page } as Record<string, string>)}
+          style={{ backgroundColor: l.page, fontFamily: font }}
+        >
+          <tbody>
+            <tr>
+              <td>
+                <Container style={{ maxWidth: 600, padding: "52px 32px 40px" }}>
+                  <Wordmark size={22} color={l.strong} />
 
-          <Text role="heading" aria-level={1} style={{ ...headline, color: l.headline }}>
-            Your sign-in code is ready.
-          </Text>
-          <Text style={{ ...sub, color: l.ink2 }}>
-            Enter it on the sign-in page to continue as{" "}
-            <span style={{ color: l.strong }}>{email}</span>.
-          </Text>
+                  <Text role="heading" aria-level={1} style={{ ...headline, color: l.headline }}>
+                    Your sign-in code is ready.
+                  </Text>
+                  <Text style={{ ...sub, color: l.ink2 }}>
+                    Enter it on the sign-in page to continue as{" "}
+                    <span style={{ color: l.strong }}>{email}</span>.
+                  </Text>
 
-          {/* The figure: the picture, with the code on smoky glass over it. */}
-          <table
-            width="100%"
-            cellPadding={0}
-            cellSpacing={0}
-            role="presentation"
-            style={{ marginTop: 36 }}
-          >
-            <tbody>
-              <tr>
-                <td
-                  {...legacy}
-                  style={{
-                    backgroundColor: brand.space,
-                    backgroundImage: `url(${l.picture})`,
-                    backgroundRepeat: "no-repeat",
-                    ...l.figure,
-                  }}
-                >
-                  <div data-vml="open" />
-                  <Text style={chip}>Sign-in code</Text>
-                  <div
-                    className={l.scheme === "dark" ? "pic-gap" : undefined}
-                    style={{ height: 96, lineHeight: "96px", fontSize: 1 }}
+                  {/* The figure: the picture, with the code on smoky glass over it. */}
+                  <table
+                    width="100%"
+                    cellPadding={0}
+                    cellSpacing={0}
+                    role="presentation"
+                    style={{ marginTop: 36 }}
                   >
-                    &nbsp;
-                  </div>
-                  <div style={glass}>
-                    {/* One tap selects the whole code, ready to copy. */}
-                    <Text style={codeStyle}>
-                      <span style={{ userSelect: "all", WebkitUserSelect: "all" }}>{code}</span>
-                    </Text>
-                    <Text style={expires}>
-                      <span style={waiting} />
-                      Expires in {expiresIn}
-                    </Text>
-                  </div>
-                  <div data-vml="close" />
-                </td>
-              </tr>
-            </tbody>
-          </table>
+                    <tbody>
+                      <tr>
+                        <td
+                          {...legacy}
+                          style={{
+                            backgroundColor: brand.space,
+                            backgroundImage: `url(${l.picture})`,
+                            backgroundRepeat: "no-repeat",
+                            ...l.figure,
+                          }}
+                        >
+                          <div data-vml="open" />
+                          <Text style={chip}>Sign-in code</Text>
+                          <div
+                            className={l.scheme === "dark" ? "pic-gap" : undefined}
+                            style={{ height: 96, lineHeight: "96px", fontSize: 1 }}
+                          >
+                            &nbsp;
+                          </div>
+                          <div style={glass}>
+                            {/* One tap selects the whole code, ready to copy. */}
+                            <Text style={codeStyle}>
+                              <span style={{ userSelect: "all", WebkitUserSelect: "all" }}>
+                                {code}
+                              </span>
+                            </Text>
+                            <Text style={expires}>
+                              <span style={waiting} />
+                              Expires in {expiresIn}
+                            </Text>
+                          </div>
+                          <div data-vml="close" />
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
 
-          <Text style={{ ...caption, color: l.strong }}>Didn't try to sign in?</Text>
-          <Text style={{ ...sub, marginTop: 6, color: l.ink2 }}>
-            You can ignore this email. Nobody gets in without the code.
-          </Text>
+                  <Text style={{ ...caption, color: l.strong }}>Didn't try to sign in?</Text>
+                  <Text style={{ ...sub, marginTop: 6, color: l.ink2 }}>
+                    You can ignore this email. Nobody gets in without the code.
+                  </Text>
 
-          <div style={nebulaLine} />
-          <Wordmark size={17} color={l.strong} />
-          <Text style={{ ...foot, marginTop: 12, color: l.ink3 }}>
-            Sent to {email}. Questions? Write to{" "}
-            <span style={{ color: l.ink2 }}>support@oryxa.in</span>.
-          </Text>
-          <Text style={{ ...foot, marginTop: 4, color: l.ink3 }}>Oryxa AI Private Limited</Text>
-        </Container>
+                  <div style={nebulaLine} />
+                  <Wordmark size={17} color={l.strong} />
+                  <Text style={{ ...foot, marginTop: 12, color: l.ink3 }}>
+                    Sent to {email}. Questions? Write to{" "}
+                    <span style={{ color: l.ink2 }}>support@oryxa.in</span>.
+                  </Text>
+                  <Text style={{ ...foot, marginTop: 4, color: l.ink3 }}>
+                    Oryxa AI Private Limited
+                  </Text>
+                </Container>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </Body>
     </Html>
   );
