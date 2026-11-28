@@ -184,6 +184,7 @@ pub async fn decide_approval(
             approval,
             decision,
             by: by.clone(),
+            via: None,
         },
     )
     .await?;

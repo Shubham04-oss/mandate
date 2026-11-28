@@ -16,6 +16,8 @@ aws-sigv4 = "1.6.6"
 aws-sdk-sesv2 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-eventbridgev2 = { version = "1.7", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-sqs = { version = "1.119", default-features = false, features = ["default-https-client", "rt-tokio"] }
+# Channel provider tokens (docs/channels.md, section 11), behind CredentialStore.
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 axum = "0.8.9"
 base64 = "0.23.1"
 cedar-policy = "4.15"
@@ -24,6 +26,8 @@ clap = { version = "4.6.9", features = ["derive"] }
 ed25519-dalek = { version = "3", features = ["pem"] }
 futures = "0.3.34"
 getrandom = "0.3"
+# Slack request signatures and decision tokens (HMAC-SHA256); Twilio signatures (HMAC-SHA1).
+hmac = "0.13"
 http = "1.5.0"
 rustls = "0.23.46"
 schemars = { version = "1.2.3", features = ["uuid1"] }
@@ -39,7 +43,12 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rmcp = { version = "3.11.0", default-features = false, features = ["server", "transport-streamable-http-server"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Slack interaction and Twilio webhook bodies are forms, parsed only after their signature checks.
+serde_urlencoded = "0.7"
+sha1 = "0.11"
 sha2 = "0.11"
+# Constant-time comparison of the channel proxy key.
+subtle = "2.6"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "time", "uuid", "json", "macros", "migrate"] }
 thiserror = "2"
 time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }

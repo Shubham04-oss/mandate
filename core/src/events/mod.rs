@@ -11,7 +11,8 @@ pub mod sign;
 pub use consume::{Consumer, Handler, HandlerError, consumer};
 pub use run::start;
 
-use crate::ids::{AgentId, MemberId, TenantId};
+pub use crate::channels::ChannelKind;
+use crate::ids::{AgentId, MemberId, SpaceId, TenantId};
 use crate::store::{StoreError, Tx};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -146,6 +147,46 @@ impl SignInMethod {
 pub enum Setting {
     /// The member turned two-step (TOTP) on.
     TwoStep,
+    /// `channels.streaming` (docs/settings.md), with the `kind` it applies to.
+    ChannelStreaming,
+    /// `threads.multiplayer`, for the org or one `space`.
+    ThreadMultiplayer,
+    /// `spaces.guest_tool_calls`, for the org or one `space`.
+    GuestToolCalls,
+    /// The member's `approvals.channels`.
+    ApprovalChannels,
+    /// `approvals.thread_cards`, for the org or one `space`.
+    ThreadApprovalCards,
+}
+
+impl Setting {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Setting::TwoStep => "two_step",
+            Setting::ChannelStreaming => "channel_streaming",
+            Setting::ThreadMultiplayer => "thread_multiplayer",
+            Setting::GuestToolCalls => "guest_tool_calls",
+            Setting::ApprovalChannels => "approval_channels",
+            Setting::ThreadApprovalCards => "thread_approval_cards",
+        }
+    }
+}
+
+/// Why the output guard withheld an outgoing message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WithheldReason {
+    GuardBlocked,
+    GuardError,
+}
+
+impl WithheldReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WithheldReason::GuardBlocked => "guard_blocked",
+            WithheldReason::GuardError => "guard_error",
+        }
+    }
 }
 
 /// Which email went out; never its content or address.
@@ -195,9 +236,93 @@ pub enum Event {
         decision: Decision,
         #[schemars(with = "String")]
         by: MemberId,
+        /// Where the decision came from; absent on events from before channels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<ChannelKind>,
     },
+    /// The expiry sweep found it undecided past `expires_at`.
+    #[serde(rename = "approval.expired.v1")]
+    ApprovalExpired { approval: Uuid },
     #[serde(rename = "conversation.started.v1")]
-    ConversationStarted { conversation: Uuid },
+    ConversationStarted {
+        conversation: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<ChannelKind>,
+        /// The conversation this one continues (a handoff, or a thread whose session ended).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff_from: Option<Uuid>,
+    },
+    /// eve replaced a stranded session; the conversation continues on the new one.
+    #[serde(rename = "conversation.session_replaced.v1")]
+    ConversationSessionReplaced { conversation: Uuid },
+    /// A member spoke in the conversation for the first time.
+    #[serde(rename = "conversation.joined.v1")]
+    ConversationJoined {
+        conversation: Uuid,
+        #[schemars(with = "String")]
+        member: MemberId,
+    },
+    #[serde(rename = "channel.installed.v1")]
+    ChannelInstalled {
+        installation: Uuid,
+        kind: ChannelKind,
+        #[schemars(with = "String")]
+        by: MemberId,
+    },
+    /// The installation's agent was set or cleared.
+    #[serde(rename = "channel.updated.v1")]
+    ChannelUpdated {
+        installation: Uuid,
+        kind: ChannelKind,
+        #[schemars(with = "String")]
+        by: MemberId,
+    },
+    /// An admin removed it, or the provider uninstalled the app or revoked its tokens.
+    #[serde(rename = "channel.removed.v1")]
+    ChannelRemoved {
+        installation: Uuid,
+        kind: ChannelKind,
+        actor: Actor,
+    },
+    #[serde(rename = "channel_identity.linked.v1")]
+    ChannelIdentityLinked {
+        #[schemars(with = "String")]
+        member: MemberId,
+        kind: ChannelKind,
+    },
+    /// The member unlinked, or was removed from the org.
+    #[serde(rename = "channel_identity.unlinked.v1")]
+    ChannelIdentityUnlinked {
+        #[schemars(with = "String")]
+        member: MemberId,
+        kind: ChannelKind,
+        actor: Actor,
+    },
+    /// The provider accepted a card or its edit; `cause` is the event that asked for it, and an
+    /// absent `member` is a thread card.
+    #[serde(rename = "notification.sent.v1")]
+    NotificationSent {
+        kind: ChannelKind,
+        cause: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(with = "Option<String>")]
+        member: Option<MemberId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval: Option<Uuid>,
+    },
+    /// The output guard withheld an outgoing message; an absent `member` means no single speaker.
+    #[serde(rename = "message.withheld.v1")]
+    MessageWithheld {
+        #[schemars(with = "String")]
+        agent: AgentId,
+        kind: ChannelKind,
+        reason: WithheldReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(with = "Option<String>")]
+        member: Option<MemberId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation: Option<Uuid>,
+    },
     #[serde(rename = "conversation.finished.v1")]
     ConversationFinished { conversation: Uuid },
     #[serde(rename = "grant.created.v1")]
@@ -249,6 +374,13 @@ pub enum Event {
         #[schemars(with = "String")]
         by: MemberId,
         setting: Setting,
+        /// The space a space-scoped setting was changed for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(with = "Option<String>")]
+        space: Option<SpaceId>,
+        /// The channel kind a per-kind setting was changed for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ChannelKind>,
     },
     /// SES accepted an email to the member; `cause` is the event that asked for it.
     #[serde(rename = "email.sent.v1")]
@@ -283,7 +415,17 @@ impl Event {
         match self {
             Event::ApprovalRequested { .. } => "approval.requested.v1",
             Event::ApprovalDecided { .. } => "approval.decided.v1",
+            Event::ApprovalExpired { .. } => "approval.expired.v1",
             Event::ConversationStarted { .. } => "conversation.started.v1",
+            Event::ConversationSessionReplaced { .. } => "conversation.session_replaced.v1",
+            Event::ConversationJoined { .. } => "conversation.joined.v1",
+            Event::ChannelInstalled { .. } => "channel.installed.v1",
+            Event::ChannelUpdated { .. } => "channel.updated.v1",
+            Event::ChannelRemoved { .. } => "channel.removed.v1",
+            Event::ChannelIdentityLinked { .. } => "channel_identity.linked.v1",
+            Event::ChannelIdentityUnlinked { .. } => "channel_identity.unlinked.v1",
+            Event::NotificationSent { .. } => "notification.sent.v1",
+            Event::MessageWithheld { .. } => "message.withheld.v1",
             Event::ConversationFinished { .. } => "conversation.finished.v1",
             Event::GrantCreated { .. } => "grant.created.v1",
             Event::GrantRevoked { .. } => "grant.revoked.v1",
@@ -405,9 +547,57 @@ pub(crate) fn samples() -> Vec<Event> {
             approval: u,
             decision: Decision::Approved,
             by: m.clone(),
+            via: Some(ChannelKind::Slack),
         },
-        Event::ConversationStarted { conversation: u },
+        Event::ApprovalExpired { approval: u },
+        Event::ConversationStarted {
+            conversation: u,
+            channel: Some(ChannelKind::Whatsapp),
+            handoff_from: Some(u),
+        },
+        Event::ConversationSessionReplaced { conversation: u },
+        Event::ConversationJoined {
+            conversation: u,
+            member: m.clone(),
+        },
         Event::ConversationFinished { conversation: u },
+        Event::ChannelInstalled {
+            installation: u,
+            kind: ChannelKind::Slack,
+            by: m.clone(),
+        },
+        Event::ChannelUpdated {
+            installation: u,
+            kind: ChannelKind::Slack,
+            by: m.clone(),
+        },
+        Event::ChannelRemoved {
+            installation: u,
+            kind: ChannelKind::Sms,
+            actor: Actor::System,
+        },
+        Event::ChannelIdentityLinked {
+            member: m.clone(),
+            kind: ChannelKind::Whatsapp,
+        },
+        Event::ChannelIdentityUnlinked {
+            member: m.clone(),
+            kind: ChannelKind::Slack,
+            actor: Actor::Directory,
+        },
+        Event::NotificationSent {
+            kind: ChannelKind::Slack,
+            cause: u,
+            member: Some(m.clone()),
+            approval: Some(u),
+        },
+        Event::MessageWithheld {
+            agent: AgentId::parse("a1").unwrap(),
+            kind: ChannelKind::Slack,
+            reason: WithheldReason::GuardBlocked,
+            member: Some(m.clone()),
+            conversation: Some(u),
+        },
         Event::GrantCreated { grant: u },
         Event::GrantRevoked { grant: u },
         Event::MemberCreated {
@@ -436,7 +626,9 @@ pub(crate) fn samples() -> Vec<Event> {
         Event::OrganizationChosen { member: m.clone() },
         Event::SettingChanged {
             by: m.clone(),
-            setting: Setting::TwoStep,
+            setting: Setting::ThreadMultiplayer,
+            space: Some(SpaceId::parse("sp-0123456789abcdef0123456789abcdef").unwrap()),
+            kind: Some(ChannelKind::Slack),
         },
         Event::EmailSent {
             member: m.clone(),
@@ -462,7 +654,7 @@ mod tests {
     #[test]
     fn type_names_are_versioned() {
         let all = samples();
-        assert_eq!(all.len(), 17, "add every new variant to samples()");
+        assert_eq!(all.len(), 27, "add every new variant to samples()");
         for e in &all {
             let t = e.event_type();
             assert!(EventType::parse(t).is_ok(), "{t}");
@@ -516,6 +708,13 @@ mod tests {
             // email.*: which template (an enum) and the event that caused the send (an id).
             "template",
             "cause",
+            // Channels (docs/channels.md, section 10): ids and the ChannelKind and reason enums.
+            "installation",
+            "channel",
+            "handoff_from",
+            "via",
+            "space",
+            "reason",
         ];
         fn walk(v: &Value) {
             match v {
@@ -547,6 +746,38 @@ mod tests {
                 data: e.data(),
             };
             assert_eq!(Event::from_envelope(&env).unwrap(), e);
+        }
+    }
+
+    #[test]
+    fn data_from_before_the_optional_fields_still_decodes() {
+        let u = Uuid::nil();
+        let old = [
+            (
+                "approval.decided.v1",
+                serde_json::json!({"approval": u, "decision": "denied", "by": "m1"}),
+            ),
+            (
+                "conversation.started.v1",
+                serde_json::json!({"conversation": u}),
+            ),
+            (
+                "setting.changed.v1",
+                serde_json::json!({"by": "m1", "setting": "two_step"}),
+            ),
+        ];
+        for (t, data) in old {
+            let env = Envelope {
+                id: u,
+                source: Source::core(),
+                r#type: EventType::parse(t).unwrap(),
+                tenant: TenantId::parse("t1").unwrap(),
+                occurred_at: OffsetDateTime::UNIX_EPOCH,
+                data: data.clone(),
+            };
+            let e = Event::from_envelope(&env).unwrap();
+            // Absent optional fields stay absent on the way back out.
+            assert_eq!(e.data(), data, "{t}");
         }
     }
 

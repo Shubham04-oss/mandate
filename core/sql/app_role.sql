@@ -62,3 +62,22 @@ grant select, insert on email_suppressions to :"role";
 grant select, insert on conversations to :"role";
 grant update (state, eve_session, eve_cursor, updated_at, finished_at) on conversations to :"role";
 grant select, insert on conversation_events, conversation_approvals, conversation_calls to :"role";
+
+-- Channels (RLS forced). Installations are created and disabled, never rewritten otherwise.
+grant select, insert on channel_installations to :"role";
+grant update (agent, credential_ref, disabled_at) on channel_installations to :"role";
+grant select, insert, delete on channel_identities, channel_links to :"role";
+grant update (attempts) on channel_links to :"role";
+grant select, insert on channel_spaces, channel_inbound to :"role";
+grant select, insert on channel_threads to :"role";
+grant update (conversation, last_inbound_at) on channel_threads to :"role";
+grant select, insert, delete on channel_messages to :"role";
+grant update (external_ref, sent_at) on channel_messages to :"role";
+-- RLS-free routes: ids only; added and removed with their tenant rows, never edited.
+grant select, insert, delete on channel_installation_routes, channel_identity_routes to :"role";
+-- Settings: changed and reset (deleted) by the people settings.md names.
+grant select, insert, delete on settings to :"role";
+grant update (value, updated_by, updated_at) on settings to :"role";
+-- Turns are appended and settled.
+grant select, insert on conversation_turns to :"role";
+grant update (settled_at) on conversation_turns to :"role";

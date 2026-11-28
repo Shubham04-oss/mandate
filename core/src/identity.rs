@@ -349,6 +349,11 @@ async fn issue(
         member,
         agent: req.agent,
         space: req.space,
+        principal: None,
+        conversation: None,
+        thread: None,
+        body: None,
+        purpose: None,
         // Never outlives the WorkOS proof it came from.
         expires_at: (now + TTL_SECS).min(c.expires_at),
     }))

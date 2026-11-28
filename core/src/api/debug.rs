@@ -88,6 +88,11 @@ async fn ask_eve(conv: &Conversations, session: &Session) -> Result<ApiError, Ap
         member: session.member.clone(),
         agent: AgentId::parse(AGENT).map_err(StoreError::from)?,
         space: None,
+        principal: None,
+        conversation: None,
+        thread: None,
+        body: None,
+        purpose: None,
         expires_at: OffsetDateTime::now_utc().unix_timestamp() + TTL_SECS,
     };
     let token = sign(&a, &conv.app.assertion_signing_key);

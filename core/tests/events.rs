@@ -71,6 +71,8 @@ fn signed(signer: &Signer, t: &TenantId, e: &Event) -> Vec<u8> {
 fn started(n: u128) -> Event {
     Event::ConversationStarted {
         conversation: Uuid::from_u128(n),
+        channel: None,
+        handoff_from: None,
     }
 }
 
@@ -279,7 +281,7 @@ async fn publisher_sends_in_order_per_tenant() {
                 let raw = serde_json::to_vec(s).unwrap();
                 let env = keys.verify(&raw, OffsetDateTime::now_utc()).unwrap();
                 match Event::from_envelope(&env).unwrap() {
-                    Event::ConversationStarted { conversation } => conversation.as_u128(),
+                    Event::ConversationStarted { conversation, .. } => conversation.as_u128(),
                     other => panic!("{other:?}"),
                 }
             })

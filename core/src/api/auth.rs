@@ -1041,6 +1041,8 @@ async fn mfa_enable(
         events::Event::SettingChanged {
             by: me.member.clone(),
             setting: events::Setting::TwoStep,
+            space: None,
+            kind: None,
         },
     )
     .await?;
@@ -1635,6 +1637,8 @@ async fn sign_in(
         let e = events::Event::SettingChanged {
             by: member.clone(),
             setting: events::Setting::TwoStep,
+            space: None,
+            kind: None,
         };
         events::publish(&mut tx, e).await?;
     }

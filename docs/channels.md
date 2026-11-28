@@ -920,11 +920,23 @@ pub struct Secret(String);
 Errors are `thiserror` enums (`ChannelError`, `CredentialError`, `DecisionError`); messages never
 contain provider text. No `unwrap` or `expect` outside tests and `main`.
 
+As landed: `CredentialStore`, `CredentialKey`, `Secret` and `CredentialError` live in
+`credentials.rs` and are re-exported from `mod.rs`; `DecisionError` is stream B's, in
+`decision.rs`. `ExternalId`, `ThreadKey` and `MessageRef` share one parser (the charset above;
+128, 256 and 256 bytes) and print `[redacted]` in `Debug`; `Button` redacts its token and `Inbound`
+has no `Debug`, so a decision token cannot reach a log. `public_routes()`, `web_routes()` and
+`private_routes()` come with the routes, not the first commit.
+
 **Changes to existing core modules** (owner in brackets):
 
-- `assertion.rs` [B]: the fields and purposes of section 5; `Principal { Member(MemberId), Agent }`
-  with the wire format above; `verify_with_grace(token, key, now, grace)` for the registry and
-  renewal. Every existing call site keeps `purpose: turn`.
+- `assertion.rs` [B]: the fields and purposes of section 5; `verify_with_grace(token, key, now,
+  grace)` (any purpose, `RENEW_GRACE` = 2 h) for the registry and renewal, which check the purpose
+  they accept; `verify` accepts only `turn` tokens, so `/mcp` already refuses `forward` and
+  `answer`. Every existing call site keeps `purpose: turn` (absent on the wire). `thread` and
+  `body` are refused on any purpose but `forward`, and a `forward` token must name its `thread`.
+  As landed first, `principal` is `Option<PrincipalKind>` and `member` stays required, so an
+  `agent` principal is refused at verify (fail closed); the agent-principal work makes `member`
+  optional, adds `Principal { Member(MemberId), Agent }` and the gate's `agent_principal` refusal.
 - `mcp.rs` [B]: `bearer` accepts only `turn` tokens; renewal route; and the tool-listing changes:
   - `_meta` on each listed tool carries the decision, `{"mandate/decision": "run" | "ask"}`
     (`rmcp::model::Tool::meta`, serialized as `_meta` in rmcp 3.11.0), replacing the
@@ -1162,7 +1174,7 @@ events, assertion fields) go first and small, so the others compile against them
 
 | Stream | Owns | May touch | Exposes | Consumes |
 | --- | --- | --- | --- | --- |
-| **A** core channels: gateway, proxy, registry, Slack, identity, credentials | `core/src/channels/{mod,gateway,proxy,registry,identity,credentials,slack}.rs`; `core/migrations/0026_channels.sql`, `0027_conversation_registry.sql`; `core/sql/app_role.sql`; `core/src/eve.rs`; `core/src/settings.rs`; `core/src/lib.rs`; `core/src/main.rs`; `core/Cargo.toml` and `Cargo.lock` (adds `hmac`, `sha1`, `aws-sdk-secretsmanager` in its first commit, for all streams); `core/tests/channels_*.rs`; the "Channels" section of `docs/security.md`; `docs/settings.md` after this commit | `core/src/identity.rs` (unlink a removed member's identities in the removal transaction) | section 11 types and traits; `SlackDeliver`; routes of 6.1–6.3 except renewal; `EveClient::start` | B's `CoreActions` impl, `ApprovalNotify` and `CardUpdate` (to register); `Conversations::kick`; `guard::screen`; `assertion::sign` |
+| **A** core channels: gateway, proxy, registry, Slack, identity, credentials | `core/src/channels/{mod,gateway,proxy,registry,identity,credentials,slack}.rs`; `core/migrations/0026_channels.sql`, `0027_conversation_registry.sql`; `core/sql/app_role.sql`; `core/src/eve.rs`; `core/src/settings.rs`; `core/src/lib.rs`; `core/src/main.rs`; `core/Cargo.toml` and `Cargo.lock` (adds `hmac`, `sha1`, `aws-sdk-secretsmanager`, `subtle`, `serde_urlencoded` in its first commit, for all streams); `core/tests/channels_*.rs`; the "Channels" section of `docs/security.md`; `docs/settings.md` after this commit | `core/src/identity.rs` (unlink a removed member's identities in the removal transaction) | section 11 types and traits; `SlackDeliver`; routes of 6.1–6.3 except renewal; `EveClient::start` | B's `CoreActions` impl, `ApprovalNotify` and `CardUpdate` (to register); `Conversations::kick`; `guard::screen`; `assertion::sign` |
 | **B** approvals, principal and space, renewal, approval subscribers, MCP listing | `core/src/assertion.rs`, `gate.rs`, `policy.rs`, `mcp.rs`, `store.rs`, `tools/mod.rs` (`Catalog` order); `core/src/api/approvals.rs`, `api/conversations.rs`; `core/src/channels/{decision,notify}.rs`; `policies/*`; `core/migrations/0028_channel_approvals.sql`; `core/src/events/{mod,posthog,email}.rs`, `schema/events/v1.json`, `docs/events.md`; the expiry sweep; tests for these | `core/src/main.rs` (register its consumers and `Decisions`); `core/src/api/debug.rs`, `identity.rs` (new `Assertion` fields at their construction sites) | `Decisions: CoreActions`; `ApprovalNotify`, `CardUpdate`; every event type of 10.2 (variants, samples, schema, catalog rows) in its first commit; `Assertion` fields and `verify_with_grace`; renewal route; `decide_approval(.., via)` | A's `Deliver`, `Card`; `conversation_turns`, `channel_messages` |
 | **C** eve wiring | `agents/**` except `agents/agent/channels/whatsapp.ts` and the eve version bump (`package.json`, lockfile: the upgrade work owns those; C rebases on it) | — | `lib/forward.ts` (`verifyForward`, `wrapChannel`, `withProxyKey`) | core routes of 6.3 and 6.4's contract |
 | **D** infra | `infra/**`; `docs/deploy.md` (Slack app and Twilio setup, secrets) | — | env vars and secrets of section 13; the consumers, queues, receive limits and alarms of 10.3 exactly; IAM; `channels_enabled` | — |
