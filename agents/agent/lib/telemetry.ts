@@ -104,6 +104,9 @@ export function collector(env: NodeJS.ProcessEnv) {
   });
 }
 
+// A channel proxy file or upload path names provider files; only the route is kept.
+const CHANNEL_FILE_PATH = /^(\/private\/v1\/channels\/[a-z]+\/(?:files|uploads)\/).*$/;
+
 /** Query strings and fragments never leave: they can carry tokens. */
 export function scrubAttribute({
   key,
@@ -113,6 +116,9 @@ export function scrubAttribute({
   value: unknown;
 }): SpanAttributeDecision {
   if (key === "url.query") return { emit: false };
+  if (key === "url.path" && typeof value === "string" && CHANNEL_FILE_PATH.test(value)) {
+    return { replace: true, value: value.replace(CHANNEL_FILE_PATH, "$1") };
+  }
   if (key !== "url.full" && key !== "http.url") return { emit: true };
   if (typeof value !== "string" || !URL.canParse(value)) return { emit: false };
   const url = new URL(value);
@@ -120,6 +126,7 @@ export function scrubAttribute({
   url.hash = "";
   url.username = "";
   url.password = "";
+  url.pathname = url.pathname.replace(CHANNEL_FILE_PATH, "$1");
   return { replace: true, value: url.href };
 }
 

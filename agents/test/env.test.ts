@@ -15,6 +15,8 @@ const good = {
   MANDATE_AI_GATEWAY_KEY: "test-gateway-key",
   MANDATE_MODEL_DEFAULT: "dynamic/test",
   MANDATE_ASSERTION_PUBLIC_KEY: ed25519,
+  MANDATE_CORE_PRIVATE_URL: "http://core.internal:8080",
+  MANDATE_CHANNEL_PROXY_KEY: "test-proxy-key",
 };
 
 const posthogOn = { POSTHOG_API_KEY: "phc_test", POSTHOG_HOST: "https://eu.i.posthog.com" };
@@ -55,6 +57,13 @@ test("bad URLs and keys are named without echoing the value", () => {
     assert.equal(rest.length, 0);
     assert.ok(p?.startsWith(`${name} ${msg}`), p);
     assert.ok(!p?.includes(value), p);
+  }
+});
+
+test("a provider secret in eve's environment refuses to start", () => {
+  for (const name of ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "TWILIO_AUTH_TOKEN"]) {
+    const problems = envProblems({ ...good, [name]: "xoxb-real-secret" });
+    assert.deepEqual(problems, [`${name} must not be set`]);
   }
 });
 

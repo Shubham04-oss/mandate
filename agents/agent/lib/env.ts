@@ -3,12 +3,16 @@
 import { loadPublicKey } from "#lib/assertion.ts";
 import { posthogConfig } from "#lib/posthog.ts";
 
-const URLS = ["MANDATE_AI_GATEWAY_URL", "MANDATE_CORE_MCP_URL"];
-const REQUIRED = ["MANDATE_AI_GATEWAY_KEY", "MANDATE_MODEL_DEFAULT"];
+// The registry hook and the Slack channel need the core's private URL and the proxy key.
+const URLS = ["MANDATE_AI_GATEWAY_URL", "MANDATE_CORE_MCP_URL", "MANDATE_CORE_PRIVATE_URL"];
+const REQUIRED = ["MANDATE_AI_GATEWAY_KEY", "MANDATE_MODEL_DEFAULT", "MANDATE_CHANNEL_PROXY_KEY"];
+// eve holds no provider secret: the core verifies providers and its proxy holds their tokens.
+const FORBIDDEN = ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "TWILIO_AUTH_TOKEN"];
 
-/** One message per missing or invalid variable; names only, never a value. */
+/** One message per missing, invalid or forbidden variable; names only, never a value. */
 export function envProblems(env: NodeJS.ProcessEnv): string[] {
   const problems: string[] = [];
+  for (const name of FORBIDDEN) if (env[name]) problems.push(`${name} must not be set`);
   for (const name of URLS) {
     if (!env[name]) problems.push(`${name} is not set`);
     else if (!URL.canParse(env[name])) problems.push(`${name} is not a valid URL`);

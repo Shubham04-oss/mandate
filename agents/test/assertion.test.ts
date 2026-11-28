@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { test } from "node:test";
-import { verifyAssertion } from "../agent/lib/assertion.ts";
+import { bodyHash, readAssertion, verifyAssertion } from "../agent/lib/assertion.ts";
+import { CONVERSATION, THREAD } from "./tokens.ts";
 
 // Keys are generated per run: no key material lives in the repo.
 const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -14,8 +15,30 @@ function token(body: object, key = privateKey): string {
 
 const good = { tenant: "acme", member: "ann", agent: "ann-op", expires_at: 1000 };
 
-test("a core assertion verifies", () => {
-  assert.deepEqual(verifyAssertion(token(good), publicKey, 999), good);
+test("a core assertion verifies; absent principal and purpose mean member and turn", () => {
+  assert.deepEqual(verifyAssertion(token(good), publicKey, 999), {
+    ...good,
+    principal: "member",
+    purpose: "turn",
+  });
+});
+
+test("the channel fields parse", () => {
+  const body = bodyHash("{}");
+  const fwd = {
+    ...good,
+    space: "sp-9c1e",
+    conversation: CONVERSATION,
+    thread: THREAD,
+    body,
+    purpose: "forward",
+  };
+  assert.deepEqual(verifyAssertion(token(fwd), publicKey, 0), { ...fwd, principal: "member" });
+  const { member: _, ...agent } = good;
+  assert.equal(
+    verifyAssertion(token({ ...agent, principal: "agent" }), publicKey, 0)?.principal,
+    "agent",
+  );
 });
 
 test("expired, forged, tampered or malformed assertions are refused", () => {
@@ -35,13 +58,28 @@ test("expired, forged, tampered or malformed assertions are refused", () => {
   }
 });
 
-test("invalid ids inside a valid signature are refused", () => {
+test("readAssertion checks the signature and ignores expiry", () => {
+  assert.equal(readAssertion(token(good), publicKey)?.member, "ann");
+  assert.equal(readAssertion(token(good, other.privateKey), publicKey), null);
+});
+
+test("invalid fields inside a valid signature are refused", () => {
+  const { member: _, ...noMember } = good;
   for (const body of [
     { ...good, tenant: "BAD ID" },
     { ...good, member: "" },
     { ...good, agent: 7 },
     { ...good, expires_at: "1000" },
+    { ...good, purpose: "admin" },
+    { ...good, principal: "root" },
+    // A member principal names a member; an agent principal names none.
+    noMember,
+    { ...good, principal: "agent" },
+    { ...good, conversation: "not-a-uuid" },
+    { ...good, thread: "x" },
+    { ...good, body: "short" },
+    { ...good, space: "Sp 1" },
   ]) {
-    assert.equal(verifyAssertion(token(body), publicKey, 0), null);
+    assert.equal(verifyAssertion(token(body), publicKey, 0), null, JSON.stringify(body));
   }
 });
