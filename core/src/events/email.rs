@@ -9,7 +9,7 @@
 use super::{EmailTemplate, Envelope, Event, Handler, HandlerError, Source, publish};
 use crate::api::approvals;
 use crate::email::templates::Templates;
-use crate::email::{Mail, MailError, Mailer, OrgNames, address_hash, expires_in};
+use crate::email::{Mail, MailError, Mailer, Names, address_hash, expires_in};
 use crate::store::{Store, StoreError, Tx};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ pub const TEMPLATES: &[(&str, &[&str])] = &[(
         "email",
         "requester",
         "agent",
+        "agent_inline",
         "organization",
         "url",
         "expires_in",
@@ -35,7 +36,7 @@ pub struct Email {
     store: Store,
     templates: Arc<Templates>,
     mailer: Arc<dyn Mailer>,
-    orgs: Arc<dyn OrgNames>,
+    names: Arc<dyn Names>,
     /// `MANDATE_WEB_ORIGIN`, e.g. `https://app.oryxa.in`: every link points into the app.
     web_origin: String,
 }
@@ -45,14 +46,14 @@ impl Email {
         store: Store,
         templates: Arc<Templates>,
         mailer: Arc<dyn Mailer>,
-        orgs: Arc<dyn OrgNames>,
+        names: Arc<dyn Names>,
         web_origin: &str,
     ) -> Email {
         Email {
             store,
             templates,
             mailer,
-            orgs,
+            names,
             web_origin: web_origin.trim_end_matches('/').to_owned(),
         }
     }
@@ -78,6 +79,39 @@ impl Handler for Email {
     }
 }
 
+type NamesRow = (
+    OffsetDateTime,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+);
+
+fn nonempty(s: Option<String>) -> Option<String> {
+    s.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+/// The agent as it starts a sentence and as it reads inside one. Its own name when it has one;
+/// otherwise who it belongs to, from the reader's side: a personal agent is decided only by its
+/// owner, so it is "your agent"; a team agent goes to the team.
+fn agent_names(name: Option<String>, kind: &str, team: Option<String>) -> (String, String) {
+    if let Some(n) = name {
+        return (n.clone(), n);
+    }
+    let inline = match (kind, team) {
+        ("team", Some(t)) => format!("the {t} team's agent"),
+        ("team", None) => "your team's agent".to_owned(),
+        _ => "your agent".to_owned(),
+    };
+    let mut start = inline.clone();
+    if let Some(first) = start.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    (start, inline)
+}
+
 impl Email {
     async fn approval_requested(
         &self,
@@ -90,23 +124,21 @@ impl Email {
         if deciders.is_empty() {
             return Ok(());
         }
-        let (expires_at, requester, agent, workos_org): (
-            OffsetDateTime,
-            Option<String>,
-            Option<String>,
-            String,
-        ) = sqlx::query_as(
-            "select a.expires_at, req.name, g.name, t.workos_org_id from approvals a \
+        let row: NamesRow = sqlx::query_as(
+            "select a.expires_at, req.name, req.workos_user_id, g.name, g.kind, team.name, \
+             t.workos_org_id from approvals a \
              join agents g on g.tenant_id = a.tenant_id and g.id = a.agent \
              join tenants t on t.id = a.tenant_id \
              left join members req on req.tenant_id = a.tenant_id and req.id = a.requested_by \
+             left join teams team on team.tenant_id = a.tenant_id and team.id = g.owner_team \
              where a.tenant_id = current_setting('mandate.tenant', true) and a.id = $1",
         )
         .bind(approval)
         .fetch_one(&mut **tx)
         .await
         .map_err(StoreError::from)?;
-        let organization = self.orgs.name(&workos_org).await.map_err(retry)?;
+        let (expires_at, requester, requester_workos, agent_name, kind, team, workos_org) = row;
+        let organization = self.names.organization(&workos_org).await.map_err(retry)?;
         let suppressed: Vec<Vec<u8>> = sqlx::query_scalar(
             "select address_hash from email_suppressions where address_hash = any($1)",
         )
@@ -119,12 +151,16 @@ impl Email {
         .fetch_all(&mut **tx)
         .await
         .map_err(StoreError::from)?;
-        let named = |n: Option<String>, otherwise: &str| {
-            n.filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| otherwise.to_owned())
+        let requester = match nonempty(requester) {
+            Some(n) => n,
+            None => match requester_workos {
+                Some(u) => self.names.person(&u).await,
+                None => None,
+            }
+            // Only ever the start of a sentence in the template.
+            .unwrap_or_else(|| "A teammate".to_owned()),
         };
-        let requester = named(requester, "A teammate");
-        let agent = named(agent, "The agent");
+        let (agent, agent_inline) = agent_names(nonempty(agent_name), &kind, nonempty(team));
         let url = format!("{}/approvals", self.web_origin);
         let expires = expires_in(expires_at - now);
         let template = self
@@ -140,6 +176,7 @@ impl Email {
                     ("email", &d.email),
                     ("requester", &requester),
                     ("agent", &agent),
+                    ("agent_inline", &agent_inline),
                     ("organization", &organization),
                     ("url", &url),
                     ("expires_in", &expires),
@@ -258,5 +295,36 @@ impl Email {
         )
         .await?;
         Ok(tx.commit().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_names;
+
+    #[test]
+    fn an_agent_reads_right_at_the_start_of_a_sentence_and_inside_one() {
+        let n = |name: Option<&str>, kind, team: Option<&str>| {
+            agent_names(name.map(Into::into), kind, team.map(Into::into))
+        };
+        assert_eq!(
+            n(Some("Research agent"), "team", Some("eng")),
+            ("Research agent".into(), "Research agent".into())
+        );
+        assert_eq!(
+            n(None, "personal", None),
+            ("Your agent".into(), "your agent".into())
+        );
+        assert_eq!(
+            n(None, "team", Some("Growth")),
+            (
+                "The Growth team's agent".into(),
+                "the Growth team's agent".into()
+            )
+        );
+        assert_eq!(
+            n(None, "team", None),
+            ("Your team's agent".into(), "your team's agent".into())
+        );
     }
 }

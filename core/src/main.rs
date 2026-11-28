@@ -299,7 +299,7 @@ fn email(
         Option<tokio::task::JoinHandle<()>>,
     )>,
 > {
-    use mandate::email::{Ses, WorkosOrgs, feedback, templates::Templates};
+    use mandate::email::{Ses, WorkosNames, feedback, templates::Templates};
     use mandate::events::email::{Email, TEMPLATES};
     let Ok(configuration_set) = env("MANDATE_EMAIL_CONFIGURATION_SET") else {
         tracing::info!("MANDATE_EMAIL_CONFIGURATION_SET not set: no email is sent");
@@ -312,7 +312,7 @@ fn email(
         store.clone(),
         Arc::new(templates),
         Arc::new(Ses::new(aws, configuration_set)),
-        Arc::new(WorkosOrgs(workos)),
+        Arc::new(WorkosNames(workos)),
         &env("MANDATE_WEB_ORIGIN")?,
     );
     let feedback = match env("MANDATE_EMAIL_FEEDBACK_QUEUE") {

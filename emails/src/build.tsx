@@ -53,6 +53,7 @@ const templates: Record<string, Template> = {
       email: "raya@acme.com",
       requester: "Priya Shah",
       agent: "Raya's agent",
+      agentInline: "Raya's agent",
       organization: "Acme",
       url: "https://app.oryxa.in/approvals",
       expiresIn: "1 hour",

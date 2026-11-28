@@ -8,7 +8,7 @@ use ed25519_dalek::SigningKey;
 use mandate::api::approvals::{Decision, decide_approval, deciders};
 use mandate::email::feedback::{self, Feedback, Kind};
 use mandate::email::templates::Templates;
-use mandate::email::{Mail, MailError, Mailer, OrgNames, address_hash};
+use mandate::email::{Mail, MailError, Mailer, Names, address_hash};
 use mandate::events::consume::{Consumer, Outcome};
 use mandate::events::email::{Email, TEMPLATES};
 use mandate::events::sign::{Keyring, Signer};
@@ -62,21 +62,26 @@ impl Outbox {
 struct Acme;
 
 #[async_trait]
-impl OrgNames for Acme {
-    async fn name(&self, _: &str) -> Result<String, MailError> {
+impl Names for Acme {
+    async fn organization(&self, _: &str) -> Result<String, MailError> {
         Ok("Acme & Co".into())
+    }
+
+    /// Only `user_eve` has a name in WorkOS.
+    async fn person(&self, workos_user: &str) -> Option<String> {
+        (workos_user == "user_eve").then(|| "Eve Ito".to_owned())
     }
 }
 
 /// A template with every placeholder the real one uses, in each part.
 fn templates() -> Arc<Templates> {
     let dir = tempfile::tempdir().unwrap();
-    let all = "{{email}}|{{requester}}|{{agent}}|{{organization}}|{{url}}|{{expires_in}}";
+    let all = "{{email}}|{{requester}}|{{agent}}|{{agent_inline}}|{{organization}}|{{url}}|{{expires_in}}";
     std::fs::write(
         dir.path().join("manifest.json"),
         json!({"approval-requested": {
             "subject": "{{agent}} is waiting for your yes",
-            "placeholders": ["email", "requester", "agent", "organization", "url", "expires_in"],
+            "placeholders": ["email", "requester", "agent", "agent_inline", "organization", "url", "expires_in"],
         }})
         .to_string(),
     )
@@ -272,12 +277,12 @@ async fn emails_each_decider_once_with_escaped_names_and_ids_only_tags() {
     assert_eq!(cy.subject, "Team bot is waiting for your yes");
     assert!(
         cy.html
-            .contains("&lt;b&gt;Ann&lt;/b&gt;|Team bot|Acme &amp; Co")
+            .contains("&lt;b&gt;Ann&lt;/b&gt;|Team bot|Team bot|Acme &amp; Co")
     );
     assert!(cy.html.contains("|https://app.example.com/approvals|"));
     assert!(
         cy.text
-            .starts_with("cy@example.com|<b>Ann</b>|Team bot|Acme & Co|")
+            .starts_with("cy@example.com|<b>Ann</b>|Team bot|Team bot|Acme & Co|")
     );
     let tags: Vec<_> = cy.tags.iter().map(|(k, _)| *k).collect();
     assert_eq!(tags, ["tenant", "member", "event", "template"]);
@@ -290,6 +295,67 @@ async fn emails_each_decider_once_with_escaped_names_and_ids_only_tags() {
         .map(|(_, d)| d["member"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(sent_events, ["cy", "dee"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn names_come_from_people_and_teams_and_read_right_mid_sentence() {
+    let s = app_store().await;
+    let t = org(&s).await;
+    // Eve has no saved name but one in WorkOS; neither agent has a name of its own.
+    exec(
+        &s,
+        &t,
+        "insert into members (tenant_id, id, email, workos_user_id) values ($1, 'eve', 'eve@example.com', 'user_eve')",
+        &[],
+    )
+    .await;
+    admin_exec(
+        "update agents set name = null where tenant_id = $1",
+        &[t.as_str()],
+    )
+    .await;
+    let r = rig(s.clone());
+
+    // A personal agent is decided only by its owner, so to them it is "your agent".
+    let id = ask(&s, &t, "ann-bot", "eve", json!({ "n": 1 })).await;
+    assert_eq!(
+        r.deliver(&r.delivery(&t, id, "ann-bot")).await,
+        Outcome::Handled
+    );
+    let sent = r.mail.sent.lock().unwrap().clone();
+    assert_eq!(sent[0].to, "ann@example.com");
+    assert!(
+        sent[0]
+            .text
+            .starts_with("ann@example.com|Eve Ito|Your agent|your agent|"),
+        "{}",
+        sent[0].text
+    );
+    assert_eq!(sent[0].subject, "Your agent is waiting for your yes");
+
+    // A team agent goes to the team; a requester with no name anywhere is "A teammate".
+    exec(
+        &s,
+        &t,
+        "update members set name = null where tenant_id = $1 and id = 'bob'",
+        &[],
+    )
+    .await;
+    let id = ask(&s, &t, "eng-bot", "bob", json!({ "n": 2 })).await;
+    assert_eq!(
+        r.deliver(&r.delivery(&t, id, "eng-bot")).await,
+        Outcome::Handled
+    );
+    let sent = r.mail.sent.lock().unwrap().clone();
+    let to_cy = sent.iter().find(|m| m.to == "cy@example.com").unwrap();
+    assert!(
+        to_cy
+            .text
+            .starts_with("cy@example.com|A teammate|The eng team's agent|the eng team's agent|"),
+        "{}",
+        to_cy.text
+    );
 }
 
 #[tokio::test]

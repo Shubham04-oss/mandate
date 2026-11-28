@@ -107,23 +107,39 @@ impl Mailer for Ses {
     }
 }
 
-/// The organization's display name, from WorkOS (the core stores none).
+/// Display names from WorkOS: the core stores no organization names, and members' saved names
+/// can be empty.
 #[async_trait]
-pub trait OrgNames: Send + Sync {
-    async fn name(&self, workos_org: &str) -> Result<String, MailError>;
+pub trait Names: Send + Sync {
+    async fn organization(&self, workos_org: &str) -> Result<String, MailError>;
+    /// The person's full name, or `None` when WorkOS has none or can't be reached: a name only
+    /// reads better, so its absence never holds an email up.
+    async fn person(&self, workos_user: &str) -> Option<String>;
 }
 
-pub struct WorkosOrgs(pub workos::Client);
+pub struct WorkosNames(pub workos::Client);
 
 #[async_trait]
-impl OrgNames for WorkosOrgs {
-    async fn name(&self, workos_org: &str) -> Result<String, MailError> {
+impl Names for WorkosNames {
+    async fn organization(&self, workos_org: &str) -> Result<String, MailError> {
         self.0
             .organizations()
             .get_organization(workos_org)
             .await
             .map(|o| o.name)
             .map_err(|_| MailError::Retryable("workos organization lookup failed".into()))
+    }
+
+    async fn person(&self, workos_user: &str) -> Option<String> {
+        let u = self.0.user_management().get_user(workos_user).await.ok()?;
+        let full = [u.first_name, u.last_name]
+            .into_iter()
+            .flatten()
+            .map(|p| p.trim().to_owned())
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!full.is_empty()).then_some(full)
     }
 }
 

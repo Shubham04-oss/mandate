@@ -7,6 +7,8 @@ export default function ApprovalRequested(p: {
   email: string;
   requester: string;
   agent: string;
+  /** The agent inside a sentence: the same name, or "your agent" where `agent` is "Your agent". */
+  agentInline: string;
   organization: string;
   url: string;
   expiresIn: string;
@@ -15,10 +17,10 @@ export default function ApprovalRequested(p: {
     <Layout
       assets={p.assets}
       title={`${p.agent} is waiting for your yes`}
-      preview={`${p.requester} asked ${p.agent} to do something that needs your approval.`}
+      preview={`${p.requester} asked ${p.agentInline} to do something that needs your approval.`}
       scene="moon-dawn-v2"
       headline={`${p.agent} is waiting for your yes.`}
-      sub={`${p.requester} asked ${p.agent} to do something that needs your approval. Nothing happens until you decide.`}
+      sub={`${p.requester} asked ${p.agentInline} to do something that needs your approval. Nothing happens until you decide.`}
       chip={
         <>
           <Ember />
@@ -31,7 +33,7 @@ export default function ApprovalRequested(p: {
       }
       caption={{
         title: "Why you're getting this",
-        body: `You approve requests for ${p.agent} in ${p.organization}.`,
+        body: `You approve requests for ${p.agentInline} in ${p.organization}.`,
       }}
       to={p.email}
     >
