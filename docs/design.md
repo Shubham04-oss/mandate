@@ -58,31 +58,40 @@ granted.
 
 ## 6. Users and surfaces
 
-- **Members** talk to their operator and to team bots in **Slack and Microsoft Teams** first, and in
-  the **web app** (a PWA, push notifications for approvals).
+- **Members** talk to their operator and to team bots on the channels they link: **Slack** first,
+  then **WhatsApp and SMS**, later Microsoft Teams and others, and in the **web app** (a PWA, push
+  notifications for approvals). One person moves between them: ask in Slack, approve on WhatsApp,
+  see it all on the web.
 - **Team admins** create team bots and grant them tools and connections.
 - **Workspace admins** connect apps, set org policy, see audit.
-- **Owners** approve requests from cards in Slack, Teams or the web app, and watch or take over a
-  browser in live view.
+- **Owners** approve requests from cards on any channel they use or the web app, and watch or take
+  over a browser in live view.
 
 ## 7. Architecture
 
 ```
-Cloudflare   DNS . WAF . Turnstile          web app (TypeScript Worker, PWA)
-                 |                                   |
-AWS              v                                   v
-   eve (TypeScript, ECS Fargate)  <-- channels: Slack, Teams, web
-      | MCP (every tool)      | approval hook, tool list
-      v                       v
+Slack . WhatsApp/SMS (Twilio) . later Teams           browser
+       | webhooks                                     |
+Cloudflare   DNS . WAF . Turnstile . Tunnel (/v1 only)     web app (TypeScript Worker, PWA)
+       |                                              |
+AWS    v                                              v
    mandate core (one Rust binary, ECS Fargate)
-      policy (Cedar) . grants and consent . MCP tool server . brokering . output guard . audit
-      |            |                  |                    |
+      channel gateway (in) . policy (Cedar) . grants and consent . MCP tool server
+      brokering . channel proxy (out) . output guard . audit
+      |   | forward turn + assertion          ^ MCP (every tool), session reports,
+      |   v                                   | channel API calls through the proxy
+      |  eve (TypeScript, ECS Fargate, private): channel adapters, threads, cards, durable sessions
+      |
    RDS         AgentCore Identity  AgentCore Browser     Bedrock Guardrails
    PostgreSQL  (token vault)       (live view, S3        (output guard)
                                     recordings)
    models: our AI gateway, provider-agnostic, used by eve and the core
-   + KMS . SQS . CloudTrail . S3
+   + KMS . SQS . EventBridge . CloudTrail . S3
 ```
+
+The core sits in front of every channel and behind it: eve runs the channels, but every inbound
+message reaches eve through the core, and every outbound call leaves through it. The contract for
+channels, multiplayer and channel-neutral approvals is [channels.md](channels.md).
 
 Three artifacts: the `mandate` Rust binary, the eve image, the web Worker.
 
@@ -98,20 +107,23 @@ Owns every decision and every credential path. Modes of one binary (`mandate ser
 - **Grants and consent.** A grant is a row: principal, scope, conditions, expiry, granted-by, reason.
   "Allow for an hour" is a grant with a one-hour expiry. Grants are read into Cedar context, so an
   expired grant stops working the moment it expires, with no clean-up job.
-- **Tool listing.** For a caller, agent, space and run, returns the tools the agent may see, each
-  tagged `run` or `ask`; refused tools are absent.
-- **MCP tool server.** The only way the brain reaches a tool. Every call: authenticate the run token,
-  evaluate policy, fetch a short-lived credential from the token vault, call, audit. Built on the
+- **Tool listing.** For a caller, agent, space and conversation, returns the tools the agent may
+  see, each tagged `run` or `ask`; refused tools are absent.
+- **MCP tool server.** The only way the brain reaches a tool. Every call: verify the caller's
+  assertion, evaluate policy, fetch a short-lived credential from the token vault, call, audit. Built on the
   official Rust MCP SDK (`rmcp`).
-- **Brokering.** Agent-to-agent requests (eve's A2A channel) land in the core, are authorized, wait
-  for the owner's consent, and run in the owner's agent with the owner's credentials.
+- **Brokering.** An agent asks another person's agent through a core tool (`ask_member`), not
+  through eve. The core authorizes the ask, waits for the owner's consent, and runs it in the owner's
+  agent with the owner's credentials. eve's A2A channel is not used.
 - **Output guard.** Bedrock Guardrails `ApplyGuardrail` on everything an agent posts and everything
-  one agent sends another: personal data, credentials, denied topics, grounding.
+  one agent sends another: personal data, credentials, denied topics, grounding. On channels it runs
+  in the core's channel proxy, on every message and streamed update eve sends.
 - **Audit.** Every decision (allowed, asked, refused, approved by whom) is an append-only row and a
   CloudTrail-adjacent log.
-- **Identity at the edge.** The core, not eve, verifies who people are. Slack and Teams events and
-  card clicks hit the core first; it checks the platform signature, resolves the sender to a member,
-  and forwards the turn to eve with a signed, short-lived assertion (tenant, member, space). eve
+- **Identity at the edge.** The core, not eve, verifies who people are. Channel webhooks (Slack,
+  WhatsApp, ...) and card clicks hit the core first; it checks the provider's signature, resolves
+  the sender to a linked member, and forwards the turn to eve with a signed, short-lived assertion
+  (tenant, member, agent, space). See [channels.md](channels.md). eve
   passes that assertion back on every tool call and approval; the core rejects anything without a
   valid one. The web app signs in through the core (OIDC with the org's identity provider). So a
   broken eve cannot forge who asked, who approved, or which tenant a run belongs to.
@@ -120,8 +132,8 @@ Owns every decision and every credential path. Modes of one binary (`mandate ser
   tenant. Directory sync (SCIM) feeds members, teams and team membership, pulled from the WorkOS
   Events API (no inbound webhook endpoint); a user removed from the directory loses their grants and
   pending approvals at once. The core verifies WorkOS access tokens against WorkOS's published keys,
-  then mints its own assertion: WorkOS proves the person, Mandate decides access. Slack and Teams
-  users are linked to members once, through a WorkOS sign-in.
+  then mints its own assertion: WorkOS proves the person, Mandate decides access. Channel accounts
+  (Slack, Teams, phone numbers) are linked to members from the web app (OAuth, or a code for phones).
   *Owner's decision (2026-11-21):* the sign-in UI is Mandate's own, built on WorkOS's headless APIs
   called through the core: an email magic code, and SSO through the customer's identity provider.
   No custom domain. The web app never calls WorkOS directly. *Updated by the owner (2026-11-21):*
@@ -134,13 +146,19 @@ Owns every decision and every credential path. Modes of one binary (`mandate ser
 
 ### 8.2 The brain (eve, untrusted)
 [eve](https://github.com/vercel/eve) (Vercel, Apache-2.0) runs conversations: durable sessions that
-wait for approvals without holding compute, channels (Slack, Teams, web first), multiplayer identity
-(who sent each turn, who started the session, which space it is in), A2A, compaction, evals.
+wait for approvals without holding compute, channels (Slack first, then WhatsApp and SMS through
+Twilio), multiplayer identity (who sent each turn, who started the session, which space it is in),
+compaction, evals.
 
 It holds no credentials and decides nothing about access:
-- Its agent-wide `approval` policy and `defineDynamic` tools call the core, so cards appear early and
-  the model only sees allowed tools, but the core checks again on every execution.
-- It reaches tools only through the core's MCP server, with a short-lived run token the core issued.
+- Its agent-wide `approval` policy lists the core's tools for the turn's caller, so a tool the core
+  does not list is denied and an `ask` tool pauses for approval early. The model reaches tools through
+  eve's catalog search over the core's MCP connection; `defineDynamic` builds only the model and
+  that connection. The core checks again on every execution.
+- It reaches tools only through the core's MCP server, with the core's short-lived signed assertion
+  for the turn, renewed through the core while the turn lasts.
+- Its channels post through the core's channel proxy, which holds the provider tokens; eve holds
+  none.
 - Its workflow state lives in its own database on the same RDS PostgreSQL instance.
 - It is never reachable from the internet. Only the core talks to it, over the private network, and
   its route auth accepts only the core's signed assertion. eve has no per-session access list and no
@@ -184,7 +202,7 @@ native SpiceDB client); rejected because the owner does not trust TypeScript for
 lacks Cedar's partial evaluation.
 
 ### 9.2 Agent layer: eve, untrusted
-Picked eve behind the core: it brings durability, channels, multiplayer and A2A. Considered a Rust
+Picked eve behind the core: it brings durability, channels and multiplayer. Considered a Rust
 agent loop (one language, but months of channel and durability work) and Rig (removed).
 
 ### 9.3 Computer use: browser only in v1
@@ -205,7 +223,8 @@ Cedar entity hierarchies (member in team, team owns bot, grant with expiry) cove
 in-process. SpiceDB was considered and dropped to remove a server and its datastore.
 
 ### 9.6 Client: web app first
-A PWA plus Slack and Teams. A Tauri desktop app later for local computer use and presence.
+A PWA plus the chat channels of [channels.md](channels.md). A Tauri desktop app later for local
+computer use and presence.
 
 ## 10. Decided by the owner (2026-11-21)
 
