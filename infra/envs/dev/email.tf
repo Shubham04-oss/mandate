@@ -17,6 +17,13 @@ resource "aws_sesv2_configuration_set" "main" {
   sending_options {
     sending_enabled = true
   }
+  # The account has VDM engagement tracking on, which rewrites links through awstrack.me and adds a
+  # pixel: no open or click tracking on our email, so it is off for this set.
+  vdm_options {
+    dashboard_options {
+      engagement_metrics = "DISABLED"
+    }
+  }
 }
 
 # SES publishes only to the account's default bus, not to the core's eventsv2 bus.
