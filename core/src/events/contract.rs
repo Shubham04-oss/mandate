@@ -21,15 +21,41 @@ fn obj(v: &Value) -> Option<&Map<String, Value>> {
     v.as_object()
 }
 
-/// `#/$defs/Name` resolved in its own document.
-fn resolve<'a>(root: &'a Value, v: &'a Value) -> &'a Value {
-    match v.get("$ref").and_then(Value::as_str) {
-        Some(r) => r
-            .strip_prefix('#')
+/// Keywords `compare` checks itself, plus annotations no consumer validates against. A change to
+/// any other keyword (`pattern`, `additionalProperties`, `allOf`…) is reported: fail closed.
+const MODELLED: &[&str] = &[
+    "type",
+    "format",
+    "const",
+    "enum",
+    "oneOf",
+    "anyOf",
+    "properties",
+    "required",
+    "$defs",
+    "$schema",
+    "$id",
+    "$comment",
+    "title",
+    "description",
+    "examples",
+];
+
+/// `#/$defs/Name` resolved in its own document, following chains of refs.
+fn resolve<'a>(root: &'a Value, mut v: &'a Value) -> &'a Value {
+    // ponytail: refs are local and their siblings ignored; bounded so a ref cycle cannot hang CI.
+    for _ in 0..32 {
+        match v
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix('#'))
             .and_then(|p| root.pointer(p))
-            .unwrap_or(v),
-        None => v,
+        {
+            Some(target) => v = target,
+            None => break,
+        }
     }
+    v
 }
 
 /// An event type's name, for readable paths and for matching alternatives across versions.
@@ -46,6 +72,24 @@ impl Roots<'_> {
                     "{path}: {key} changed from {:?} to {:?}",
                     base.get(key),
                     new.get(key)
+                ));
+            }
+        }
+        let keys = |v: &Value| {
+            obj(v)
+                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        let mut unmodelled: Vec<String> = keys(base).into_iter().chain(keys(new)).collect();
+        unmodelled.sort();
+        unmodelled.dedup();
+        for key in unmodelled
+            .iter()
+            .filter(|k| !MODELLED.contains(&k.as_str()))
+        {
+            if base.get(key) != new.get(key) {
+                out.push(format!(
+                    "{path}: {key} changed, and the check cannot tell if that is additive"
                 ));
             }
         }
@@ -260,6 +304,46 @@ mod tests {
         assert_eq!(
             breaking_changes(&base(), &stricter),
             ["$[approval.decided.v1].data.by: newly required"]
+        );
+    }
+
+    #[test]
+    fn a_keyword_the_check_does_not_model_fails_closed() {
+        let with = |key: &str, v: Value| {
+            let mut s = base();
+            s["oneOf"][0]["properties"]["data"][key] = v;
+            s
+        };
+        for (key, v) in [
+            ("additionalProperties", json!(false)),
+            ("pattern", json!("^a")),
+            ("maxLength", json!(3)),
+            ("minimum", json!(1)),
+            ("items", json!({"type": "string"})),
+            ("allOf", json!([{"required": ["approval"]}])),
+        ] {
+            assert_eq!(
+                breaking_changes(&base(), &with(key, v)),
+                [format!(
+                    "$[approval.decided.v1].data: {key} changed, and the check cannot tell if that is additive"
+                )],
+            );
+        }
+        // Annotations change nothing a consumer sees.
+        assert!(breaking_changes(&base(), &with("description", json!("why"))).is_empty());
+    }
+
+    #[test]
+    fn a_ref_to_a_ref_is_followed() {
+        let chained = |values: &[&str]| {
+            let mut s = base();
+            s["$defs"]["Decision"] = json!({"$ref": "#/$defs/Inner"});
+            s["$defs"]["Inner"] = json!({"type": "string", "enum": values});
+            s
+        };
+        assert_eq!(
+            breaking_changes(&chained(&["approved", "denied"]), &chained(&["approved"])),
+            ["$[approval.decided.v1].data.decision: enum value \"denied\" removed"]
         );
     }
 
