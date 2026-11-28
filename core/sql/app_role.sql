@@ -1,5 +1,6 @@
 -- Least-privilege grants for the role `mandate serve` connects as. Run after `mandate migrate`:
---   psql "$MANDATE_MIGRATION_DATABASE_URL" -v role=mandate_app -f core/sql/app_role.sql
+--   psql "$MANDATE_MIGRATION_DATABASE_URL" --single-transaction -v ON_ERROR_STOP=1 -v role=mandate_app -f core/sql/app_role.sql
+-- In one transaction: run bare, the gap between "revoke all" and the grants fails live queries.
 -- The role must already exist, must log in, and must be neither superuser nor bypassrls (the
 -- core refuses such a role). It owns nothing: forced RLS binds it, and it cannot alter tables.
 \if :{?role}

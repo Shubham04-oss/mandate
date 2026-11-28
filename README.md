@@ -53,7 +53,7 @@ not built yet.
 1. `mandate migrate`, connected as the migration role (`MANDATE_MIGRATION_DATABASE_URL`, falling
    back to `DATABASE_URL`).
 2. Create the app role (login, not superuser, not bypassrls) and apply its grants:
-   `psql "$MANDATE_MIGRATION_DATABASE_URL" -v role=mandate_app -f core/sql/app_role.sql`.
+   `psql "$MANDATE_MIGRATION_DATABASE_URL" --single-transaction -v ON_ERROR_STOP=1 -v role=mandate_app -f core/sql/app_role.sql`.
 3. `mandate serve`, connected as the app role. It refuses a role that bypasses row-level security.
 
 | Variable | Used by | What |
