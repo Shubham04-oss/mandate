@@ -51,8 +51,8 @@ resource "aws_cloudwatch_metric_alarm" "email_feedback_dlq" {
 }
 
 # A consumer that stopped reading: its oldest message is older than its retries would leave it
-# (receive limit x 60 s visibility, plus 5 minutes), and never under 15 minutes. The posthog and email
-# queues retry for 50 and 20 minutes by design (events.tf). Only the posthog queue may go unread on
+# (receive limit x 60 s visibility, plus 5 minutes), and never under 15 minutes. The posthog queue
+# retries for 50 minutes, email and the channel queues for 20, by design (events.tf). Only posthog may go unread on
 # purpose (its consumer runs once telemetry is on). The SES feedback queue (email.tf) is read too.
 resource "aws_cloudwatch_metric_alarm" "consumer_stuck" {
   for_each = merge(

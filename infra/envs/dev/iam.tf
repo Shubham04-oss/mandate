@@ -7,9 +7,23 @@ locals {
   task_secrets = {
     for task in ["core", "eve", "migrate"] : task => {
       for k, s in aws_secretsmanager_secret.this : k => s.arn
-      if startswith(k, "${task}/") || (task != "migrate" && k == "posthog-key" && var.telemetry_enabled)
+      if(startswith(k, "${task}/") && lookup(local.secret_switch, k, true)) || contains(lookup(local.shared_secret_readers, k, []), task)
     }
   }
+  # Secrets read by more than one task, so named by none: who reads each, only while its feature is on.
+  shared_secret_readers = {
+    "posthog-key"       = var.telemetry_enabled ? ["core", "eve"] : []
+    "channel-proxy-key" = var.channels_enabled ? ["core", "eve"] : []
+    "twilio-resign-key" = local.twilio_enabled ? ["core", "eve"] : []
+  }
+  # A task's own secrets that stay unwired until their feature is on, so an empty one never blocks a start.
+  secret_switch = {
+    "core/slack-client-secret"  = var.channels_enabled
+    "core/slack-signing-secret" = var.channels_enabled
+    "core/decision-key"         = var.channels_enabled
+    "core/twilio-auth-token"    = local.twilio_enabled
+  }
+  twilio_enabled = var.channels_enabled && var.twilio_account_sid != ""
 }
 
 resource "aws_iam_role" "execution" {

@@ -20,7 +20,9 @@ data "cloudflare_zero_trust_tunnel_cloudflared_token" "api" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.api.id
 }
 
-# Only the web API and the health check are public; /mcp is for eve over the private network.
+# Only the web API (provider webhooks under /v1/channels included) and the health check are public;
+# /mcp and /private/v1/* are for eve over the private network. Anchored: cloudflared's Go regexp
+# matches anywhere otherwise, and /private/v1/... contains "v1/".
 resource "cloudflare_zero_trust_tunnel_cloudflared_config" "api" {
   account_id = var.cloudflare_account_id
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.api.id

@@ -1039,6 +1039,7 @@ Core (`infra/envs/dev/ecs.tf`, stream D):
 | `MANDATE_CHANNEL_PROXY_KEY` | `channel-proxy-key` (read by core and eve) | 32 random bytes, base64url |
 | `MANDATE_DECISION_KEY` | `core/decision-key` | 32 random bytes; core only |
 | `MANDATE_CREDENTIAL_PREFIX` | no | `mandate-<env>/channels/`; runtime-created secrets, never in tofu |
+| `MANDATE_CREDENTIAL_KMS_KEY` | no | the environment's KMS key ARN; `CreateSecret` must pass it as `KmsKeyId` (IAM refuses any other) |
 | `MANDATE_TWILIO_ACCOUNT_SID` | no | (E) |
 | `MANDATE_TWILIO_AUTH_TOKEN` | `core/twilio-auth-token` | (E) |
 | `MANDATE_TWILIO_RESIGN_KEY` | `twilio-resign-key` (core and eve) | (E) |
@@ -1053,7 +1054,11 @@ eve: `MANDATE_CORE_PRIVATE_URL` (`http://core.<ns>:8080`), `MANDATE_CHANNEL_PROX
 IAM (D): the core's task role may `CreateSecret`, `PutSecretValue`, `GetSecretValue` and
 `DeleteSecret` only on `mandate-<env>/channels/*`, with the environment's KMS key. A new
 `channels_enabled` variable (off by default, like `email_enabled`) gates the secrets wiring and the
-three new consumers; section 10.3 is D's exact consumer, queue and alarm list.
+three new consumers; section 10.3 is D's exact consumer, queue and alarm list. The Twilio
+secrets and env (marked E) are wired only when `twilio_account_sid` is also set, so Slack can go live
+before Twilio's secrets have values (an ECS task does not start while a secret it reads is empty).
+The non-secret values are tofu variables: `slack_client_id` (required with `channels_enabled`),
+`twilio_account_sid`, `whatsapp_from`, `twilio_approval_template`.
 The tunnel and security groups need no change; D adds a tofu test that the tunnel's
 ingress never admits `/private/`.
 

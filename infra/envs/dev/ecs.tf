@@ -72,7 +72,38 @@ locals {
     "eve/ai-gateway-key"         = "MANDATE_AI_GATEWAY_KEY" # Cloudflare AI Gateway token (AI Gateway Run)
     "eve/assertion-public-key"   = "MANDATE_ASSERTION_PUBLIC_KEY"
     "posthog-key"                = "POSTHOG_API_KEY" # the core's and eve's, only while telemetry is on (iam.tf)
+    # Channels, only while channels_enabled is on (Twilio's with twilio_account_sid too; iam.tf).
+    "core/slack-client-secret"  = "MANDATE_SLACK_CLIENT_SECRET"
+    "core/slack-signing-secret" = "MANDATE_SLACK_SIGNING_SECRET"
+    "core/decision-key"         = "MANDATE_DECISION_KEY"
+    "core/twilio-auth-token"    = "MANDATE_TWILIO_AUTH_TOKEN"
+    "channel-proxy-key"         = "MANDATE_CHANNEL_PROXY_KEY" # the core's and eve's
+    "twilio-resign-key"         = "MANDATE_TWILIO_RESIGN_KEY" # the core's and eve's
   }
+  # The core's channel env (docs/channels.md 13): Slack's client id, the credential store's prefix
+  # and key, and one queue per channel consumer. eve reaches /private/v1/* at the core's private
+  # name; the tunnel never forwards it (edge.tf).
+  eve_twilio_webhook_url = "http://eve.${local.internal}:3000/eve/v1/whatsapp/messages"
+  core_channels_environment = merge(var.channels_enabled ? {
+    MANDATE_SLACK_CLIENT_ID       = var.slack_client_id
+    MANDATE_CREDENTIAL_PREFIX     = local.credential_prefix
+    MANDATE_CREDENTIAL_KMS_KEY    = aws_kms_key.main.arn
+    MANDATE_QUEUE_APPROVAL_NOTIFY = aws_sqs_queue.consumer["approval-notify"].url
+    MANDATE_QUEUE_CARD_UPDATE     = aws_sqs_queue.consumer["card-update"].url
+    MANDATE_QUEUE_CHANNEL_CLEANUP = aws_sqs_queue.consumer["channel-cleanup"].url
+    } : {}, local.twilio_enabled ? {
+    MANDATE_TWILIO_ACCOUNT_SID       = var.twilio_account_sid
+    MANDATE_WHATSAPP_FROM            = var.whatsapp_from
+    MANDATE_TWILIO_APPROVAL_TEMPLATE = var.twilio_approval_template
+    MANDATE_EVE_TWILIO_WEBHOOK_URL   = local.eve_twilio_webhook_url
+  } : {})
+  eve_channels_environment = merge(var.channels_enabled ? {
+    MANDATE_CORE_PRIVATE_URL = "http://core.${local.internal}:8080"
+    } : {}, local.twilio_enabled ? {
+    MANDATE_TWILIO_ACCOUNT_SID     = var.twilio_account_sid
+    MANDATE_WHATSAPP_FROM          = var.whatsapp_from
+    MANDATE_EVE_TWILIO_WEBHOOK_URL = local.eve_twilio_webhook_url
+  } : {})
   core_environment = merge({
     RDS_CA_PEM         = local.rds_ca_pem
     AWS_REGION         = var.region
@@ -93,7 +124,7 @@ locals {
     }, local.otel_environment, var.telemetry_enabled ? {
     OTEL_SERVICE_NAME = "mandate-core"
     POSTHOG_HOST      = local.posthog_host
-  } : {}, local.debug_environment, local.email_environment)
+  } : {}, local.debug_environment, local.email_environment, local.core_channels_environment)
   eve_environment = merge({
     RDS_CA_PEM             = local.rds_ca_pem
     PORT                   = "3000"
@@ -103,7 +134,7 @@ locals {
     }, local.otel_environment, var.telemetry_enabled ? {
     OTEL_SERVICE_NAME = "eve"
     POSTHOG_HOST      = local.posthog_host
-  } : {}, local.debug_environment)
+  } : {}, local.debug_environment, local.eve_channels_environment)
 }
 
 locals {

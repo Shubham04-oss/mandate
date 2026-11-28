@@ -148,3 +148,37 @@ variable "telemetry_sample_percent" {
     error_message = "telemetry_sample_percent is a percentage above 0 and at most 100"
   }
 }
+
+# Channels (docs/channels.md): the three channel consumers, the Slack, decision and proxy secrets on
+# the core and eve, the channel env, and the core's runtime credential store. Put the secret values
+# first (docs/deploy.md, Channels): a task does not start while a secret it reads is empty.
+variable "channels_enabled" {
+  type    = bool
+  default = false
+}
+
+# MANDATE_SLACK_CLIENT_ID: Mandate's Slack app (Basic Information). Not secret; required with channels.
+variable "slack_client_id" {
+  type    = string
+  default = ""
+}
+
+# WhatsApp and SMS through Twilio (stream E). Empty keeps Twilio unwired even with channels on, so
+# Slack can go live before the Twilio secrets have values.
+variable "twilio_account_sid" {
+  type    = string
+  default = ""
+}
+
+# MANDATE_WHATSAPP_FROM, e.g. whatsapp:+15551234567: the environment's one shared sender.
+variable "whatsapp_from" {
+  type    = string
+  default = ""
+}
+
+# MANDATE_TWILIO_APPROVAL_TEMPLATE: the approved WhatsApp template's content SID (HX...) for cards
+# outside the 24-hour customer window.
+variable "twilio_approval_template" {
+  type    = string
+  default = ""
+}

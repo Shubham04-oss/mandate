@@ -18,8 +18,8 @@ What it builds (`infra/envs/dev`, OpenTofu):
 | CI | IAM role for the deploy workflow through GitHub OIDC (no long-lived keys) |
 
 Only `/v1/*` and `/healthz` are reachable from the internet (the tunnel's ingress rules; anything
-else is a 404 at Cloudflare); the MCP server (`/mcp`) answers only eve over the private network.
-Nothing listens on a public address: the core's security group admits only eve.
+else is a 404 at Cloudflare); the MCP server (`/mcp`) and the channel proxy and registry
+(`/private/v1/*`) answer only eve over the private network. Nothing listens on a public address: the core's security group admits only eve.
 
 ## 0. You need
 
@@ -427,6 +427,149 @@ migration role once the person confirms the address works.
 To turn email off, set the variable to `false`, apply, and run the deploy workflow again; events
 already queued for `email` are dropped with the queue.
 
+## Channels (off until you turn it on)
+
+Slack, then WhatsApp and SMS through Twilio ([channels.md](channels.md)). The core sits in front of
+every channel (provider webhooks arrive at `api.<domain>/v1/channels/...` through the tunnel) and
+behind it (eve's provider API calls go through the core's proxy at `/private/v1/...`, which the
+tunnel never forwards: eve reaches it at `http://core.mandate-dev.internal:8080`). eve never holds
+a provider secret.
+
+`channels_enabled` (default `false`) turns on:
+
+- the `approval-notify`, `card-update` and `channel-cleanup` event queues (FIFO, 20 receives, each
+  with a dead-letter queue and both alarms) and the core's `MANDATE_QUEUE_*` for them;
+- on the core: `MANDATE_SLACK_CLIENT_SECRET`, `MANDATE_SLACK_SIGNING_SECRET`, `MANDATE_DECISION_KEY`,
+  `MANDATE_CHANNEL_PROXY_KEY` (secrets) and `MANDATE_SLACK_CLIENT_ID`,
+  `MANDATE_CREDENTIAL_PREFIX=mandate-dev/channels/`, `MANDATE_CREDENTIAL_KMS_KEY`;
+- on eve: `MANDATE_CHANNEL_PROXY_KEY` and `MANDATE_CORE_PRIVATE_URL`;
+- the core's task role may create, write, read and delete secrets under `mandate-dev/channels/`
+  only, under the environment's KMS key only: that is where it keeps each workspace's bot token,
+  created at install and deleted by `channel-cleanup` (never in tofu).
+
+`agent-resume` also takes `approval.expired.v1` (it answers eve "deny"), and `posthog` the new event
+types, whether channels are on or not. Twilio is wired only once `twilio_account_sid` is set too
+(below), so Slack can go live first.
+
+A normal apply already creates the six empty containers (`core/slack-client-secret`,
+`core/slack-signing-secret`, `core/decision-key`, `core/twilio-auth-token`, `channel-proxy-key`,
+`twilio-resign-key`); no task reads them until the switch is on. Put the values before you turn it
+on: a task does not start while a secret it reads is empty. It is safe to turn on before the
+channel code is deployed (the extra env is ignored until then).
+
+**1. The Slack app.** At api.slack.com/apps, *Create New App*, *From a manifest*, in the workspace
+you will test with (replace `<domain>`). The scopes follow the methods the proxy allows
+([channels.md](channels.md) 6.3); trim them once spike 6 confirms what eve 1.5 calls.
+
+```yaml
+display_information:
+  name: Mandate
+features:
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Mandate
+    always_online: true
+oauth_config:
+  redirect_urls:
+    - https://api.<domain>/v1/channels/slack/install/callback
+    - https://api.<domain>/v1/channels/slack/link/callback
+  scopes:
+    bot: [app_mentions:read, assistant:write, channels:history, channels:read, chat:write,
+          files:read, files:write, groups:history, groups:read, im:history, im:read, im:write,
+          mpim:history, mpim:read, reactions:write]
+    user: [openid]   # Sign in with Slack, to link a member: team and user id only, no email
+settings:
+  event_subscriptions:
+    request_url: https://api.<domain>/v1/channels/slack/events
+    bot_events: [app_mention, app_uninstalled, message.channels, message.groups, message.im,
+                 message.mpim, tokens_revoked]
+  interactivity:
+    is_enabled: true
+    request_url: https://api.<domain>/v1/channels/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
+```
+
+Slack checks the event URL when you save it; that passes only once the core with the gateway is
+deployed and the switch is on, so save the manifest again then. Under *Manage Distribution*, turn
+on public distribution only when another organization's workspace needs to install it.
+
+**2. Secrets.** From *Basic Information*, App Credentials:
+
+```sh
+put core/slack-client-secret  "$SLACK_CLIENT_SECRET"
+put core/slack-signing-secret "$SLACK_SIGNING_SECRET"
+put core/decision-key         "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"   # 32 random bytes, base64url
+put channel-proxy-key         "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+```
+
+Rotating the decision key voids the buttons on cards already sent (deciders use the web inbox); a
+new proxy key needs the core and eve rolled together (run the deploy workflow).
+
+**3. Turn it on.**
+
+```sh
+# dev.tfvars: channels_enabled = true
+#             slack_client_id  = "1234567890.1234567890"   # Basic Information, Client ID (not secret)
+tofu plan -var-file=dev.tfvars -out=dev.tfplan   # read it: three queues, three DLQs, six alarms, the channels policy, both task definitions
+tofu apply dev.tfplan
+gh workflow run deploy.yml --ref main            # rolls the core and eve onto the new env and secrets
+```
+
+**4. WhatsApp and SMS (Twilio, once stream E lands).** In the Twilio console: buy one number for the
+environment (shared by every org), register it as a WhatsApp sender (needs the Meta business
+verification Twilio walks you through), and create an approval card template in the Content Template
+Builder (quick-reply buttons *Approve* and *Deny*) and submit it for WhatsApp approval. Set the
+number's and the WhatsApp sender's incoming-message webhook to
+`https://api.<domain>/v1/channels/twilio/messages` (HTTP POST): the core checks Twilio's signature
+over exactly that URL (`MANDATE_API_ORIGIN` plus the path).
+
+```sh
+put core/twilio-auth-token "$TWILIO_AUTH_TOKEN"   # Account Info; eve never sees it
+put twilio-resign-key      "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+# dev.tfvars: twilio_account_sid       = "AC..."
+#             whatsapp_from            = "whatsapp:+1555..."
+#             twilio_approval_template = "HX..."   # the approved template's content SID
+tofu plan -var-file=dev.tfvars -out=dev.tfplan && tofu apply dev.tfplan
+gh workflow run deploy.yml --ref main
+```
+
+**5. Check it live.**
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://api.<domain>/v1/channels/slack/events    # 401: unsigned
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://api.<domain>/private/v1/sessions/report  # 404: never through the tunnel
+aws logs tail /mandate-dev/core --follow
+```
+
+Then, in the app: as an admin, install Slack from Settings, Channels (the workspace's token lands in
+`aws secretsmanager list-secrets --filters Key=name,Values=mandate-dev/channels/`); as a member,
+link your Slack account; mention `@Mandate` in a channel and reply in its thread; ask for something
+that needs an approval and approve it from the DM card: the card in the thread changes to
+"Approved by ... on Slack" and the agent carries on. Let one expire: its cards say "Expired" and
+the agent is told no. Uninstall the app from the workspace: the installation turns off and its
+secret is deleted. Every `*-dlq-not-empty` and `*-consumer-stuck` alarm stays OK. For Twilio, link a
+phone from Settings (a code arrives by SMS), message the number, and approve from WhatsApp.
+
+**Retries and redrive.** The three channel queues allow 20 receives (about 20 minutes of a Slack or
+Twilio outage). Each card is claimed in `channel_messages` before it is sent, so after an outage
+`aws sqs start-message-move-task --source-arn <mandate-dev-approval-notify-dlq.fifo ARN>` (or
+`card-update`, `channel-cleanup`) sends only what was never sent.
+
+**Turning it off.** Set the variable to `false`, apply, and run the deploy workflow; events queued
+for the three consumers are dropped with the queues. Workspace tokens under `mandate-dev/channels/`
+stay: remove the installations from Settings first (while it is still on) so `channel-cleanup`
+revokes and deletes them, or delete them by hand.
+
+**Cost.** The six containers cost about $2.40/month from the first apply, on or off. On: about
+$0.60 for the six alarms and $0.40 per installed workspace (its token secret); SQS and EventBridge at
+dev volume are cents. Slack is free. Twilio: about $1–2/month for the number, plus per message
+(SMS a cent or so in the US; WhatsApp Twilio's fee plus Meta's per-conversation price for templates,
+a few cents) and the Meta verification. Roughly $3–5/month before Twilio, $5–10 with it at dev volume.
+
 ## Known limits (dev)
 
 - No NAT gateway and no VPC endpoints: every task, the one-off `migrate` and `db-bootstrap`
@@ -456,10 +599,10 @@ Rough monthly cost of dev in ap-south-1 at idle-to-light use; check the bill, no
 | RDS `db.t4g.micro`, 20 GB gp3, backups | 15–20 |
 | Fargate Spot: core and eve | 6–8 |
 | Public IPv4: two task addresses (2 × ~$3.6) | 7 |
-| Secrets Manager (~11 secrets) | 4–5 |
+| Secrets Manager (~17 secrets, six of them for channels) | 7 |
 | KMS key | 1 |
 | CloudWatch logs | 1–3 |
-| **Total** | **~35–45** |
+| **Total** | **~37–47** |
 
 The tunnel, the WAF rate limit and the S3, EventBridge and SQS usage at dev volume add little or
 nothing. More if storage grows, the class goes to `db.t4g.small`, or Spot is switched off.

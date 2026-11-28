@@ -2,19 +2,29 @@
 # subscriber, its SQS FIFO queue and a dead-letter queue.
 locals {
   consumers = merge({
-    "agent-resume" = ["approval.decided.v1"]
+    # Expiry answers eve deny (docs/channels.md 10.1), so a waiting agent never hangs.
+    "agent-resume" = ["approval.decided.v1", "approval.expired.v1"]
     # Ids-only product events to PostHog's /batch. Always here, so the core starts whenever the key appears.
     "posthog" = [
       "approval.requested.v1", "approval.decided.v1", "conversation.started.v1", "conversation.finished.v1",
       "grant.created.v1", "grant.revoked.v1", "member.created.v1", "member.updated.v1", "member.removed.v1",
       "organization.created.v1", "member.signed_up.v1", "member.signed_in.v1", "organization.chosen.v1",
       "setting.changed.v1", "email.sent.v1", "email.bounced.v1", "email.complained.v1",
+      "channel.installed.v1", "channel.updated.v1", "channel.removed.v1", "channel_identity.linked.v1",
+      "channel_identity.unlinked.v1", "conversation.session_replaced.v1", "conversation.joined.v1",
+      "approval.expired.v1", "notification.sent.v1", "message.withheld.v1",
     ]
     # The core's own email (email.tf), only while email_enabled is on.
-  }, var.email_enabled ? { "email" = ["approval.requested.v1"] } : {})
-  # Receives before the dead-letter queue: PostHog and SES are outside services, so ride out about 50
-  # and 20 minutes of outage (60 s visibility each) instead of 5.
-  receive_limits = { "posthog" = 50, "email" = 20 }
+    }, var.email_enabled ? { "email" = ["approval.requested.v1"] } : {},
+    # Cards on Slack, WhatsApp and SMS, and token cleanup (docs/channels.md 10.3), only while channels_enabled is on.
+    var.channels_enabled ? {
+      "approval-notify" = ["approval.requested.v1"]
+      "card-update"     = ["approval.decided.v1", "approval.expired.v1"]
+      "channel-cleanup" = ["channel.removed.v1"]
+  } : {})
+  # Receives before the dead-letter queue: PostHog, SES, Slack and Twilio are outside services, so
+  # ride out about 50 and 20 minutes of outage (60 s visibility each) instead of 5.
+  receive_limits = { "posthog" = 50, "email" = 20, "approval-notify" = 20, "card-update" = 20, "channel-cleanup" = 20 }
 }
 
 resource "awscc_eventsv2_event_bus" "main" {

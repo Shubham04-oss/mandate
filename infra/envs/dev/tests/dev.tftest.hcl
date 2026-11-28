@@ -88,6 +88,30 @@ override_resource {
   target = aws_secretsmanager_secret.this["posthog-key"]
   values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/posthog-key" }
 }
+override_resource {
+  target = aws_secretsmanager_secret.this["core/slack-client-secret"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/slack-client-secret" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["core/slack-signing-secret"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/slack-signing-secret" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["core/decision-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/decision-key" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["core/twilio-auth-token"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/twilio-auth-token" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["channel-proxy-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/channel-proxy-key" }
+}
+override_resource {
+  target = aws_secretsmanager_secret.this["twilio-resign-key"]
+  values = { arn = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/twilio-resign-key" }
+}
 # Mocks leave computed blocks empty; RDS always returns the managed secret when it manages the password.
 override_resource {
   target = aws_db_instance.main
@@ -167,6 +191,30 @@ override_resource {
 override_resource {
   target = aws_sqs_queue.dead_letter["email"]
   values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-email-dlq.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.consumer["approval-notify"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-approval-notify.fifo", url = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-approval-notify.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.dead_letter["approval-notify"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-approval-notify-dlq.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.consumer["card-update"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-card-update.fifo", url = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-card-update.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.dead_letter["card-update"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-card-update-dlq.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.consumer["channel-cleanup"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-channel-cleanup.fifo", url = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-channel-cleanup.fifo" }
+}
+override_resource {
+  target = aws_sqs_queue.dead_letter["channel-cleanup"]
+  values = { arn = "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-channel-cleanup-dlq.fifo" }
 }
 override_resource {
   target = aws_sqs_queue.email_feedback[0]
@@ -372,8 +420,14 @@ run "secrets_are_containers_under_the_cmk" {
       "core/database-url", "core/workos-api-key", "core/workos-client-id",
       "core/assertion-private-key", "core/event-signing-key", "core/event-public-key",
       "eve/database-url", "eve/ai-gateway-key", "eve/assertion-public-key", "posthog-key",
+      "core/slack-client-secret", "core/slack-signing-secret", "core/decision-key", "core/twilio-auth-token",
+      "channel-proxy-key", "twilio-resign-key",
     ])
-    error_message = "one secret per value a task needs, named by who reads it (posthog-key: the collector, the core and eve)"
+    error_message = "one secret per value a task needs, named by who reads it (posthog-key, channel-proxy-key, twilio-resign-key: more than one task)"
+  }
+  assert {
+    condition     = alltrue([for s in aws_secretsmanager_secret.this : s.kms_key_id == aws_kms_key.main.arn])
+    error_message = "every secret container, the channel ones included, is under the CMK"
   }
   assert {
     condition     = aws_kms_key.main.enable_key_rotation
@@ -512,9 +566,10 @@ run "each_task_reads_only_its_own_secrets" {
 
   assert {
     condition = toset([for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.valueFrom]) == toset([
-      for k, s in aws_secretsmanager_secret.this : s.arn if startswith(k, "core/")
+      for k, s in aws_secretsmanager_secret.this : s.arn
+      if startswith(k, "core/") && !contains(["core/slack-client-secret", "core/slack-signing-secret", "core/decision-key", "core/twilio-auth-token"], k)
     ])
-    error_message = "the core gets exactly the core secrets"
+    error_message = "the core gets exactly the core secrets (the channel ones only while channels are on)"
   }
   assert {
     condition = toset([for s in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].secrets : s.valueFrom]) == toset([
@@ -659,6 +714,9 @@ run "each_consumer_has_a_fifo_queue_with_a_dead_letter_queue" {
       "grant.created.v1", "grant.revoked.v1", "member.created.v1", "member.updated.v1", "member.removed.v1",
       "organization.created.v1", "member.signed_up.v1", "member.signed_in.v1", "organization.chosen.v1",
       "setting.changed.v1", "email.sent.v1", "email.bounced.v1", "email.complained.v1",
+      "channel.installed.v1", "channel.updated.v1", "channel.removed.v1", "channel_identity.linked.v1",
+      "channel_identity.unlinked.v1", "conversation.session_replaced.v1", "conversation.joined.v1",
+      "approval.expired.v1", "notification.sent.v1", "message.withheld.v1",
     ]) && awscc_eventsv2_subscriber.consumer["posthog"].filter_configuration.filters[0].scope == "SYSTEM_METADATA"
     error_message = "posthog receives every core event type, matched on the trusted detail type"
   }
@@ -689,8 +747,12 @@ run "each_consumer_has_a_fifo_queue_with_a_dead_letter_queue" {
   assert {
     # For PutEvents the DATA scope is EventBridge's envelope (detail is nested), so match the
     # trusted aws:DetailType system field instead.
-    condition     = awscc_eventsv2_subscriber.consumer["agent-resume"].filter_configuration.filters[0].scope == "SYSTEM_METADATA" && jsondecode(awscc_eventsv2_subscriber.consumer["agent-resume"].filter_configuration.filters[0].pattern) == { "aws:DetailType" = ["approval.decided.v1"] }
-    error_message = "agent-resume receives approval.decided.v1 only, matched on the trusted detail type"
+    condition     = awscc_eventsv2_subscriber.consumer["agent-resume"].filter_configuration.filters[0].scope == "SYSTEM_METADATA" && jsondecode(awscc_eventsv2_subscriber.consumer["agent-resume"].filter_configuration.filters[0].pattern) == { "aws:DetailType" = ["approval.decided.v1", "approval.expired.v1"] }
+    error_message = "agent-resume receives approval.decided.v1 and approval.expired.v1 (it answers eve deny on expiry), matched on the trusted detail type"
+  }
+  assert {
+    condition     = jsondecode(aws_sqs_queue.consumer["agent-resume"].redrive_policy).maxReceiveCount == 5 && jsondecode(aws_sqs_queue.consumer["posthog"].redrive_policy).maxReceiveCount == 50
+    error_message = "agent-resume keeps 5 receives and posthog 50"
   }
 }
 
@@ -1294,5 +1356,369 @@ run "the_core_sends_only_as_the_domain_through_its_configuration_set" {
       && aws_cloudwatch_metric_alarm.email_feedback_dlq[0].dimensions == tomap({ QueueName = "mandate-dev-email-feedback-dlq" })
     )
     error_message = "an encrypted standard feedback queue with its own two-week dead-letter queue, which alarms"
+  }
+}
+
+run "channels_are_off_by_default_and_change_nothing" {
+  command = apply
+
+  assert {
+    condition = (
+      length(aws_iam_role_policy.core_channels) == 0
+      && length(setintersection(toset(keys(aws_sqs_queue.consumer)), toset(["approval-notify", "card-update", "channel-cleanup"]))) == 0
+      && length(setintersection(toset(keys(aws_sqs_queue.dead_letter)), toset(["approval-notify", "card-update", "channel-cleanup"]))) == 0
+      && length(setintersection(toset(keys(awscc_eventsv2_subscriber.consumer)), toset(["approval-notify", "card-update", "channel-cleanup"]))) == 0
+    )
+    error_message = "with channels_enabled false there is no channel consumer, queue or alarm, and no credential-store permission"
+  }
+  assert {
+    condition = !anytrue([for td in [aws_ecs_task_definition.core, aws_ecs_task_definition.eve] : anytrue([
+      for e in concat(jsondecode(td.container_definitions)[0].environment, jsondecode(td.container_definitions)[0].secrets) :
+      can(regex("^MANDATE_(SLACK_|TWILIO_|WHATSAPP_|EVE_TWILIO_|DECISION_KEY|CHANNEL_PROXY_KEY|CREDENTIAL_|CORE_PRIVATE_URL|QUEUE_(APPROVAL_NOTIFY|CARD_UPDATE|CHANNEL_CLEANUP))", e.name))
+    ])])
+    error_message = "no channel env or channel secret on the core or eve while channels are off"
+  }
+  assert {
+    condition = length(setintersection(toset(flatten([
+      for t in ["core", "eve", "migrate"] : [
+        for st in jsondecode(aws_iam_role_policy.execution[t].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+      ]
+      ])), toset([
+      for k in ["core/slack-client-secret", "core/slack-signing-secret", "core/decision-key", "core/twilio-auth-token", "channel-proxy-key", "twilio-resign-key"] :
+      aws_secretsmanager_secret.this[k].arn
+    ]))) == 0
+    error_message = "no execution role can read a channel secret while channels are off, so an empty one never blocks a start"
+  }
+}
+
+run "channels_add_three_consumers_each_with_a_queue_a_dlq_and_both_alarms" {
+  command = apply
+  variables {
+    channels_enabled = true
+    slack_client_id  = "1234567890.1234567890"
+  }
+
+  assert {
+    condition     = keys(aws_sqs_queue.consumer) == ["agent-resume", "approval-notify", "card-update", "channel-cleanup", "posthog"]
+    error_message = "channels add exactly approval-notify, card-update and channel-cleanup (docs/channels.md 10.3)"
+  }
+  assert {
+    condition = {
+      for k in ["approval-notify", "card-update", "channel-cleanup"] : k => [aws_sqs_queue.consumer[k].name, aws_sqs_queue.dead_letter[k].name]
+      } == {
+      "approval-notify" = ["mandate-dev-approval-notify.fifo", "mandate-dev-approval-notify-dlq.fifo"]
+      "card-update"     = ["mandate-dev-card-update.fifo", "mandate-dev-card-update-dlq.fifo"]
+      "channel-cleanup" = ["mandate-dev-channel-cleanup.fifo", "mandate-dev-channel-cleanup-dlq.fifo"]
+    }
+    error_message = "each channel consumer has mandate-<env>-<name>.fifo and its -dlq.fifo"
+  }
+  assert {
+    condition = alltrue([for k in ["approval-notify", "card-update", "channel-cleanup"] :
+      aws_sqs_queue.consumer[k].fifo_queue && aws_sqs_queue.consumer[k].sqs_managed_sse_enabled && !aws_sqs_queue.consumer[k].content_based_deduplication
+      && aws_sqs_queue.dead_letter[k].fifo_queue && aws_sqs_queue.dead_letter[k].sqs_managed_sse_enabled
+      && jsondecode(aws_sqs_queue.consumer[k].redrive_policy) == { deadLetterTargetArn = aws_sqs_queue.dead_letter[k].arn, maxReceiveCount = 20 }
+    ])
+    error_message = "encrypted FIFO queues deduplicated by event id, 20 receives (about 20 minutes of a Slack or Twilio outage), then their own dead-letter queue"
+  }
+  assert {
+    condition = {
+      for k in ["approval-notify", "card-update", "channel-cleanup"] : k => jsondecode(awscc_eventsv2_subscriber.consumer[k].filter_configuration.filters[0].pattern)
+      if awscc_eventsv2_subscriber.consumer[k].filter_configuration.filters[0].scope == "SYSTEM_METADATA" && awscc_eventsv2_subscriber.consumer[k].type == "FIFO"
+      } == {
+      "approval-notify" = { "aws:DetailType" = ["approval.requested.v1"] }
+      "card-update"     = { "aws:DetailType" = ["approval.decided.v1", "approval.expired.v1"] }
+      "channel-cleanup" = { "aws:DetailType" = ["channel.removed.v1"] }
+    }
+    error_message = "each channel consumer takes exactly its types of 10.3, matched on the trusted detail type"
+  }
+  assert {
+    condition = alltrue([for k in ["approval-notify", "card-update", "channel-cleanup"] :
+      awscc_eventsv2_subscriber.consumer[k].invoke_configuration.target_arn == aws_sqs_queue.consumer[k].arn
+      && awscc_eventsv2_subscriber.consumer[k].on_failure_configuration.arn == aws_sqs_queue.dead_letter[k].arn
+    ])
+    error_message = "each subscriber delivers to its own queue and fails over to its own dead-letter queue"
+  }
+  assert {
+    condition = {
+      for k in ["approval-notify", "card-update", "channel-cleanup"] : k => [aws_cloudwatch_metric_alarm.dlq[k].alarm_name, aws_cloudwatch_metric_alarm.dlq[k].dimensions["QueueName"]]
+      } == {
+      "approval-notify" = ["mandate-dev-approval-notify-dlq-not-empty", "mandate-dev-approval-notify-dlq.fifo"]
+      "card-update"     = ["mandate-dev-card-update-dlq-not-empty", "mandate-dev-card-update-dlq.fifo"]
+      "channel-cleanup" = ["mandate-dev-channel-cleanup-dlq-not-empty", "mandate-dev-channel-cleanup-dlq.fifo"]
+    }
+    error_message = "every channel dead-letter queue alarms"
+  }
+  assert {
+    condition = keys(aws_cloudwatch_metric_alarm.consumer_stuck) == ["agent-resume", "approval-notify", "card-update", "channel-cleanup"] && {
+      for k in ["approval-notify", "card-update", "channel-cleanup"] : k => [aws_cloudwatch_metric_alarm.consumer_stuck[k].alarm_name, aws_cloudwatch_metric_alarm.consumer_stuck[k].threshold]
+      } == {
+      "approval-notify" = ["mandate-dev-approval-notify-consumer-stuck", 1500]
+      "card-update"     = ["mandate-dev-card-update-consumer-stuck", 1500]
+      "channel-cleanup" = ["mandate-dev-channel-cleanup-consumer-stuck", 1500]
+    } && aws_cloudwatch_metric_alarm.consumer_stuck["agent-resume"].threshold == 900
+    error_message = "each channel queue alarms as stuck after its 20 retries plus 5 minutes (1500 s); agent-resume stays at 900 s"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name => e.value if startswith(e.name, "MANDATE_QUEUE_")
+      } == {
+      MANDATE_QUEUE_AGENT_RESUME    = aws_sqs_queue.consumer["agent-resume"].url
+      MANDATE_QUEUE_POSTHOG         = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-posthog.fifo"
+      MANDATE_QUEUE_APPROVAL_NOTIFY = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-approval-notify.fifo"
+      MANDATE_QUEUE_CARD_UPDATE     = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-card-update.fifo"
+      MANDATE_QUEUE_CHANNEL_CLEANUP = "https://sqs.ap-south-1.amazonaws.com/000000000000/mandate-dev-channel-cleanup.fifo"
+    }
+    error_message = "the core gets MANDATE_QUEUE_<NAME> for each channel consumer"
+  }
+  assert {
+    condition = toset(one([for st in jsondecode(aws_iam_role_policy.core_events.policy).Statement : st.Resource if contains(flatten([st.Action]), "sqs:ReceiveMessage")])) == toset([
+      aws_sqs_queue.consumer["agent-resume"].arn,
+      "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-posthog.fifo",
+      "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-approval-notify.fifo",
+      "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-card-update.fifo",
+      "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-channel-cleanup.fifo",
+    ])
+    error_message = "the core reads the channel consumer queues, and never their dead-letter queues"
+  }
+  assert {
+    condition = toset(jsondecode(aws_iam_role_policy.subscriber.policy).Statement[0].Resource) == toset(concat(
+      values(aws_sqs_queue.consumer)[*].arn, values(aws_sqs_queue.dead_letter)[*].arn
+    )) && contains(jsondecode(aws_iam_role_policy.subscriber.policy).Statement[0].Resource, "arn:aws:sqs:ap-south-1:000000000000:mandate-dev-card-update-dlq.fifo")
+    error_message = "EventBridge may deliver to the channel queues and their dead-letter queues"
+  }
+}
+
+run "channel_secrets_reach_only_the_tasks_that_read_them" {
+  command = apply
+  variables {
+    channels_enabled = true
+    slack_client_id  = "1234567890.1234567890"
+  }
+
+  assert {
+    condition = {
+      for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.name => s.valueFrom
+      } == {
+      DATABASE_URL                      = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/database-url"
+      WORKOS_API_KEY                    = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/workos-api-key"
+      WORKOS_CLIENT_ID                  = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/workos-client-id"
+      MANDATE_ASSERTION_PRIVATE_KEY_PEM = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/assertion-private-key"
+      MANDATE_EVENT_SIGNING_KEY_PEM     = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/event-signing-key"
+      MANDATE_EVENT_PUBLIC_KEY_PEM      = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/event-public-key"
+      MANDATE_SLACK_CLIENT_SECRET       = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/slack-client-secret"
+      MANDATE_SLACK_SIGNING_SECRET      = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/slack-signing-secret"
+      MANDATE_DECISION_KEY              = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/decision-key"
+      MANDATE_CHANNEL_PROXY_KEY         = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/channel-proxy-key"
+    }
+    error_message = "the core gets the Slack secrets, the decision key and the proxy key; Twilio's stay off without an account SID"
+  }
+  assert {
+    condition = {
+      for s in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].secrets : s.name => s.valueFrom
+      } == {
+      WORKFLOW_POSTGRES_URL        = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/database-url"
+      MANDATE_AI_GATEWAY_KEY       = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/ai-gateway-key"
+      MANDATE_ASSERTION_PUBLIC_KEY = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/eve/assertion-public-key"
+      MANDATE_CHANNEL_PROXY_KEY    = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/channel-proxy-key"
+    }
+    error_message = "eve gets the proxy key and no provider secret: no Slack secret, no decision key"
+  }
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["eve"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+      ])) == toset(concat([for k, s in aws_secretsmanager_secret.this : s.arn if startswith(k, "eve/")], [
+      "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/channel-proxy-key",
+    ]))
+    error_message = "eve's execution role can read only eve's secrets and the proxy key"
+  }
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["core"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+      ])) == toset(concat(values({ for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.name => s.valueFrom }), [
+      "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/cloudflared/tunnel-token",
+    ]))
+    error_message = "the core's execution role reads exactly the secrets its containers take"
+  }
+  assert {
+    condition = toset(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["migrate"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ])) == toset([one(aws_db_instance.main.master_user_secret[*].secret_arn)])
+    error_message = "the migrate task still reads only the RDS-managed master secret"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name => e.value
+      if contains(["MANDATE_SLACK_CLIENT_ID", "MANDATE_CREDENTIAL_PREFIX", "MANDATE_CREDENTIAL_KMS_KEY", "MANDATE_EVE_URL"], e.name) || startswith(e.name, "MANDATE_TWILIO_")
+      } == {
+      MANDATE_SLACK_CLIENT_ID    = "1234567890.1234567890"
+      MANDATE_CREDENTIAL_PREFIX  = "mandate-dev/channels/"
+      MANDATE_CREDENTIAL_KMS_KEY = "arn:aws:kms:ap-south-1:000000000000:key/mock"
+      MANDATE_EVE_URL            = "http://eve.mandate-dev.internal:3000"
+    }
+    error_message = "the core gets Slack's client id, the credential store's prefix and key, and eve's private URL; no Twilio env"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].environment : e.name => e.value
+      if startswith(e.name, "MANDATE_CORE_") || startswith(e.name, "MANDATE_TWILIO_") || startswith(e.name, "MANDATE_SLACK_")
+      } == {
+      MANDATE_CORE_MCP_URL     = "http://core.mandate-dev.internal:8080/mcp"
+      MANDATE_CORE_PRIVATE_URL = "http://core.mandate-dev.internal:8080"
+    }
+    error_message = "eve gets the core's private base URL (for /private/v1/*) and nothing of Slack's"
+  }
+}
+
+run "twilio_is_wired_only_with_its_account_sid" {
+  command = apply
+  variables {
+    channels_enabled         = true
+    slack_client_id          = "1234567890.1234567890"
+    twilio_account_sid       = "AC00000000000000000000000000000000"
+    whatsapp_from            = "whatsapp:+15550000000"
+    twilio_approval_template = "HX00000000000000000000000000000000"
+  }
+
+  assert {
+    condition = {
+      for s in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].secrets : s.name => s.valueFrom if startswith(s.name, "MANDATE_TWILIO_")
+      } == {
+      MANDATE_TWILIO_AUTH_TOKEN = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/twilio-auth-token"
+      MANDATE_TWILIO_RESIGN_KEY = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/twilio-resign-key"
+    }
+    error_message = "the core gets Twilio's auth token and the re-signing key"
+  }
+  assert {
+    condition = {
+      for s in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].secrets : s.name => s.valueFrom if startswith(s.name, "MANDATE_TWILIO_")
+      } == {
+      MANDATE_TWILIO_RESIGN_KEY = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/twilio-resign-key"
+    }
+    error_message = "eve gets only the re-signing key, never Twilio's auth token"
+  }
+  assert {
+    condition = !contains(flatten([
+      for st in jsondecode(aws_iam_role_policy.execution["eve"].policy).Statement : st.Resource if contains(flatten([st.Action]), "secretsmanager:GetSecretValue")
+    ]), "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/core/twilio-auth-token")
+    error_message = "eve's execution role cannot read Twilio's auth token"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.core.container_definitions)[0].environment : e.name => e.value
+      if startswith(e.name, "MANDATE_TWILIO_") || startswith(e.name, "MANDATE_WHATSAPP_") || startswith(e.name, "MANDATE_EVE_TWILIO_")
+      } == {
+      MANDATE_TWILIO_ACCOUNT_SID       = "AC00000000000000000000000000000000"
+      MANDATE_WHATSAPP_FROM            = "whatsapp:+15550000000"
+      MANDATE_TWILIO_APPROVAL_TEMPLATE = "HX00000000000000000000000000000000"
+      MANDATE_EVE_TWILIO_WEBHOOK_URL   = "http://eve.mandate-dev.internal:3000/eve/v1/whatsapp/messages"
+    }
+    error_message = "the core gets the Twilio account, sender, template and the URL it re-signs over"
+  }
+  assert {
+    condition = {
+      for e in jsondecode(aws_ecs_task_definition.eve.container_definitions)[0].environment : e.name => e.value
+      if startswith(e.name, "MANDATE_TWILIO_") || startswith(e.name, "MANDATE_WHATSAPP_") || startswith(e.name, "MANDATE_EVE_TWILIO_")
+      } == {
+      MANDATE_TWILIO_ACCOUNT_SID     = "AC00000000000000000000000000000000"
+      MANDATE_WHATSAPP_FROM          = "whatsapp:+15550000000"
+      MANDATE_EVE_TWILIO_WEBHOOK_URL = "http://eve.mandate-dev.internal:3000/eve/v1/whatsapp/messages"
+    }
+    error_message = "eve gets the account, sender and webhook URL its Twilio channel verifies against"
+  }
+}
+
+run "the_core_keeps_provider_tokens_under_its_prefix_and_key_only" {
+  command = apply
+  variables {
+    channels_enabled = true
+    slack_client_id  = "1234567890.1234567890"
+  }
+
+  assert {
+    condition = jsondecode(aws_iam_role_policy.core_channels[0].policy).Statement == [
+      {
+        Effect    = "Allow"
+        Action    = "secretsmanager:CreateSecret"
+        Resource  = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/channels/*"
+        Condition = { StringEquals = { "secretsmanager:KmsKeyArn" = "arn:aws:kms:ap-south-1:000000000000:key/mock" } }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:PutSecretValue", "secretsmanager:GetSecretValue", "secretsmanager:DeleteSecret"]
+        Resource = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/channels/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Resource = "arn:aws:kms:ap-south-1:000000000000:key/mock"
+        Condition = {
+          StringEquals = { "kms:ViaService" = "secretsmanager.ap-south-1.amazonaws.com" }
+          StringLike   = { "kms:EncryptionContext:SecretARN" = "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/channels/*" }
+        }
+      },
+    ]
+    error_message = "the core creates, writes, reads and deletes secrets under mandate-dev/channels/ only, under the environment's key only"
+  }
+  assert {
+    condition     = aws_iam_role_policy.core_channels[0].role == aws_iam_role.core_task.name
+    error_message = "the task role holds it, not an execution role (tokens are read at runtime, per installation)"
+  }
+  assert {
+    condition = !anytrue([for p in [aws_iam_role_policy.core_events, aws_iam_role_policy.core_channels[0]] : anytrue([
+      for st in jsondecode(p.policy).Statement : anytrue([for a in flatten([st.Action]) : startswith(a, "secretsmanager:")]) && st.Resource != "arn:aws:secretsmanager:ap-south-1:000000000000:secret:mandate-dev/channels/*"
+    ])])
+    error_message = "no other task-role statement reaches Secrets Manager: the boot secrets stay execution-role only"
+  }
+}
+
+run "channels_need_the_slack_client_id" {
+  command = plan
+  variables {
+    channels_enabled = true
+  }
+  expect_failures = [aws_iam_role_policy.core_channels]
+}
+
+run "eve_reaches_the_private_routes_and_the_tunnel_never_does" {
+  command = apply
+  variables {
+    channels_enabled = true
+    slack_client_id  = "1234567890.1234567890"
+  }
+
+  assert {
+    condition = (
+      aws_vpc_security_group_egress_rule.eve_to_core.referenced_security_group_id == aws_security_group.core.id
+      && aws_vpc_security_group_egress_rule.eve_to_core.from_port == 8080 && aws_vpc_security_group_egress_rule.eve_to_core.to_port == 8080
+      && aws_vpc_security_group_ingress_rule.core_from_eve.referenced_security_group_id == aws_security_group.eve.id
+      && aws_vpc_security_group_ingress_rule.core_from_eve.from_port == 8080 && aws_vpc_security_group_ingress_rule.core_from_eve.to_port == 8080
+      && jsondecode(aws_ecs_task_definition.core.container_definitions)[0].portMappings == [{ containerPort = 8080, protocol = "tcp" }]
+    )
+    error_message = "eve reaches the core's :8080, where /private/v1/* is served, over the private network"
+  }
+  assert {
+    # cloudflared and tofu's regex() are both Go RE2, so this is the match the tunnel makes.
+    condition = alltrue([for p in [
+      "/v1/channels/slack/events", "/v1/channels/slack/interactions", "/v1/channels/twilio/messages",
+      "/v1/channels/slack/install/callback", "/healthz",
+    ] : can(regex(cloudflare_zero_trust_tunnel_cloudflared_config.api.config.ingress[0].path, p))])
+    error_message = "the provider webhooks and the web API stay public"
+  }
+  assert {
+    condition = !anytrue([for p in [
+      "/private/v1/sessions/report", "/private/v1/assertions/renew", "/private/v1/channels/slack/api/chat.postMessage",
+      "/private/v1/channels/slack/files/T1/F1/a.png", "/private/v1/channels/slack/uploads/u1",
+      "/private/v1/channels/twilio/api/2010-04-01/Accounts", "/private/", "/private/v1/", "//private/v1/x",
+      "/mcp", "/eve/v1/slack", "/mandate/v1/sessions", "/x/v1/y", "/healthz/private/v1/x",
+    ] : can(regex(cloudflare_zero_trust_tunnel_cloudflared_config.api.config.ingress[0].path, p))])
+    error_message = "the tunnel never admits /private/*, /mcp or eve's routes"
+  }
+  assert {
+    condition = (
+      length(cloudflare_zero_trust_tunnel_cloudflared_config.api.config.ingress) == 2
+      && cloudflare_zero_trust_tunnel_cloudflared_config.api.config.ingress[1].service == "http_status:404"
+      && cloudflare_zero_trust_tunnel_cloudflared_config.api.config.ingress[1].path == null
+    )
+    error_message = "one forwarding rule; everything else is a 404 at Cloudflare"
   }
 }

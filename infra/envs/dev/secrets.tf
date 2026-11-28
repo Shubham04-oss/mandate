@@ -13,6 +13,15 @@ locals {
     "eve/assertion-public-key"   = "Ed25519 SPKI PEM eve's route auth verifies assertions with"
     # Read by two tasks (the collector and the core), so named by neither; only telemetry_enabled wires it.
     "posthog-key" = "PostHog project API key (phc_...): OTLP export from the collector, events from the core and eve"
+    # Channels (docs/channels.md 13): wired only while channels_enabled is on (and Twilio's only with
+    # twilio_account_sid set). Per-installation bot tokens are created by the core at runtime under
+    # mandate-<env>/channels/, never here.
+    "core/slack-client-secret"  = "Slack app client secret (OAuth install and Sign in with Slack)"
+    "core/slack-signing-secret" = "Slack app signing secret: verifies Slack's webhooks at the gateway"
+    "core/decision-key"         = "32 random bytes, base64url: HMAC key of approval card decision tokens"
+    "core/twilio-auth-token"    = "Twilio auth token: verifies Twilio's webhooks and calls Twilio's API"
+    "channel-proxy-key"         = "32 random bytes, base64url: eve's key to the core's channel proxy (core and eve)"
+    "twilio-resign-key"         = "32 random bytes, base64url: the core re-signs Twilio webhooks it forwards to eve (core and eve)"
   }
 }
 
