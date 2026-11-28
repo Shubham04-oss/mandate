@@ -1197,6 +1197,10 @@ run "the_core_sends_only_as_the_domain_through_its_configuration_set" {
     error_message = "the configuration set requires TLS, tracks reputation and sends"
   }
   assert {
+    condition     = aws_sesv2_configuration_set.main[0].vdm_options[0].dashboard_options[0].engagement_metrics == "DISABLED"
+    error_message = "no open or click tracking on our email, whatever the account's VDM setting"
+  }
+  assert {
     condition = jsondecode(aws_iam_role_policy.core_email[0].policy).Statement == [
       {
         Effect   = "Allow"
