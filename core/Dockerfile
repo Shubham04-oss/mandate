@@ -79,7 +79,7 @@ RUN apt-get update \
 COPY core/sql /app/sql
 USER 10001
 ENTRYPOINT []
-CMD ["sh", "-c", "if [ -n \"${RDS_CA_PEM:-}\" ]; then printf '%s\\n' \"$RDS_CA_PEM\" > /run/mandate/rds-ca.pem; fi && mandate migrate && psql \"$MANDATE_MIGRATION_DATABASE_URL\" -v ON_ERROR_STOP=1 -v role=mandate_app -f /app/sql/app_role.sql"]
+CMD ["sh", "-c", "if [ -n \"${RDS_CA_PEM:-}\" ]; then printf '%s\\n' \"$RDS_CA_PEM\" > /run/mandate/rds-ca.pem; fi && mandate migrate && psql \"$MANDATE_MIGRATION_DATABASE_URL\" --single-transaction -v ON_ERROR_STOP=1 -v role=mandate_app -f /app/sql/app_role.sql"]
 
 # The default target is the service image.
 FROM serve
