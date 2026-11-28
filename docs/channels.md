@@ -347,11 +347,13 @@ thread.*
 | `POST /mandate/v1/sessions` (new custom channel `mandate`) | Bearer `forward` token with `thread` | `{ "target": { "kind": "web" } \| { "kind": "slack", "teamId", "channelId", "threadTs"? } \| { "kind": "whatsapp" \| "sms", "phoneNumber" }, "message"?, "history": [{ "role": "user" \| "assistant", "text" }], "idempotencyKey" }` | `202 { "sessionId"? }` | 401; 400 invalid history |
 
 `/mandate/v1/sessions` uses `ctx.to(<channel>, target).send(message, { auth, history,
-idempotencyKey })` for Slack and Twilio targets and `from("mandate:<conversation>").create({ auth,
-history })` for the web (`E/docs/channels/custom.mdx`, "hand work to another channel";
-`E/docs/channels/eve.mdx`, "Start from prior history"). eve never accepts `history` from a client
-body; here the core is the server that resolved it. Schedules and `ask_member` wakes will use the
-same route.
+idempotencyKey })` for Slack and Twilio targets and `from(<conversation>).create({ auth,
+history })` for the web (eve namespaces the address as `mandate:<conversation>`;
+`E/docs/channels/custom.mdx`, "hand work to another channel"; `E/docs/channels/eve.mdx`, "Start
+from prior history"). eve never accepts `history` from a client body; here the core is the server
+that resolved it. Schedules and `ask_member` wakes will use the same route. As built (stream C):
+a web target needs `conversation` in the forward token; a channel target needs `message` (400
+otherwise); `whatsapp` and `sms` targets answer 400 until stream E's channel file lands.
 
 The core's `EveClient` (stream A) gains `start(assertion, target, message, history, key)` for it.
 `answer` is unchanged; it is called with an `answer` token (stream B).
@@ -1193,10 +1195,17 @@ Shared seams, each with one owner:
 6. The exact Slack methods eve 1.5 calls; the final allowlist.
 7. How often eve streams (`chat.appendStream`), and the guard's latency and cost per pass.
 8. The continuation token shape for DMs, and `ctx.channel.kind` values in hooks (`slack`, `eve`,
-   `mandate`, `whatsapp`?).
+   `mandate`, `whatsapp`?). *Read from eve's source (stream C):* the kind is `channel:<file stem>`
+   (`channel:slack`, `channel:mandate`, `channel:whatsapp`) and `http` for eve's HTTP channel
+   (`E/dist/src/runtime/resolve-channel.js`, `E/dist/src/definitions/frame.js`). The token is
+   namespaced `<file stem>:<address>`, so Slack's is `slack:<channelId>:<threadTs>`, a DM included
+   (`E/dist/src/channel/channel-address.js`). The registry report carries both verbatim.
 9. Does eve dedupe Slack retries? (The core's `channel_inbound` covers it either way.)
 10. Can a connection's `getToken` read `defineState`? If not, the dynamic connection captures the
-    turn token when it is built (before each model call).
+    turn token when it is built (before each model call). *Read from eve's source (stream C):*
+    yes; `getToken` runs inside eve's context store, which `defineState` reads, and eve caches the
+    token until its `expiresAt` (`E/dist/src/runtime/connections/scoped-authorization.js`,
+    `E/dist/src/public/definitions/state.js`). Still to confirm live.
 11. The stranded-session replacement on a Slack thread after the 1.5 upgrade (`predecessor`).
 12. Twilio media URLs: which hosts serve them after redirects.
 

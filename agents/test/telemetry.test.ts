@@ -142,6 +142,20 @@ test("URLs leave without query, fragment or credentials", () => {
   assert.deepEqual(scrubAttribute({ key: "url.path", value: "/v1/x" }), { emit: true });
 });
 
+test("a channel proxy file or upload path keeps only its route", () => {
+  const file = "/private/v1/channels/slack/files/T0123-F0456/report.pdf";
+  assert.deepEqual(scrubAttribute({ key: "url.path", value: file }), {
+    replace: true,
+    value: "/private/v1/channels/slack/files/",
+  });
+  assert.deepEqual(scrubAttribute({ key: "url.full", value: `http://core:8080${file}` }), {
+    replace: true,
+    value: "http://core:8080/private/v1/channels/slack/files/",
+  });
+  const api = "/private/v1/channels/slack/api/chat.postMessage";
+  assert.deepEqual(scrubAttribute({ key: "url.path", value: api }), { emit: true });
+});
+
 const ERROR_ID = "3b241101-e2bb-4255-8caf-4136c566a962";
 
 function fakeConsole() {

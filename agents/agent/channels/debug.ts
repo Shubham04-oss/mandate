@@ -14,7 +14,8 @@ export function forcedError(request: Request, env: NodeJS.ProcessEnv = process.e
   // Same check as the eve channel; a missing key throws, which fails closed.
   const key = loadPublicKey(env.MANDATE_ASSERTION_PUBLIC_KEY);
   const token = extractBearerToken(request.headers.get("authorization"));
-  if (!token || !verifyAssertion(token, key, Math.floor(Date.now() / 1000))) {
+  const a = token ? verifyAssertion(token, key, Math.floor(Date.now() / 1000)) : null;
+  if (a?.purpose !== "turn") {
     return new Response(null, { status: 401 });
   }
   throw new Error("forced test error");
