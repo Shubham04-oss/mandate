@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Build from agents/: docker build -f agents/Dockerfile agents
-# eve needs Node 24 (agents/package.json engines).
+# eve runs on Node 26 LTS; CI's agents job uses the same major.
 FROM node:26-trixie-slim@sha256:abe7e5a82b61a8ef67b315b85497c9e65173387ccf2f4a029248184b8e020be5 AS build
 # eve's CLI sends usage data to Vercel; off in the build and at run time (owner's call, ORY-67).
 ENV EVE_TELEMETRY_DISABLED=1
