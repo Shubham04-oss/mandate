@@ -221,7 +221,8 @@ the older one goes green last, only the newest deploys. Set it to `false` (or de
 Run the workflow by hand: `gh workflow run deploy.yml --ref main`, then `gh run watch`. It builds
 and pushes the images (tagged with the commit), runs the migrate task (migrations, then
 `core/sql/app_role.sql`) and fails if it exits non-zero, then rolls the core and eve (eve only once
-`agents/` exists), following each new ECS deployment until its rollout is `COMPLETED`; `FAILED`
+`agents/` exists; eve's old task stops before the new one starts, see Upgrading eve), following
+each new ECS deployment until its rollout is `COMPLETED`; `FAILED`
 (the circuit breaker rolled it back) or 25 minutes without finishing fails the job.
 
 Each step takes the newest revision of the task definition and swaps in the new image, so after a
@@ -289,6 +290,22 @@ with `AWS_PROFILE=mumbai` and the values from `tofu output`.
 - **Migrations** only go forward; the migrate task never runs a down migration. A bad migration is
   fixed by a new one, then a deploy. Rolling code back does not roll the schema back.
 - **Stop deploying:** `gh variable set MANDATE_DEPLOY_ENABLED --body false`.
+- **eve:** rolling eve back to an earlier eve release strands the sessions the newer one started,
+  just as an upgrade does (below).
+
+## Upgrading eve
+
+eve's Postgres world serves one eve version at a time, so the eve service stops its task before
+starting the new one (`deployment_maximum_percent = 100` in `ecs.tf`): every eve deploy has a
+minute or so with no eve, and the core answers conversation requests with an error meanwhile.
+The new task runs the world's `bootstrap` (its migrations, additive) before `eve start`, so a bump
+of `@workflow/world-postgres` needs no separate step.
+
+**Upgrading eve ends open sessions.** Sessions started by the previous eve release are stranded:
+their history stays readable, but they cannot resume. A web conversation open across the upgrade
+says it has ended (eve answers `409 session_stranded`), and an approval still waiting in one can
+no longer resume the agent. Start a new conversation. Deploys that keep the eve release resume
+open sessions.
 - **Infrastructure:** revert the commit and `tofu apply`. The database has deletion protection;
   `tofu destroy` needs `db_deletion_protection = false` applied first and leaves a final snapshot
   (`db_skip_final_snapshot = true` to skip it).

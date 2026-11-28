@@ -580,6 +580,14 @@ run "services_run_on_spot_in_public_subnets_without_nat" {
   }
 }
 
+run "eve_stops_before_its_replacement_starts" {
+  command = plan
+  assert {
+    condition     = aws_ecs_service.eve.deployment_minimum_healthy_percent == 0 && aws_ecs_service.eve.deployment_maximum_percent == 100
+    error_message = "eve's Postgres world serves one eve version at a time: a deploy never overlaps two eve tasks"
+  }
+}
+
 run "spot_can_be_switched_off" {
   command = plan
   variables {

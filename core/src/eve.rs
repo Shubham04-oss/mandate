@@ -141,7 +141,7 @@ impl EveClient {
         res.json().await.map_err(|_| EveError::Malformed)
     }
 
-    // eve 1.3.0, docs/channels/eve.mdx "Start and continue a session": a create without a message
+    // eve 1.5.0, docs/channels/eve.mdx "Start and continue a session": a create without a message
     // starts no turn and, with an operationId, is made once per caller; a follow-up's idempotencyKey
     // makes a repeat return the first receipt without running the input again.
 

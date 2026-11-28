@@ -315,6 +315,10 @@ resource "aws_ecs_service" "eve" {
   service_registries {
     registry_arn = aws_service_discovery_service.this["eve"].arn
   }
+  # Stop, then start: eve's Postgres world serves one eve version at a time, and the new task's
+  # bootstrap must run with the old one stopped (eve docs, self-hosted-operations "Upgrade").
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
   deployment_circuit_breaker {
     enable   = true
     rollback = true
