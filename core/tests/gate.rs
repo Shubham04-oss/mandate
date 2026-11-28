@@ -30,6 +30,11 @@ fn who(t: &TenantId) -> Assertion {
         member: MemberId::parse("ann").unwrap(),
         agent: AgentId::parse("bot").unwrap(),
         space: None,
+        principal: None,
+        conversation: None,
+        thread: None,
+        body: None,
+        purpose: None,
         expires_at: 0,
     }
 }

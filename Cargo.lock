@@ -351,6 +351,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-secretsmanager"
+version = "1.129.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43d14c0a60caaf1f70fdd21fe4d1c4be5ddf5f3e6a467fbec30ffb90a970073a"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "fastrand",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sesv2"
 version = "1.149.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2478,6 +2501,7 @@ dependencies = [
  "aws-sdk-bedrockagentcore",
  "aws-sdk-bedrockruntime",
  "aws-sdk-eventbridgev2",
+ "aws-sdk-secretsmanager",
  "aws-sdk-sesv2",
  "aws-sdk-sqs",
  "aws-sigv4",
@@ -2490,6 +2514,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "getrandom 0.3.4",
+ "hmac",
  "http",
  "http-body-util",
  "jsonwebtoken 12.0.0",
@@ -2505,8 +2530,11 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "serde_urlencoded",
+ "sha1 0.11.0",
  "sha2",
  "sqlx",
+ "subtle",
  "tempfile",
  "thiserror",
  "time",

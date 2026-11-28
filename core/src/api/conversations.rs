@@ -187,6 +187,11 @@ impl Conversations {
             member: member.clone(),
             agent: agent.clone(),
             space: None,
+            principal: None,
+            conversation: None,
+            thread: None,
+            body: None,
+            purpose: None,
             expires_at: OffsetDateTime::now_utc().unix_timestamp() + TTL_SECS,
         }
     }
@@ -1050,7 +1055,11 @@ async fn start(
     .await?;
     events::publish(
         &mut tx,
-        events::Event::ConversationStarted { conversation: id },
+        events::Event::ConversationStarted {
+            conversation: id,
+            channel: None,
+            handoff_from: None,
+        },
     )
     .await?;
     tx.commit().await?;

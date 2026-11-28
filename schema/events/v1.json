@@ -85,12 +85,49 @@
             },
             "by": {
               "type": "string"
+            },
+            "via": {
+              "description": "Where the decision came from; absent on events from before channels.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChannelKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "approval",
             "decision",
             "by"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "The expiry sweep found it undecided past `expires_at`.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "approval.expired.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "approval": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "approval"
           ]
         }
       },
@@ -112,10 +149,335 @@
             "conversation": {
               "type": "string",
               "format": "uuid"
+            },
+            "channel": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChannelKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "handoff_from": {
+              "description": "The conversation this one continues (a handoff, or a thread whose session ended).",
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
             }
           },
           "required": [
             "conversation"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "eve replaced a stranded session; the conversation continues on the new one.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "conversation.session_replaced.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "conversation": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "conversation"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "A member spoke in the conversation for the first time.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "conversation.joined.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "conversation": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "member": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "conversation",
+            "member"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "channel.installed.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "installation": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "$ref": "#/$defs/ChannelKind"
+            },
+            "by": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "installation",
+            "kind",
+            "by"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "The installation's agent was set or cleared.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "channel.updated.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "installation": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "$ref": "#/$defs/ChannelKind"
+            },
+            "by": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "installation",
+            "kind",
+            "by"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "An admin removed it, or the provider uninstalled the app or revoked its tokens.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "channel.removed.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "installation": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "$ref": "#/$defs/ChannelKind"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            }
+          },
+          "required": [
+            "installation",
+            "kind",
+            "actor"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "channel_identity.linked.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/ChannelKind"
+            }
+          },
+          "required": [
+            "member",
+            "kind"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "The member unlinked, or was removed from the org.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "channel_identity.unlinked.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "member": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/ChannelKind"
+            },
+            "actor": {
+              "$ref": "#/$defs/Actor"
+            }
+          },
+          "required": [
+            "member",
+            "kind",
+            "actor"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "The provider accepted a card or its edit; `cause` is the event that asked for it, and an\nabsent `member` is a thread card.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "notification.sent.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/ChannelKind"
+            },
+            "cause": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "member": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "approval": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "kind",
+            "cause"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ]
+    },
+    {
+      "description": "The output guard withheld an outgoing message; an absent `member` means no single speaker.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "message.withheld.v1"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/ChannelKind"
+            },
+            "reason": {
+              "$ref": "#/$defs/WithheldReason"
+            },
+            "member": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "conversation": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "agent",
+            "kind",
+            "reason"
           ]
         }
       },
@@ -405,6 +767,24 @@
             },
             "setting": {
               "$ref": "#/$defs/Setting"
+            },
+            "space": {
+              "description": "The space a space-scoped setting was changed for.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "description": "The channel kind a per-kind setting was changed for.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChannelKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -519,6 +899,15 @@
         "denied"
       ]
     },
+    "ChannelKind": {
+      "type": "string",
+      "enum": [
+        "web",
+        "slack",
+        "whatsapp",
+        "sms"
+      ]
+    },
     "Actor": {
       "description": "Who caused a lifecycle change.",
       "oneOf": [
@@ -564,6 +953,14 @@
         }
       ]
     },
+    "WithheldReason": {
+      "description": "Why the output guard withheld an outgoing message.",
+      "type": "string",
+      "enum": [
+        "guard_blocked",
+        "guard_error"
+      ]
+    },
     "SignInMethod": {
       "description": "How a person proved who they are; a later step (an emailed code, two-step) doesn't change it.",
       "type": "string",
@@ -580,6 +977,31 @@
           "description": "The member turned two-step (TOTP) on.",
           "type": "string",
           "const": "two_step"
+        },
+        {
+          "description": "`channels.streaming` (docs/settings.md), with the `kind` it applies to.",
+          "type": "string",
+          "const": "channel_streaming"
+        },
+        {
+          "description": "`threads.multiplayer`, for the org or one `space`.",
+          "type": "string",
+          "const": "thread_multiplayer"
+        },
+        {
+          "description": "`spaces.guest_tool_calls`, for the org or one `space`.",
+          "type": "string",
+          "const": "guest_tool_calls"
+        },
+        {
+          "description": "The member's `approvals.channels`.",
+          "type": "string",
+          "const": "approval_channels"
+        },
+        {
+          "description": "`approvals.thread_cards`, for the org or one `space`.",
+          "type": "string",
+          "const": "thread_approval_cards"
         }
       ]
     },

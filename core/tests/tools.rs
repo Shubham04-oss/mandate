@@ -41,6 +41,11 @@ fn who() -> Assertion {
         member: MemberId::parse("m1").unwrap(),
         agent: AgentId::parse("a1").unwrap(),
         space: None,
+        principal: None,
+        conversation: None,
+        thread: None,
+        body: None,
+        purpose: None,
         expires_at: 0,
     }
 }

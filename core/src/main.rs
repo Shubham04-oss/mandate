@@ -156,6 +156,11 @@ fn dev_assert(
         member,
         agent,
         space,
+        principal: None,
+        conversation: None,
+        thread: None,
+        body: None,
+        purpose: None,
         expires_at: OffsetDateTime::now_utc().unix_timestamp() + TTL_SECS,
     };
     println!("{}", sign(&a, &key));

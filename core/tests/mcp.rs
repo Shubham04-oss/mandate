@@ -92,6 +92,11 @@ fn token(t: &TenantId, expires_at: i64) -> String {
         member: MemberId::parse("ann").unwrap(),
         agent: AgentId::parse("bot").unwrap(),
         space: None,
+        principal: None,
+        conversation: None,
+        thread: None,
+        body: None,
+        purpose: None,
         expires_at,
     };
     assertion::sign(&a, &key())
@@ -207,6 +212,11 @@ async fn missing_or_bad_assertion_is_401() {
             member: MemberId::parse("ann").unwrap(),
             agent: AgentId::parse("bot").unwrap(),
             space: None,
+            principal: None,
+            conversation: None,
+            thread: None,
+            body: None,
+            purpose: None,
             expires_at: i64::MAX,
         },
         &SigningKey::from_bytes(&[8; 32]),

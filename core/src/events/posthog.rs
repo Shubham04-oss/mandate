@@ -1,7 +1,7 @@
 //! Sends the core's product events to PostHog (EU), so usage is counted where it happens rather
 //! than in the browser. Ids and enums only: every property below is built field by field, never
 //! by copying `data`, so a new field can't reach PostHog without being added here.
-use super::{Actor, Decision, Envelope, Event, Handler, HandlerError, Setting, Source};
+use super::{Actor, Decision, Envelope, Event, Handler, HandlerError, Source};
 use crate::store::Tx;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
@@ -68,6 +68,7 @@ fn capture(env: &Envelope, event: &Event) -> Value {
             approval,
             decision,
             by,
+            via,
         } => {
             props.insert("approval_id".into(), id(approval));
             let outcome = match decision {
@@ -75,11 +76,107 @@ fn capture(env: &Envelope, event: &Event) -> Value {
                 Decision::Denied => "denied",
             };
             props.insert("outcome".into(), outcome.into());
+            if let Some(via) = via {
+                props.insert("channel".into(), via.as_str().into());
+            }
             ("approval_decided", Some(by.as_str()))
         }
-        Event::ConversationStarted { conversation } => {
+        Event::ApprovalExpired { approval } => {
+            props.insert("approval_id".into(), id(approval));
+            ("approval_expired", None)
+        }
+        Event::ConversationStarted {
+            conversation,
+            channel,
+            handoff_from,
+        } => {
             props.insert("conversation_id".into(), id(conversation));
+            if let Some(channel) = channel {
+                props.insert("channel".into(), channel.as_str().into());
+            }
+            if let Some(from) = handoff_from {
+                props.insert("handoff_from_id".into(), id(from));
+            }
             ("conversation_started", None)
+        }
+        Event::ConversationSessionReplaced { conversation } => {
+            props.insert("conversation_id".into(), id(conversation));
+            ("conversation_session_replaced", None)
+        }
+        Event::ConversationJoined {
+            conversation,
+            member,
+        } => {
+            props.insert("conversation_id".into(), id(conversation));
+            ("conversation_joined", Some(member.as_str()))
+        }
+        Event::ChannelInstalled {
+            installation,
+            kind,
+            by,
+        }
+        | Event::ChannelUpdated {
+            installation,
+            kind,
+            by,
+        } => {
+            props.insert("installation_id".into(), id(installation));
+            props.insert("channel".into(), kind.as_str().into());
+            let name = match event {
+                Event::ChannelInstalled { .. } => "channel_installed",
+                _ => "channel_updated",
+            };
+            (name, Some(by.as_str()))
+        }
+        Event::ChannelRemoved {
+            installation,
+            kind,
+            actor,
+        } => {
+            props.insert("installation_id".into(), id(installation));
+            props.insert("channel".into(), kind.as_str().into());
+            ("channel_removed", actor_member(actor, &mut props))
+        }
+        Event::ChannelIdentityLinked { member, kind } => {
+            props.insert("channel".into(), kind.as_str().into());
+            ("channel_linked", Some(member.as_str()))
+        }
+        Event::ChannelIdentityUnlinked {
+            member,
+            kind,
+            actor,
+        } => {
+            props.insert("member_id".into(), member.as_str().into());
+            props.insert("channel".into(), kind.as_str().into());
+            ("channel_unlinked", actor_member(actor, &mut props))
+        }
+        Event::NotificationSent {
+            kind,
+            cause,
+            member,
+            approval,
+        } => {
+            props.insert("channel".into(), kind.as_str().into());
+            props.insert("cause_event_id".into(), id(cause));
+            if let Some(approval) = approval {
+                props.insert("approval_id".into(), id(approval));
+            }
+            ("notification_sent", member.as_ref().map(|m| m.as_str()))
+        }
+        Event::MessageWithheld {
+            agent,
+            kind,
+            reason,
+            member,
+            conversation,
+        } => {
+            props.insert("agent_id".into(), agent.as_str().into());
+            props.insert("channel".into(), kind.as_str().into());
+            props.insert("reason".into(), reason.as_str().into());
+            if let Some(conversation) = conversation {
+                props.insert("conversation_id".into(), id(conversation));
+            }
+            ("message_withheld", member.as_ref().map(|m| m.as_str()))
         }
         Event::ConversationFinished { conversation } => {
             props.insert("conversation_id".into(), id(conversation));
@@ -133,11 +230,19 @@ fn capture(env: &Envelope, event: &Event) -> Value {
             };
             (name, Some(member.as_str()))
         }
-        Event::SettingChanged { by, setting } => {
-            let setting = match setting {
-                Setting::TwoStep => "two_step",
-            };
-            props.insert("setting".into(), setting.into());
+        Event::SettingChanged {
+            by,
+            setting,
+            space,
+            kind,
+        } => {
+            props.insert("setting".into(), setting.as_str().into());
+            if let Some(space) = space {
+                props.insert("space_id".into(), space.as_str().into());
+            }
+            if let Some(kind) = kind {
+                props.insert("channel".into(), kind.as_str().into());
+            }
             ("settings_changed", Some(by.as_str()))
         }
     };
@@ -217,7 +322,7 @@ impl Posthog {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::events::{EventType, samples};
+    use crate::events::{EventType, Setting, samples};
     use crate::ids::TenantId;
     use time::OffsetDateTime;
     use uuid::Uuid;
@@ -263,6 +368,7 @@ pub(crate) mod tests {
             approval: Uuid::nil(),
             decision: Decision::Denied,
             by: m.clone(),
+            via: None,
         };
         let c = capture(&env(&decided), &decided);
         assert_eq!(c["event"], "approval_decided");
@@ -310,6 +416,8 @@ pub(crate) mod tests {
                 Event::SettingChanged {
                     by: m.clone(),
                     setting: Setting::TwoStep,
+                    space: None,
+                    kind: None,
                 },
                 "settings_changed",
                 ("setting", Some("two_step")),
@@ -322,6 +430,31 @@ pub(crate) mod tests {
             assert!(c["properties"].get("$process_person_profile").is_none());
             assert_eq!(c["properties"].get(prop).and_then(Value::as_str), value);
         }
+    }
+
+    #[test]
+    fn channel_events_name_the_channel_and_a_thread_card_is_no_ones() {
+        use crate::events::ChannelKind;
+        let thread_card = Event::NotificationSent {
+            kind: ChannelKind::Whatsapp,
+            cause: Uuid::nil(),
+            member: None,
+            approval: Some(Uuid::nil()),
+        };
+        let c = capture(&env(&thread_card), &thread_card);
+        assert_eq!(c["event"], "notification_sent");
+        assert_eq!(c["properties"]["channel"], "whatsapp");
+        assert_eq!(c["distinct_id"], "organization:acme");
+
+        let decided = Event::ApprovalDecided {
+            approval: Uuid::nil(),
+            decision: Decision::Approved,
+            by: crate::ids::MemberId::parse("m1").unwrap(),
+            via: Some(ChannelKind::Slack),
+        };
+        let c = capture(&env(&decided), &decided);
+        assert_eq!(c["properties"]["channel"], "slack");
+        assert_eq!(c["distinct_id"], "m1");
     }
 
     /// A fake PostHog answering `status`; returns its `/batch/` URL and the bodies it got.

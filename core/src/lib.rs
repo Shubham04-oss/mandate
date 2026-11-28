@@ -1,5 +1,6 @@
 pub mod api;
 pub mod assertion;
+pub mod channels;
 pub mod email;
 pub mod eve;
 pub mod events;
@@ -10,6 +11,7 @@ pub mod identity;
 pub mod ids;
 pub mod mcp;
 pub mod policy;
+pub mod settings;
 pub mod store;
 pub mod telemetry;
 pub mod tools;

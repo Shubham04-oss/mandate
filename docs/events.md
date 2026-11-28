@@ -42,9 +42,12 @@ Every type the core publishes. A test fails if one is missing here or listed her
 
 | Type | `data` | Published by | Subscribers |
 | --- | --- | --- | --- |
-| `approval.requested.v1` | `approval`, `agent` | `store::request_approval`, for a new approval only | `posthog`, `email` |
-| `approval.decided.v1` | `approval`, `decision`, `by` | `api::approvals::decide_approval` | `agent-resume`, `posthog` |
-| `conversation.started.v1` | `conversation` | `api::conversations` (start) | `posthog` |
+| `approval.requested.v1` | `approval`, `agent` | `store::request_approval`, for a new approval only | `posthog`, `email`, `approval-notify` |
+| `approval.decided.v1` | `approval`, `decision`, `by`, + optional `via` | `api::approvals::decide_approval` | `agent-resume`, `card-update`, `posthog` |
+| `approval.expired.v1` | `approval` | the expiry sweep (`api::approvals`) | `agent-resume`, `card-update`, `posthog` |
+| `conversation.started.v1` | `conversation`, + optional `channel`, `handoff_from` | `api::conversations` (start), `channels::registry` (report, handoff) | `posthog` |
+| `conversation.session_replaced.v1` | `conversation` | `channels::registry` | `posthog` |
+| `conversation.joined.v1` | `conversation`, `member` | `channels::registry` (turn report) | `posthog` |
 | `conversation.finished.v1` | `conversation` | `api::conversations` (finish) | `posthog` |
 | `grant.created.v1` | `grant` | `api::grants` (create) | `posthog` |
 | `grant.revoked.v1` | `grant` | `api::grants` (revoke) | `posthog` |
@@ -55,16 +58,25 @@ Every type the core publishes. A test fails if one is missing here or listed her
 | `member.signed_up.v1` | `member`, `method` | sign-up and first sign-in (`api::auth`) | `posthog` |
 | `member.signed_in.v1` | `member`, `method` | every new session (`api::auth`) | `posthog` |
 | `organization.chosen.v1` | `member` | the organization picker (`api::auth`) | `posthog` |
-| `setting.changed.v1` | `by`, `setting` | turning two-step on (`api::auth`) | `posthog` |
+| `setting.changed.v1` | `by`, `setting`, + optional `space`, `kind` | turning two-step on (`api::auth`); `settings` (`PUT`, `DELETE /v1/settings/...`) | `posthog` |
 | `email.sent.v1` | `member`, `template`, `cause` | the `email` subscriber, once SES accepts an email (`cause` is the event that asked for it) | `posthog` |
 | `email.bounced.v1` | `member`, `template` | the SES feedback reader, on a permanent bounce | `posthog` |
 | `email.complained.v1` | `member`, `template` | the SES feedback reader, on a complaint | `posthog` |
+| `channel.installed.v1` | `installation`, `kind`, `by` | `channels::identity` (install callback, enable) | `posthog` |
+| `channel.updated.v1` | `installation`, `kind`, `by` | `channels::identity` (set agent) | `posthog` |
+| `channel.removed.v1` | `installation`, `kind`, `actor` | `channels::identity` (admin), `channels::gateway` (Slack lifecycle) | `channel-cleanup`, `posthog` |
+| `channel_identity.linked.v1` | `member`, `kind` | `channels::identity` (link callback, verify) | `posthog` |
+| `channel_identity.unlinked.v1` | `member`, `kind`, `actor` | `channels::identity` (unlink; member removal in directory sync) | `posthog` |
+| `notification.sent.v1` | `kind`, `cause`, + optional `member`, `approval` | `channels::notify`, once the provider accepts a card or its edit (`cause` is the event that asked; no `member` is a thread card) | `posthog` |
+| `message.withheld.v1` | `agent`, `kind`, `reason`, + optional `member`, `conversation` | `channels::proxy`; `api::conversations` (relay) | `posthog` |
 
 `member.*` and `organization.created.v1` are also written to `lifecycle_log` in the same
 transaction. `email.bounced.v1` and `email.complained.v1` come from outside (SES, through
 the feedback queue only its EventBridge rule may write to) and are published by the core after it
 suppresses the address, as rule 8 of ORY-70 asks of outside sources. Subscribers and the types they take are `local.consumers` in
-`infra/envs/dev/events.tf`; the `email` subscriber exists only while `email_enabled` is on.
+`infra/envs/dev/events.tf`; the `email` subscriber exists only while `email_enabled` is on, and
+`approval-notify`, `card-update` and `channel-cleanup` only while `channels_enabled` is on
+([channels.md](channels.md), section 10.3).
 
 ## Adding an event or a subscriber
 
