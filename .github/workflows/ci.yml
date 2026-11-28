@@ -60,8 +60,18 @@ jobs:
           test -n "$bin"
           sudo install -m 0755 "$bin" /usr/local/bin/cvc5
           cvc5 --version
+      # main's event schema, so the check can refuse a change that isn't additive (docs/events.md).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: base
+          persist-credentials: false
+          sparse-checkout: schema/events
+          sparse-checkout-cone-mode: false
       - name: Check
         run: scripts/check.sh
+        env:
+          MANDATE_EVENTS_BASE_SCHEMA: ${{ github.workspace }}/base/schema/events/v1.json
 
   agents:
     runs-on: ubuntu-latest

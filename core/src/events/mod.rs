@@ -1,6 +1,7 @@
 //! Core events: a versioned envelope, written to the outbox in the caller's transaction and
 //! signed when it is sent. `data` carries ids only, never text, arguments, emails or tokens.
 pub mod consume;
+pub mod contract;
 pub mod email;
 pub mod posthog;
 pub mod publisher;
@@ -547,6 +548,22 @@ mod tests {
             };
             assert_eq!(Event::from_envelope(&env).unwrap(), e);
         }
+    }
+
+    #[test]
+    fn every_event_type_is_in_the_catalog_and_nothing_else_is() {
+        let doc = include_str!("../../../docs/events.md");
+        let catalog = &doc[doc.find("## Catalog").unwrap()..doc.find("## Adding").unwrap()];
+        let listed: std::collections::BTreeSet<&str> = catalog
+            .lines()
+            .filter_map(|l| l.strip_prefix("| `")?.split('`').next())
+            .collect();
+        let published: std::collections::BTreeSet<&str> =
+            samples().iter().map(Event::event_type).collect();
+        assert_eq!(
+            listed, published,
+            "docs/events.md's catalog and Event disagree"
+        );
     }
 
     #[test]

@@ -843,6 +843,14 @@ run "alarms_cover_every_dlq_and_service_with_no_default_subscriber" {
     error_message = "a service that reports nothing is down"
   }
   assert {
+    condition     = keys(aws_cloudwatch_metric_alarm.consumer_stuck) == ["agent-resume"]
+    error_message = "every consumer queue that is read has a stuck alarm; the unread posthog queue has none while telemetry is off"
+  }
+  assert {
+    condition     = alltrue([for a in aws_cloudwatch_metric_alarm.consumer_stuck : a.metric_name == "ApproximateAgeOfOldestMessage" && a.threshold == 900])
+    error_message = "a stuck consumer with the default 5 receives is one whose oldest message is over 15 minutes old"
+  }
+  assert {
     condition     = length(aws_sns_topic_subscription.alarm_email) == 0
     error_message = "no subscription is created unless alarm_email is set"
   }
@@ -916,6 +924,15 @@ run "the_collector_is_the_only_way_out_for_telemetry" {
   command = apply
   variables {
     telemetry_enabled = true
+  }
+
+  assert {
+    condition     = keys(aws_cloudwatch_metric_alarm.consumer_stuck) == ["agent-resume", "posthog"]
+    error_message = "with telemetry on, the posthog queue is read, so it gets a stuck alarm too"
+  }
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.consumer_stuck["posthog"].threshold == 50 * 60 + 300
+    error_message = "the posthog alarm waits out its 50 retries (50 minutes) plus 5 before firing"
   }
 
   assert {
@@ -1175,6 +1192,16 @@ run "the_core_sends_only_as_the_domain_through_its_configuration_set" {
       && keys(aws_cloudwatch_metric_alarm.dlq) == ["agent-resume", "email", "posthog"]
     )
     error_message = "the email consumer takes approval.requested.v1, rides out about 20 minutes of SES outage, and its DLQ alarms"
+  }
+  assert {
+    condition = (
+      keys(aws_cloudwatch_metric_alarm.consumer_stuck) == ["agent-resume", "email", "email-feedback"]
+      && aws_cloudwatch_metric_alarm.consumer_stuck["email"].threshold == 20 * 60 + 300
+      && aws_cloudwatch_metric_alarm.consumer_stuck["email"].dimensions == tomap({ QueueName = "mandate-dev-email.fifo" })
+      && aws_cloudwatch_metric_alarm.consumer_stuck["email-feedback"].threshold == 900
+      && aws_cloudwatch_metric_alarm.consumer_stuck["email-feedback"].dimensions == tomap({ QueueName = "mandate-dev-email-feedback" })
+    )
+    error_message = "the email queue alarms once its 20 retries (20 minutes) plus 5 are over, and the feedback queue after 15 minutes"
   }
   assert {
     condition = {
